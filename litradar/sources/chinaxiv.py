@@ -4,9 +4,11 @@ are mostly Chinese.
 
 Verified live on 2026-10-17. The main site's own OAI endpoint (chinaxiv.org/oai/request) answers
 "Sorry! You have no right to access this web." (IP allow-list) and there is no RSS feed (/rss,
-/rss.xml, /feed -> 404), so the documented aggregator interface is used instead. It is advertised in the
-aggregator's help page ("OAI-PMH 2.0 standard interface … http://global.chinaxiv.org/oaiapi/getdata",
-contact eprint@mail.las.ac.cn):
+/rss.xml, /feed -> 404), so the global aggregator's public OAI-PMH 2.0 endpoint is used instead. It was
+verified live (ListRecords with startTime/endTime and resumptionToken; Identify answers an OAI-PMH 2.0
+envelope). No vendor documentation for it is reachable to a scripted client: the aggregator's home page
+is a 2 KB JavaScript shell and /help, /help/index and /about answer HTTP 500, so the interface below is
+documented from live behaviour, not from a help page:
 
   GET https://global.chinaxiv.org/oaiapi/getdata
       verb=ListRecords  metadataPrefix=oai_dc  source=chinaxiv

@@ -40,23 +40,56 @@ def _gsa_hit(acc, cra, title, platform, strategy="RNASeq", source="TRANSCRIPTOMI
     )
 
 
-def _gsa_page(total, hits, facets=True):
+_LIVE_BLOCK_ORDER = ["center", "downloadable", "fileType", "platform", "source", "strategy", "selection"]
+
+
+def _facet_block(kind, counts):
+    items = "".join(f'<li class="classification_option"><a onclick="selectSource(\'{v}\', \'{kind}\')">{v}</a> ({n})</li>' for v, n in counts.items())
+    return f'<div class="block_index"><ul class="{kind}_block"><span class="index_title">{kind}</span>{items}</ul></div>'
+
+
+def _gsa_page(total, hits, facets=True, facet_counts=None):
+    """A results page. `facet_counts` = {block kind: {value: n}} builds a custom sidebar (partition tests);
+    otherwise the default sidebar mirrors the live markup quirks."""
     side = ""
-    if facets:
-        # mirrors the live sidebar: <a onclick="selectSource('X', 'platform')">X</a> (N)
+    if facet_counts is not None:
+        side = "".join(_facet_block(k, facet_counts[k]) for k in _LIVE_BLOCK_ORDER if k in facet_counts)
+    elif facets:
+        # mirrors the live sidebar (2026-10-17): seven blocks in page order, <a onclick="selectSource('X', 'kind')">X</a> (N),
+        # with the whitespace variants the server emits (value on its own line; "</a>(N)" without a space)
         side = (
-            '<ul class="platform_block"><span class="index_title">Platform</span>'
+            '<div class="block_index"><ul class="center_block"><span class="index_title">Center</span>'
+            '<li class="classification_option"><a onclick="selectSource(\'NGDC\', \'center\')">NGDC</a> (33480) <span style="color: #0ea432">✔</span></li></ul></div>'
+            '<div class="block_index"><ul class="downloadable_block"><span class="index_title">Downloadable</span>'
+            '<li class="classification_option"><a onclick="selectSource(\'1\', \'downloadable\')">\n Downloadable\n </a>\n (33480)</li></ul></div>'
+            '<div class="block_index"><ul class="fileType_block"><span class="index_title">File type</span>'
+            '<li class="classification_option"><a onclick="selectSource(\'fastq\', \'fileType\')">fastq</a> (33400)</li>'
+            '<li class="classification_option"><a onclick="selectSource(\'bam\', \'fileType\')">bam</a> (80)</li></ul></div>'
+            '<div class="block_index"><ul class="platform_block"><span class="index_title">Platform</span>'
             '<li class="classification_option"><a onclick="selectSource(\'BGISEQ\', \'platform\')">BGISEQ</a> (11014)</li>'
             '<li class="classification_option"><a onclick="selectSource(\'ILLUMINA\', \'platform\')">ILLUMINA</a> (21891)</li>'
-            '<li class="classification_option"><a onclick="selectSource(\'GENEMIND\', \'platform\')">GENEMIND</a> (11)</li></ul>'
-            '<ul class="strategy_block"><span class="index_title">Strategy</span><li><a onclick="x">Genome</a> (11203)</li><li><a onclick="x">RNASeq</a> (10380)</li></ul>'
-            '<ul class="source_block"><span class="index_title">Source</span><li><a onclick="x">METAGENOMIC</a> (11660)</li></ul>'
-            '<ul class="center_block"><span class="index_title">Center</span><li><a onclick="x">NGDC</a> (33480) <span style="color: #0ea432">✔</span></li></ul>'
+            '<li class="classification_option"><a onclick="selectSource(\'GENEMIND\', \'platform\')">GENEMIND</a> (11)</li></ul></div>'
+            '<div class="block_index"><ul class="source_block"><span class="index_title">Source</span>'
+            '<li class="classification_option"><a onclick="selectSource(\'METAGENOMIC\',\'source\')">\n METAGENOMIC\n </a>(11660)</li></ul></div>'
+            '<div class="block_index"><ul class="strategy_block"><span class="index_title">Strategy</span>'
+            '<li class="classification_option"><a onclick="selectSource(\'Genome\', \'strategy\')">Genome</a> (11203)</li>'
+            '<li class="classification_option"><a onclick="selectSource(\'RNASeq\', \'strategy\')">RNASeq</a> (10380)</li></ul></div>'
+            '<div class="block_index"><ul class="selection_block"><span class="index_title">Selection</span>'
+            '<li class="classification_option"><a onclick="selectSource(\'PCR\', \'selection\')">PCR</a> (20000)</li>'
+            '<li class="classification_option"><a onclick="selectSource(\'RANDOM\', \'selection\')">RANDOM</a> (5000)</li></ul></div>'
         )
     return (
         "<html><body>" + side + f'<li class="total" style="color: brown">Total Items:&nbsp;{total}</li>'
         '<div class="result_area">' + "".join(hits) + "</div></body></html>"
     )
+
+
+# the two non-result shapes the live server returns with HTTP 200 (captured 2026-10-17)
+EMPTY_PAGE = ('<html><head><title>Search - GSA - CNCB-NGDC</title></head><body><input type="hidden" name="searchTerm"/>'
+              '<div class="search_result"><span>No items found</span> <a onclick="clearAll()">clear all</a></div></body></html>')
+CHALLENGE_PAGE = ('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>正在进行安全检查...</title></head><body><div class="spinner"></div>'
+                  '<h2>正在验证您的浏览器，请稍候...</h2><script>document.cookie = "auth_token=x; path=/; max-age=3600";'
+                  'setTimeout(function(){window.location.reload();}, 1000);</script></body></html>')
 
 
 def test_gsa_parse_hits_facets_and_total():
@@ -68,7 +101,12 @@ def test_gsa_parse_hits_facets_and_total():
     assert hits[1]["source"] == "GENOMIC" and hits[1]["selection"] == "PCR"
     facets = gsa.parse_facets(html)
     assert facets["platform"] == {"BGISEQ": 11014, "ILLUMINA": 21891, "GENEMIND": 11}
-    assert facets["strategy"]["Genome"] == 11203 and facets["center"]["NGDC"] == 33480
+    # every live block is its own key: selection values do not leak into strategy, file types not into center
+    assert facets["strategy"] == {"Genome": 11203, "RNASeq": 10380}
+    assert facets["selection"] == {"PCR": 20000, "RANDOM": 5000}
+    assert facets["center"] == {"NGDC": 33480} and facets["downloadable"] == {"Downloadable": 33480}
+    assert facets["file_type"] == {"fastq": 33400, "bam": 80} and facets["source"] == {"METAGENOMIC": 11660}
+    assert set(facets) == {"center", "downloadable", "file_type", "platform", "source", "strategy", "selection"}
     assert gsa.release_term("2026-09-17", "2026-10-17") == '"09/17/2026 - 10/17/2026"[ReleaseDate]'
 
 
@@ -76,34 +114,127 @@ def test_gsa_platform_histogram_and_empty_or_malformed():
     http = FakeHttp([_gsa_page(33480, [])])
     h = gsa.platform_histogram(http, "2026-09-17", "2026-10-17")
     assert h["total"] == 33480 and h["platforms"]["BGISEQ"] == 11014 and h["center"] == "NGDC"
+    assert h["strategies"] == {"Genome": 11203, "RNASeq": 10380} and h["selections"]["PCR"] == 20000 and h["file_types"]["bam"] == 80
     assert http.calls[0][1]["centerSelectedItem"] == "NGDC" and http.calls[0][1]["from"] == 1
-    # unavailable page -> zeros, no exception
+    # unavailable page (client exhausted its retries) -> zeros, no exception
     assert gsa.platform_histogram(FakeHttp([None]), "2026-10-01", "2026-10-02")["total"] == 0
-    # malformed HTML -> nothing parsed
+    # the genuine empty page ("No items found", no total, no facets) -> zero without an error
+    assert gsa.platform_histogram(FakeHttp([EMPTY_PAGE]), "2027-06-01", "2027-06-01") == {
+        "total": 0, "platforms": {}, "strategies": {}, "sources": {}, "selections": {}, "file_types": {}, "center": "NGDC"}
+    http = FakeHttp([EMPTY_PAGE, EMPTY_PAGE])
+    assert list(gsa.fetch(http, "2027-06-01", "2027-06-02")) == [] and len(http.calls) == 2  # one request per empty day
+    # malformed fragments -> nothing parsed by the pure parsers
     assert gsa.parse_hits("<html><div class='garbage'>") == [] and gsa.parse_facets("not html") == {} and gsa.parse_total("") == 0
-    assert list(gsa.fetch(FakeHttp(["<html>no results here</html>"]), "2026-10-16", "2026-10-16")) == []
+    assert gsa.check_search_page(_gsa_page(0, []), "x") is True and gsa.check_search_page(EMPTY_PAGE, "x") is False
 
 
-def test_gsa_fetch_pages_per_day_and_stops_on_repeat():
-    day1_p1 = _gsa_page(3, [_gsa_hit("CRX1", "CRA1", "a", "BGISEQ"), _gsa_hit("CRX2", "CRA1", "b", "ILLUMINA")])
-    day1_p2 = _gsa_page(3, [_gsa_hit("CRX3", "CRA2", "c", "GENEMIND", "Genome")])
-    day2_p1 = _gsa_page(2, [_gsa_hit("CRX4", "CRA3", "d", "PACBIO_SMRT")])
-    day2_p2 = _gsa_page(2, [_gsa_hit("CRX4", "CRA3", "d", "PACBIO_SMRT")])  # server repeats the page -> stop
-    http = FakeHttp([day1_p1, day1_p2, day2_p1, day2_p2])
+def test_gsa_challenge_page_or_markup_change_raises():
+    """A 200 response that is neither a results page nor the empty page must not become a silent zero."""
+    with pytest.raises(RuntimeError, match="JavaScript challenge page"):
+        list(gsa.fetch(FakeHttp([CHALLENGE_PAGE]), "2026-10-16", "2026-10-16"))
+    with pytest.raises(RuntimeError, match="markup change"):
+        gsa.platform_histogram(FakeHttp(["<html><body><div class='garbage'>no total here</div></body></html>"]), "2026-10-01", "2026-10-02")
+    with pytest.raises(RuntimeError, match="2026-10-16 page 1"):
+        list(gsa.fetch(FakeHttp(["<html>no results here</html>"]), "2026-10-16", "2026-10-16"))
+    # records of an earlier day are yielded before the error surfaces for the day that broke
+    http = FakeHttp([_gsa_page(1, [_gsa_hit("CRX1", "CRA1", "a", "BGISEQ")]), CHALLENGE_PAGE])
+    got = []
+    with pytest.raises(RuntimeError, match="2026-10-16 page 1"):
+        for r in gsa.fetch(http, "2026-10-15", "2026-10-16"):
+            got.append(r.accession)
+    assert got == ["CRX1"] and len(http.calls) == 2
+
+
+def test_gsa_fetch_probes_then_fetches_each_day_as_one_sized_page():
+    """The server's page order is unstable across pages, so a day is never walked page by page: a probe of
+    `page_size` hits, then (if the day is bigger) ONE page sized to the day's total."""
+    day1_probe = _gsa_page(3, [_gsa_hit("CRX1", "CRA1", "a", "BGISEQ"), _gsa_hit("CRX2", "CRA1", "b", "ILLUMINA")])
+    day1_full = _gsa_page(3, [_gsa_hit("CRX2", "CRA1", "b", "ILLUMINA"), _gsa_hit("CRX1", "CRA1", "a", "BGISEQ"), _gsa_hit("CRX3", "CRA2", "c", "GENEMIND", "Genome")])
+    day2_probe = _gsa_page(1, [_gsa_hit("CRX4", "CRA3", "d", "PACBIO_SMRT")])  # fits the probe: complete in one request
+    http = FakeHttp([day1_probe, day1_full, day2_probe])
     recs = list(gsa.fetch(http, "2026-10-15", "2026-10-16", page_size=2))
-    assert [r.accession for r in recs] == ["CRX1", "CRX2", "CRX3", "CRX4"]
+    assert [r.accession for r in recs] == ["CRX2", "CRX1", "CRX3", "CRX4"]  # the sized page is the source; no duplicates
     assert recs[0].archive == "gsa" and recs[0].first_public == "2026-10-15" and recs[3].first_public == "2026-10-16"
-    assert recs[0].instrument_model == "BGISEQ (model n/a)" and recs[0].platform == "BGISEQ" and recs[0].study_accession == "CRA1"
-    assert recs[2].platform == "GENEMIND" and recs[2].library_strategy == "Genome" and recs[0].center_name == "NGDC"
-    # day 1: page 2 was short (1 < page_size) so paging stopped; day 2: total reached after page 1 -> 3 requests total
-    assert len(http.calls) == 3
-    assert http.calls[0][1]["searchTerm"] == '"10/15/2026 - 10/15/2026"[ReleaseDate]' and http.calls[1][1]["from"] == 2
+    assert recs[1].instrument_model == "BGISEQ (model n/a)" and recs[1].platform == "BGISEQ" and recs[1].study_accession == "CRA1"
+    assert recs[2].platform == "GENEMIND" and recs[2].library_strategy == "Genome"
+    assert recs[0].center_name == ""  # the search hit names no submitting centre; the NGDC facet is not one
+    assert len(http.calls) == 3 and http.payloads == []
+    assert http.calls[0][1]["searchTerm"] == '"10/15/2026 - 10/15/2026"[ReleaseDate]' and http.calls[0][1]["pageSize"] == 2 and http.calls[0][1]["from"] == 1
+    assert http.calls[1][1]["pageSize"] == 3 and http.calls[1][1]["from"] == 1 and "platformSelectedItem" not in http.calls[1][1]
+    assert http.calls[2][1]["searchTerm"] == '"10/16/2026 - 10/16/2026"[ReleaseDate]' and http.calls[2][1]["pageSize"] == 2
 
 
-def test_gsa_fetch_respects_max_records():
+def test_gsa_fetch_multi_day_sweep_completes_every_day():
+    """Regression for the per-day stop: an earlier version compared the cross-day `seen` set with the
+    current day's total and stopped day 2 after its first page. Day 1 = 2 records (fits the probe);
+    day 2 = 4 records -> probe + one sized page; all 6 come back."""
+    day1 = _gsa_page(2, [_gsa_hit("CRX1", "CRA1", "a", "BGISEQ"), _gsa_hit("CRX2", "CRA1", "b", "ILLUMINA")])
+    day2_probe = _gsa_page(4, [_gsa_hit("CRX3", "CRA2", "c", "ILLUMINA"), _gsa_hit("CRX4", "CRA2", "d", "ILLUMINA")])
+    day2_full = _gsa_page(4, [_gsa_hit(f"CRX{i}", "CRA2", "x", "ILLUMINA") for i in (3, 4, 5, 6)])
+    http = FakeHttp([day1, day2_probe, day2_full])
+    recs = list(gsa.fetch(http, "2026-10-15", "2026-10-16", page_size=2))
+    assert [r.accession for r in recs] == ["CRX1", "CRX2", "CRX3", "CRX4", "CRX5", "CRX6"]
+    assert [r.first_public for r in recs] == ["2026-10-15"] * 2 + ["2026-10-16"] * 4
+    assert len(http.calls) == 3 and http.payloads == [] and [c[1]["from"] for c in http.calls] == [1, 1, 1]
+
+
+def test_gsa_fetch_partitions_a_large_day_by_facets():
+    """A day above `max_page_size` is split on the facet counts of its probe page (platform first), a
+    sub-partition that is still too big is probed and split on the next dimension (strategy), and every
+    leaf is one page sized to its count; the facet filters ride on the request as <facet>SelectedItem."""
+    probe = _gsa_page(10, [_gsa_hit("CRX1", "CRA1", "a", "ILLUMINA"), _gsa_hit("CRX2", "CRA1", "b", "BGISEQ")],
+                      facet_counts={"platform": {"ILLUMINA": 6, "BGISEQ": 4}, "strategy": {"Genome": 5, "RNASeq": 5}})
+    illumina_probe = _gsa_page(6, [_gsa_hit("CRX1", "CRA1", "a", "ILLUMINA"), _gsa_hit("CRX3", "CRA1", "c", "ILLUMINA")],
+                               facet_counts={"platform": {"ILLUMINA": 6}, "strategy": {"Genome": 3, "RNASeq": 3}})
+    illumina_genome = _gsa_page(3, [_gsa_hit(f"CRX{i}", "CRA1", "g", "ILLUMINA", "Genome") for i in (1, 3, 5)])
+    illumina_rnaseq = _gsa_page(3, [_gsa_hit(f"CRX{i}", "CRA1", "r", "ILLUMINA", "RNASeq") for i in (7, 9, 11)])
+    bgiseq = _gsa_page(4, [_gsa_hit(f"CRX{i}", "CRA2", "b", "BGISEQ") for i in (2, 4, 6, 8)])
+    http = FakeHttp([probe, illumina_probe, illumina_genome, illumina_rnaseq, bgiseq])
+    recs = list(gsa.fetch(http, "2026-10-15", "2026-10-15", page_size=2, max_page_size=4))
+    assert sorted(r.accession for r in recs) == [f"CRX{i}" for i in (1, 11, 2, 3, 4, 5, 6, 7, 8, 9)] and len(recs) == 10
+    assert {r.platform for r in recs} == {"ILLUMINA", "BGISEQ"} and all(r.first_public == "2026-10-15" for r in recs)
+    assert len(http.calls) == 5 and http.payloads == []
+    p0, p1, p2, p3, p4 = [c[1] for c in http.calls]
+    assert "platformSelectedItem" not in p0 and p0["pageSize"] == 2
+    assert p1["platformSelectedItem"] == "ILLUMINA" and p1["platformSelected"] == "true" and p1["pageSize"] == 2  # sub-probe
+    assert p2["platformSelectedItem"] == "ILLUMINA" and p2["strategySelectedItem"] == "Genome" and p2["strategySelected"] == "true" and p2["pageSize"] == 3
+    assert p3["platformSelectedItem"] == "ILLUMINA" and p3["strategySelectedItem"] == "RNASeq" and p3["pageSize"] == 3
+    assert p4["platformSelectedItem"] == "BGISEQ" and "strategySelectedItem" not in p4 and p4["pageSize"] == 4
+    assert all(c[1]["from"] == 1 for c in http.calls)  # never a page walk
+
+
+def test_gsa_fetch_partition_shortfall_and_unsplittable_leaf_are_logged(caplog):
+    # (1) partitions that overlap or fall short of the day's total: no duplicates, and the shortfall is logged
+    probe = _gsa_page(6, [_gsa_hit("CRX1", "CRA1", "a", "ILLUMINA"), _gsa_hit("CRX2", "CRA1", "b", "BGISEQ")], facet_counts={"platform": {"ILLUMINA": 3, "BGISEQ": 3}})
+    ill = _gsa_page(3, [_gsa_hit(f"CRX{i}", "CRA1", "a", "ILLUMINA") for i in (1, 3, 5)])
+    bgi = _gsa_page(3, [_gsa_hit("CRX2", "CRA1", "b", "BGISEQ"), _gsa_hit("CRX5", "CRA1", "b", "BGISEQ")])  # one repeat, one missing
+    http = FakeHttp([probe, ill, bgi])
+    with caplog.at_level("WARNING", logger="litradar.sources.gsa"):
+        recs = list(gsa.fetch(http, "2026-10-15", "2026-10-15", page_size=2, max_page_size=4))
+    assert [r.accession for r in recs] == ["CRX1", "CRX3", "CRX5", "CRX2"] and len(http.calls) == 3
+    assert any("fetched 4 of 6" in m and "partition shortfall" in m for m in caplog.messages)
+    caplog.clear()
+    # (2) a partition that no facet can split (single values everywhere) is capped at max_page_size and logged
+    probe = _gsa_page(6, [_gsa_hit("CRX1", "CRA1", "a", "ILLUMINA"), _gsa_hit("CRX2", "CRA1", "b", "ILLUMINA")], facet_counts={"platform": {"ILLUMINA": 6}, "strategy": {"RNASeq": 6}})
+    capped = _gsa_page(6, [_gsa_hit(f"CRX{i}", "CRA1", "a", "ILLUMINA") for i in (1, 2, 3, 4)])
+    http = FakeHttp([probe, capped])
+    with caplog.at_level("WARNING", logger="litradar.sources.gsa"):
+        recs = list(gsa.fetch(http, "2026-10-15", "2026-10-15", page_size=2, max_page_size=4))
+    assert len(recs) == 4 and len(http.calls) == 2 and http.calls[1][1]["pageSize"] == 4 and "platformSelectedItem" not in http.calls[1][1]
+    assert any("cannot be split further" in m for m in caplog.messages) and any("fetched 4 of 6" in m for m in caplog.messages)
+    # (3) an empty sub-partition ("No items found") contributes nothing and raises nothing
+    probe = _gsa_page(5, [_gsa_hit("CRX1", "CRA1", "a", "ILLUMINA"), _gsa_hit("CRX2", "CRA1", "b", "BGISEQ")], facet_counts={"platform": {"ILLUMINA": 3, "BGISEQ": 2}})
+    http = FakeHttp([probe, _gsa_page(3, [_gsa_hit(f"CRX{i}", "CRA1", "a", "ILLUMINA") for i in (1, 3, 5)]), EMPTY_PAGE])
+    assert [r.accession for r in gsa.fetch(http, "2026-10-15", "2026-10-15", page_size=2, max_page_size=4)] == ["CRX1", "CRX3", "CRX5"]
+
+
+def test_gsa_fetch_respects_max_records(caplog):
     page = _gsa_page(5, [_gsa_hit(f"CRX{i}", "CRA9", "t", "ILLUMINA") for i in range(5)])
-    recs = list(gsa.fetch(FakeHttp([page]), "2026-10-16", "2026-10-16", max_records=2))
-    assert len(recs) == 2
+    http = FakeHttp([page, page])
+    with caplog.at_level("WARNING", logger="litradar.sources.gsa"):
+        recs = list(gsa.fetch(http, "2026-10-16", "2026-10-17", max_records=2))
+    assert len(recs) == 2 and len(http.calls) == 1  # the cap also ends the sweep: day 2 is never requested
+    assert any("fetched 2 of 5" in m and "max_records" in m for m in caplog.messages)  # the shortfall is logged, never silent
 
 
 # ------------------------------------------------------------------ GSA statistics snapshot
@@ -279,18 +410,30 @@ def test_companies_yaml_has_china_entries_without_duplicates(settings):
     data = settings.yaml("companies")
     ids = [e["id"] for e in data["entries"]]
     assert len(ids) == len(set(ids))
-    for cid in ["mgi-tech", "bgi-genomics", "novogene", "genemind", "salus-biomed", "axbio", "singleron", "berry-genomics", "burning-rock", "geneplus",
-                "genetron", "haplox", "biomarker-technologies", "annoroad", "biotree", "genecast", "amoydx", "sinopharm", "daan-gene", "sansure",
-                "hangzhou-biotest", "pharmaron", "wuxi", "wuxi-biologics", "hengrui", "beigene", "zai-lab", "innovent", "akeso", "legend-biotech"]:
+    for cid in ["mgi-tech", "bgi-genomics", "bgi-group", "novogene", "genemind", "salus-biomed", "axbio", "singleron", "berry-genomics", "burning-rock", "geneplus",
+                "genetron", "haplox", "biomarker-technologies", "annoroad", "biotree", "genecast", "amoydx", "sinopharm", "sinopharm-group", "cnbg", "daan-gene", "sansure",
+                "hangzhou-biotest", "pharmaron", "wuxi", "wuxi-biologics", "wuxi-xdc", "hengrui", "beigene", "zai-lab", "innovent", "akeso", "legend-biotech"]:
         assert cid in ids, cid
     by_id = {e["id"]: e for e in data["entries"]}
     for cid, ticker in [("mgi-tech", "688114.SS"), ("bgi-genomics", "300676.SZ"), ("novogene", "688315.SS"), ("berry-genomics", "000710.SZ"),
-                        ("amoydx", "300685.SZ"), ("daan-gene", "002030.SZ"), ("sansure", "688289.SS"), ("wuxi-biologics", "2269.HK"), ("innovent", "1801.HK"), ("akeso", "9926.HK")]:
-        assert by_id[cid]["ticker"] == ticker
-    # every China entry carries at least one Chinese-character alias and one e-mail domain
-    for cid in ["mgi-tech", "bgi-genomics", "novogene", "genemind", "wuxi-biologics", "hengrui", "beigene"]:
+                        ("amoydx", "300685.SZ"), ("daan-gene", "002030.SZ"), ("sansure", "688289.SS"), ("wuxi-biologics", "2269.HK"), ("wuxi-xdc", "2268.HK"),
+                        ("sinopharm-group", "1099.HK"), ("innovent", "1801.HK"), ("akeso", "9926.HK"),
+                        ("bgi-group", "private"), ("sinopharm", "private"), ("cnbg", "private")]:
+        assert by_id[cid]["ticker"] == ticker, cid
+    # parent / sister entities never ride on a subsidiary's ticker
+    for parent_alias in ["BGI Group", "华大集团", "华大时空", "STOmics", "BGI Research", "BGI-Shenzhen", "Beijing Genomics Institute"]:
+        assert parent_alias not in by_id["bgi-genomics"]["aliases"], parent_alias
+    for alias in ["WuXi XDC", "药明合联"]:
+        assert alias not in by_id["wuxi-biologics"]["aliases"], alias
+    for alias in ["China National Biotec Group", "CNBG", "中国生物技术股份有限公司", "中国医药集团有限公司", "China National Pharmaceutical Group"]:
+        assert alias not in by_id["sinopharm-group"]["aliases"], alias
+    assert by_id["wuxi-xdc"]["parent"] == "WuXi Biologics" and by_id["cnbg"]["parent"] == "Sinopharm" and by_id["bgi-genomics"]["parent"] == "BGI Group"
+    # every China entry carries at least one Chinese-character alias and one e-mail domain (BGI Genomics shares its
+    # domains with the group, so the domains sit on bgi-group)
+    for cid in ["mgi-tech", "bgi-group", "novogene", "genemind", "wuxi-biologics", "wuxi-xdc", "cnbg", "hengrui", "beigene"]:
         assert any(any("一" <= ch <= "鿿" for ch in a) for a in by_id[cid]["aliases"]), cid
         assert by_id[cid]["domains"], cid
+    assert any(any("一" <= ch <= "鿿" for ch in a) for a in by_id["bgi-genomics"]["aliases"]) and by_id["bgi-genomics"]["domains"] == []
     # no alias is shared by two entries (what `check-config` reports)
     gz = Gazetteer.from_yaml(data, "company")
     seen = {}
@@ -305,9 +448,14 @@ def test_company_gazetteer_matches_chinese_names_and_domains(settings):
     assert [h.entity_id for h in gz.find("深圳华大基因股份有限公司, 深圳 518083")] == ["bgi-genomics"]
     assert [h.entity_id for h in gz.find("康龙化成(北京)新药技术股份有限公司")] == ["pharmaron"]
     assert {h.entity_id for h in gz.find("BGI Genomics (华大基因), Shenzhen; Novogene Co., Ltd., Beijing")} == {"bgi-genomics", "novogene"}
-    # e-mail domains
-    assert {e.id for e in gz.match_domains(["x@mgi-tech.com", "y@genemind.com", "z@wuxibiologics.com", "w@genomics.cn", "v@legendbiotech.com"])} == {
-        "mgi-tech", "genemind", "wuxi-biologics", "bgi-genomics", "legend-biotech"}
+    # group-level names resolve to the unlisted parents, subsidiaries to their own tickers (longest alias wins on overlap)
+    assert [h.entity_id for h in gz.find("BGI Research, Shenzhen; BGI-Shenzhen; STOmics")] == ["bgi-group"]
+    assert [(h.entity_id, h.ticker) for h in gz.find("Sinopharm Group Co., Ltd., Shanghai")] == [("sinopharm-group", "1099.HK")]
+    assert {(h.entity_id, h.ticker) for h in gz.find("the Sinopharm inactivated vaccine (China National Biotec Group)")} == {("sinopharm", "private"), ("cnbg", "private")}
+    assert {(h.entity_id, h.ticker) for h in gz.find("WuXi XDC Cayman Inc.; WuXi Biologics Co., Ltd.")} == {("wuxi-xdc", "2268.HK"), ("wuxi-biologics", "2269.HK")}
+    # e-mail domains: the shared BGI domains attribute to the group, not to the listed arm
+    assert {e.id for e in gz.match_domains(["x@mgi-tech.com", "y@genemind.com", "z@wuxibiologics.com", "w@genomics.cn", "v@legendbiotech.com", "u@wuxixdc.com"])} == {
+        "mgi-tech", "genemind", "wuxi-biologics", "bgi-group", "legend-biotech", "wuxi-xdc"}
     # known limitation (documented in docs/sources/china.md): a short Chinese brand embedded in running prose does not match
     assert gz.find("本研究由华大基因完成") == []
 

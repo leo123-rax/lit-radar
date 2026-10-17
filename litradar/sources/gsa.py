@@ -8,15 +8,30 @@ https://ngdc.cncb.ac.cn/gsa/support/documents). Three routes, all anonymous:
 1. Search page (Elasticsearch-backed, server-rendered HTML)
    GET https://ngdc.cncb.ac.cn/gsa/search
        searchTerm='"MM/DD/YYYY - MM/DD/YYYY"[ReleaseDate]'   (the advanced-search syntax; one day = same date twice)
-       pageSize=200  from=<1-based page number>
+       pageSize=N  from=<1-based page number>                  (pageSize up to at least 3,000 is honoured)
        centerSelectedItem=NGDC  centerSelected=true           (facet: NGDC = native GSA; INSDC = mirrored SRA/ENA/DDBJ)
+       <facet>SelectedItem=<value>  <facet>Selected=true      (facet in platform|strategy|source|selection|fileType; combinable)
    Response: "Total Items:&nbsp;N"; one hit per <input class="checkbox_class" data-value="CRX…">, then
    fields "Title", "Accession" (link browse/<CRA>/<CRX>), "Platform name" (FAMILY only: ILLUMINA, BGISEQ,
    OXFORD_NANOPORE, PACBIO_SMRT, GENEMIND, SALUS, ELEMENT, ULTIMA, ION_TORRENT, CAPILLARY, CapitalBio …),
-   "Source name", "Strategy name", "Selection name". Sidebar facets (platform_block, strategy_block,
-   source_block) carry counts for the WHOLE result set, so one request gives a platform histogram.
+   "Source name", "Strategy name", "Selection name". Seven sidebar facet blocks, in page order
+   center_block, downloadable_block, fileType_block, platform_block, source_block, strategy_block,
+   selection_block, carry counts for the WHOLE result set, so one request gives a platform histogram.
    Sample digits: 2026-09-17..10-17 NGDC = 33,480 experiments (ILLUMINA 21,891 / BGISEQ 11,014 /
    PACBIO_SMRT 451 / OXFORD_NANOPORE 86 / GENEMIND 11); a 200-hit page is ~900 KB and 4-9 s.
+   PAGINATION IS UNSTABLE: there is no sort parameter and the Elasticsearch order changes between
+   requests (the same page-1 request twice shared 156 of 200 accessions; 5 pages x 200 for an 813-hit day
+   gave 739 distinct). Paging through a day therefore loses 9-27% of it. Verified fix: one page sized to
+   the result set is complete (pageSize=1000 -> 813/813 distinct, 3.5 MB, 20.5 s; pageSize=3000 ->
+   2,593/2,593 distinct, 11 MB, 53.5 s; ~20-25 ms per hit of server time). `fetch()` probes each day
+   (page_size hits + facet counts), then fetches the day as ONE page sized to its total, and when the
+   total exceeds `max_page_size` it partitions the day by facet (platform, then strategy, source,
+   selection, file type), each partition again as one sized page. Days that still exceed the cap after
+   every facet are truncated and logged ("fetched n of N").
+   Page shapes (all HTTP 200): a results page carries "Total Items:&nbsp;N"; a day with no releases
+   renders "No items found" (27.8 KB, no total, no facet blocks); the nginx JavaScript challenge is a
+   1.3 KB page titled "正在进行安全检查". `check_search_page()` accepts the first two and raises on anything
+   else, so a markup change or a challenge on /gsa/search surfaces as an error instead of a silent zero.
 
 2. Statistics JSON (cumulative snapshot, ~12 MB)
    GET https://ngdc.cncb.ac.cn/gsa/statistics/statistics.json
@@ -32,7 +47,9 @@ https://ngdc.cncb.ac.cn/gsa/support/documents). Three routes, all anonymous:
    ~10k rows. GSA-Human (HRA/HRX, controlled-access human data) is a separate site: see gsa_human.py.
 
 Etiquette: robots.txt only disallows /openlb/. This module paces ngdc.cncb.ac.cn at one request per
-second and caps a window sweep with `max_records` (default 20,000 experiments = ~100 pages).
+second, requests at most `max_page_size` hits per page (default 1,500, ~6.5 MB) and caps a window sweep
+with `max_records` (default 20,000 experiments). Verified cost 2026-10-17: two days (2,593 + 813
+experiments) = 11 requests, 110.7 s, every record present.
 """
 from __future__ import annotations
 
@@ -50,7 +67,10 @@ SEARCH_URL = f"https://{HOST}/gsa/search"
 STATS_URL = f"https://{HOST}/gsa/statistics/statistics.json"
 BROWSE_URL = f"https://{HOST}/gsa/browse/"
 DEFAULT_MIN_INTERVAL = 1.0
-PAGE_SIZE = 200
+PAGE_SIZE = 200  # probe size: a day with at most this many releases is complete in one request
+MAX_PAGE_SIZE = 1500  # largest single page requested (~6.5 MB, ~30-40 s of server time, inside the client's 60 s read timeout)
+# facet dimensions used to split a day that is too big for one page, in order; value = the request-parameter stem
+PARTITION_DIMS = [("platform", "platform"), ("strategy", "strategy"), ("source", "source"), ("selection", "selection"), ("file_type", "fileType")]
 
 _TOTAL_RE = re.compile(r"Total Items:&nbsp;\s*([\d,]+)")
 _HIT_SPLIT_RE = re.compile(r'<input[^>]*class="checkbox_class"[^>]*data-value="([A-Za-z]+\d+)"')
@@ -60,7 +80,11 @@ _FIELD_RE = re.compile(
     re.S,
 )
 _LINK_RE = re.compile(r"browse/([A-Za-z]+\d+)/([A-Za-z]+\d+)")
-_FACET_BLOCK_RE = re.compile(r'class="(platform|strategy|source|center)_block"')
+_FACET_BLOCK_RE = re.compile(r'class="(center|downloadable|fileType|platform|source|strategy|selection)_block"')
+_FACET_KEYS = {"fileType": "file_type"}  # CSS class -> facet key; the others are used as-is
+_RESULTS_MARKER = "Total Items"
+_EMPTY_MARKER = "No items found"
+_CHALLENGE_MARKER = "安全检查"
 _FACET_PAIR_RE = re.compile(r">\s*([^<>()]+?)\s*(?:<[^<>]*>\s*){1,4}\((\d[\d,]*)\)")
 
 # GSA family labels -> the ENA/SRA `instrument_platform` spelling, so the census tables line up
@@ -142,32 +166,53 @@ def parse_hits(html: str) -> List[Dict[str, str]]:
 
 
 def parse_facets(html: str) -> Dict[str, Dict[str, int]]:
-    """Sidebar facet counts: {'platform': {'ILLUMINA': 21891, …}, 'strategy': {…}, 'source': {…}, 'center': {…}}."""
+    """Sidebar facet counts, one key per block: platform, strategy, source, selection, center, downloadable,
+    file_type -> {'ILLUMINA': 21891, …}. Every block the live page renders is recognised, so a block's
+    segment ends at the next block and selection values never leak into `strategy`."""
     out: Dict[str, Dict[str, int]] = {}
     if not html:
         return out
     marks = list(_FACET_BLOCK_RE.finditer(html))
     for i, m in enumerate(marks):
-        name = m.group(1)
+        name = _FACET_KEYS.get(m.group(1), m.group(1))
         seg = html[m.end() : marks[i + 1].start() if i + 1 < len(marks) else m.end() + 20000]
-        # a block ends at the next facet heading; keep the first contiguous run of "(n)" pairs
         counts: Dict[str, int] = {}
         for p in _FACET_PAIR_RE.finditer(seg):
             label = re.sub(r"\s+", " ", p.group(1)).strip()
-            if not label or label.lower() in ("platform", "strategy", "source", "center", "selection", "downloadable", "file type"):
-                continue
+            if not label or label.lower() in ("platform", "strategy", "source", "center", "selection", "file type"):
+                continue  # a block heading, never a value
             counts[label] = counts.get(label, 0) + int(p.group(2).replace(",", ""))
         if counts:
             out[name] = counts
     return out
 
 
+def check_search_page(html: str, context: str) -> bool:
+    """True for a results page, False for the genuine "No items found" page; raise for anything else.
+
+    The adapter rides on server-rendered HTML with no API contract, so a renamed class or the site's
+    JavaScript cookie challenge would otherwise parse as zero hits and be stored as a normal result.
+    """
+    if _RESULTS_MARKER in html:
+        return True
+    if _EMPTY_MARKER in html:
+        return False
+    why = "JavaScript challenge page" if _CHALLENGE_MARKER in html else "markup change or error page"
+    raise RuntimeError(f"GSA: unexpected search page for {context} ({why}; {len(html)} bytes, no 'Total Items' / 'No items found')")
+
+
 # ---------------------------------------------------------------- fetchers
-def _search(http: Any, start: str, end: str, page: int, page_size: int, center: str) -> Optional[str]:
+def _search(http: Any, start: str, end: str, page: int, page_size: int, center: str, filters: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """One search request. `filters` = {facet key: value} using the keys of `parse_facets()` (platform, strategy, …)."""
     params: Dict[str, Any] = {"searchTerm": release_term(start, end), "pageSize": page_size, "from": page}
     if center:
         params["centerSelectedItem"] = center
         params["centerSelected"] = "true"
+    stems = dict(PARTITION_DIMS)
+    for key, value in (filters or {}).items():
+        stem = stems.get(key, key)
+        params[f"{stem}SelectedItem"] = value
+        params[f"{stem}Selected"] = "true"
     return http.get_text(SEARCH_URL, params=params)
 
 
@@ -177,13 +222,16 @@ def platform_histogram(http: Any, start: str, end: str, center: str = "NGDC") ->
     html = _search(http, start, end, 1, 20, center)
     if not html:
         log.warning("GSA: search page unavailable for %s..%s", start, end)
-        return {"total": 0, "platforms": {}, "strategies": {}, "sources": {}, "center": center}
+        return {"total": 0, "platforms": {}, "strategies": {}, "sources": {}, "selections": {}, "file_types": {}, "center": center}
+    check_search_page(html, f"{start}..{end}")  # raises on a challenge page / markup change
     facets = parse_facets(html)
     return {
         "total": parse_total(html),
         "platforms": facets.get("platform", {}),
         "strategies": facets.get("strategy", {}),
         "sources": facets.get("source", {}),
+        "selections": facets.get("selection", {}),
+        "file_types": facets.get("file_type", {}),
         "center": center,
     }
 
@@ -195,55 +243,122 @@ def _days(start: str, end: str) -> Iterator[str]:
         d += timedelta(days=1)
 
 
-def fetch(http: Any, start: str, end: str, center: str = "NGDC", page_size: int = PAGE_SIZE, max_records: int = 20000) -> Iterator[ArchiveRecord]:
+def _partition(http: Any, day: str, center: str, filters: Dict[str, str], expected: int, facets: Dict[str, Dict[str, int]],
+               page_size: int, max_page_size: int, dims: List[tuple]) -> Iterator[Dict[str, str]]:
+    """Yield every hit of one partition (a day plus facet filters) using single sized pages only.
+
+    A partition that fits `max_page_size` is fetched as one page of exactly `expected` hits (complete,
+    because the server's order is unstable only ACROSS pages). A bigger one is split on the first facet
+    dimension in `dims` that has two or more values: sub-partitions that fit are fetched directly from
+    the parent's facet counts; bigger ones are probed once (for their own facet counts) and recursed.
+    """
+    label = f"{day} {filters}" if filters else day
+    if expected <= 0:
+        return
+    if expected <= max_page_size:
+        html = _search(http, day, day, 1, expected, center, filters)
+        if not html:
+            log.warning("GSA: no response for %s (page of %d); moving on", label, expected)
+            return
+        if not check_search_page(html, label):
+            return
+        for h in parse_hits(html):
+            yield h
+        return
+    for i, (dim, _stem) in enumerate(dims):
+        counts = facets.get(dim) or {}
+        if len(counts) < 2:
+            continue  # a single value cannot split anything; try the next dimension
+        log.info("GSA: %s: %d experiments exceed one page of %d; splitting by %s (%d values)", label, expected, max_page_size, dim, len(counts))
+        for value, n in counts.items():
+            sub = dict(filters)
+            sub[dim] = value
+            if n <= max_page_size:
+                for h in _partition(http, day, center, sub, n, {}, page_size, max_page_size, dims[i + 1:]):
+                    yield h
+                continue
+            probe = _search(http, day, day, 1, page_size, center, sub)
+            if not probe:
+                log.warning("GSA: no response for %s %s probe; moving on", day, sub)
+                continue
+            if not check_search_page(probe, f"{day} {sub}"):
+                continue
+            sub_total, probe_hits = parse_total(probe), parse_hits(probe)
+            if sub_total <= len(probe_hits):
+                for h in probe_hits:
+                    yield h
+                continue
+            for h in _partition(http, day, center, sub, sub_total, parse_facets(probe), page_size, max_page_size, dims[i + 1:]):
+                yield h
+        return
+    # every facet exhausted and still too big: take one capped page and say so
+    log.warning("GSA: %s: %d experiments cannot be split further; fetching the first %d only", label, expected, max_page_size)
+    html = _search(http, day, day, 1, max_page_size, center, filters)
+    if html and check_search_page(html, label):
+        for h in parse_hits(html):
+            yield h
+
+
+def fetch(http: Any, start: str, end: str, center: str = "NGDC", page_size: int = PAGE_SIZE, max_records: int = 20000,
+          max_page_size: int = MAX_PAGE_SIZE) -> Iterator[ArchiveRecord]:
     """Yield one ArchiveRecord per experiment released in [start, end], day by day (exact first_public).
 
-    `platform` is the family the search exposes; `instrument_model` is labelled "<family> (model n/a)"
-    because the model lives on the browser-gated browse pages. `study_title` carries the experiment
-    title (the only free text available). Stops at `max_records`, when a day is exhausted, or when a
-    page repeats accessions (pagination guard).
+    Per day: one probe request of `page_size` hits (complete when the day has at most that many
+    releases), otherwise one page sized to the day's total, or facet partitions of at most
+    `max_page_size` each (see `_partition`); never a page walk, because the server's page order is
+    unstable. `platform` is the family the search exposes; `instrument_model` is labelled
+    "<family> (model n/a)" because the model lives on the browser-gated browse pages. `study_title`
+    carries the experiment title (the only free text available). `center_name` is left empty: the
+    hit names no submitter, and the NGDC/INSDC facet is a provenance filter, not a centre. Stops at
+    `max_records`; a day that ends short of its total is logged ("fetched n of N"). Raises
+    RuntimeError when the server answers with something other than a results page or the genuine
+    "No items found" page (see `check_search_page`).
     """
     _pace(http)
     seen: set = set()
     yielded = 0
     for day in _days(start, end):
-        page = 1
-        day_total: Optional[int] = None
-        while yielded < max_records:
-            html = _search(http, day, day, page, page_size, center)
-            if not html:
-                log.warning("GSA: no response for %s page %d; moving on", day, page)
+        probe = _search(http, day, day, 1, page_size, center)
+        if not probe:
+            log.warning("GSA: no response for %s; moving on", day)
+            continue
+        if not check_search_page(probe, f"{day} page 1"):
+            log.info("GSA: 0 experiments released %s (%s)", day, center or "all")
+            continue
+        day_total, probe_hits = parse_total(probe), parse_hits(probe)
+        log.info("GSA: %d experiments released %s (%s)", day_total, day, center or "all")
+        if day_total <= len(probe_hits):
+            source: Iterator[Dict[str, str]] = iter(probe_hits)
+        else:
+            source = _partition(http, day, center, {}, day_total, parse_facets(probe), page_size, max_page_size, PARTITION_DIMS)
+        day_seen = 0
+        for h in source:
+            if h["accession"] in seen:
+                continue
+            seen.add(h["accession"])
+            fam = h["platform"]
+            yield ArchiveRecord(
+                archive="gsa",
+                accession=h["accession"],
+                study_accession=h["study_accession"],
+                instrument_model=model_label(fam),
+                platform=FAMILY_TO_PLATFORM.get(fam, fam.upper() if fam else ""),
+                library_strategy=h["strategy"],
+                first_public=day,
+                center_name="",
+                study_title=h["title"],
+                organism="",
+            )
+            yielded += 1
+            day_seen += 1
+            if yielded >= max_records:
+                log.warning("GSA: stopping at max_records=%d", max_records)
                 break
-            if day_total is None:
-                day_total = parse_total(html)
-                if day_total:
-                    log.info("GSA: %d experiments released %s (%s)", day_total, day, center or "all")
-            hits = parse_hits(html)
-            new = [h for h in hits if h["accession"] not in seen]
-            if not hits or not new:
-                break
-            for h in new:
-                seen.add(h["accession"])
-                fam = h["platform"]
-                yield ArchiveRecord(
-                    archive="gsa",
-                    accession=h["accession"],
-                    study_accession=h["study_accession"],
-                    instrument_model=model_label(fam),
-                    platform=FAMILY_TO_PLATFORM.get(fam, fam.upper() if fam else ""),
-                    library_strategy=h["strategy"],
-                    first_public=day,
-                    center_name=center or "",
-                    study_title=h["title"],
-                    organism="",
-                )
-                yielded += 1
-                if yielded >= max_records:
-                    log.warning("GSA: stopping at max_records=%d", max_records)
-                    break
-            if len(hits) < page_size or (day_total and len(seen) >= day_total):
-                break
-            page += 1
+        if day_total and day_seen < day_total:
+            log.warning("GSA: %s: fetched %d of %d experiments (%s)", day, day_seen, day_total,
+                        "max_records reached" if yielded >= max_records else "partition shortfall")
+        if yielded >= max_records:
+            return
 
 
 # ---------------------------------------------------------------- statistics snapshot

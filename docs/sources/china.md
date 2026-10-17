@@ -18,7 +18,7 @@ undercounts Chinese platforms by roughly half.
 | **GSA browse pages** (`/gsa/browse/**`) | **browser-gated** (nginx JavaScript cookie challenge) | not used | the only place the instrument model of a native CRX is shown | — |
 | **GSA RunInfo export** (`/gsa/search/getRunInfo`) | works but ignores the ReleaseDate term; ~10k-row cap | not used | CSV with Run, ReleaseDate, Platform (family), BioProject, TaxID … | returns the first ~10k rows of the whole index regardless of the query |
 | **GSA-Human** (`/gsa-human/browse/`, `/gsa-human/ajaxb/runinstudy`) | works, HTML list + JSON runs, no key | `litradar/sources/gsa_human.py` `fetch()` | per-experiment `ArchiveRecord(archive='gsa-human')` with **model-level** platform, HRA study, PRJCA, organization, release date, Homo sapiens | 243 studies released; first 40 studies = 3,581 experiments: DNBSEQ-T7 2,481 / NovaSeq 6000 911 / NovaSeq X Plus 108 / NextSeq 550 53 / BGISEQ-500 22 / HiSeq X Ten 6 (100% matched to the instrument gazetteer) |
-| **ChinaXiv OAI-PMH** (`global.chinaxiv.org/oaiapi/getdata`) | works, documented, no key | `litradar/sources/chinaxiv.py` `fetch()` | `Paper(source='chinaxiv', kind='preprint')` with Chinese title/abstract/authors/keywords/subject, derived DOI, abs URL | 275 distinct records (3 pages): 天文学 122, 核物理学 19, 图书馆学 19, … life-science subjects 33 (临床医学 5, 预防医学与公共卫生学 5, 农业基础学科 2, 植物生态学 2, 药物设计 1 …); 99 Chinese-language titles |
+| **ChinaXiv OAI-PMH** (`global.chinaxiv.org/oaiapi/getdata`) | works, verified live (no reachable vendor docs), no key | `litradar/sources/chinaxiv.py` `fetch()` | `Paper(source='chinaxiv', kind='preprint')` with Chinese title/abstract/authors/keywords/subject, derived DOI, abs URL | 275 distinct records (3 pages): 天文学 122, 核物理学 19, 图书馆学 19, … life-science subjects 33 (临床医学 5, 预防医学与公共卫生学 5, 农业基础学科 2, 植物生态学 2, 药物设计 1 …); 99 Chinese-language titles |
 | ChinaXiv main-site OAI (`chinaxiv.org/oai/request`) | **access-restricted** ("Sorry! You have no right to access this web.") | not used | — | — |
 | ChinaXiv RSS | none (`/rss`, `/rss.xml`, `/feed` → 404); search pages answer 403 to scripts | not used | — | — |
 | **CNKI / Wanfang / CQVIP** | licensed databases, no public API | not used (boundary) | — | see below |
@@ -34,32 +34,65 @@ robots.txt disallows only `/openlb/`.
 ```
 GET https://ngdc.cncb.ac.cn/gsa/search
     searchTerm = "MM/DD/YYYY - MM/DD/YYYY"[ReleaseDate]     # advanced-search syntax; one day = same date twice
-    pageSize   = 200                                          # honoured
+    pageSize   = N                                            # honoured up to at least 3,000 (verified)
     from       = <1-based page number>
     centerSelectedItem = NGDC   centerSelected = true         # facet: NGDC = native GSA; INSDC = mirrored SRA/ENA/DDBJ
+    <facet>SelectedItem = <value>   <facet>Selected = true    # facet in platform | strategy | source | selection | fileType; combinable
 ```
 
 Response is server-rendered HTML: `Total Items:&nbsp;N`, then one hit per
 `<input class="checkbox_class" data-value="CRX…">` with fields *Title*, *Accession* (link
-`browse/<CRA>/<CRX>`), *Platform name*, *Source name*, *Strategy name*, *Selection name*. The sidebar
-facets (`platform_block`, `strategy_block`, `source_block`, `center_block`) carry counts for the whole
-result set, so `gsa.platform_histogram()` costs one request. The *Platform name* is the **family**
-(ILLUMINA, BGISEQ, OXFORD_NANOPORE, PACBIO_SMRT, GENEMIND, SALUS, ELEMENT, ULTIMA …), not the model.
+`browse/<CRA>/<CRX>`), *Platform name*, *Source name*, *Strategy name*, *Selection name*. The sidebar has
+seven facet blocks, in page order `center_block`, `downloadable_block`, `fileType_block`,
+`platform_block`, `source_block`, `strategy_block`, `selection_block`, each carrying counts for the whole
+result set, so `gsa.platform_histogram()` costs one request. `parse_facets()` returns every block under its
+own key (`center`, `downloadable`, `file_type`, `platform`, `source`, `strategy`, `selection`). The
+*Platform name* is the **family** (ILLUMINA, BGISEQ, OXFORD_NANOPORE, PACBIO_SMRT, GENEMIND, SALUS,
+ELEMENT, ULTIMA …), not the model.
 
-`gsa.fetch(http, start, end)` sweeps the window one day at a time (so `first_public` is exact) and labels
-`instrument_model` as `"<FAMILY> (model n/a)"`. The gazetteer resolves `BGISEQ (model n/a)` to the MGI
-DNBSEQ entry (vendor MGI Tech, 688114.SS); `ILLUMINA (model n/a)` resolves to no model, so the digest's
-vendor-share table falls back to the platform string, which is the honest outcome. Cost: a 200-hit page
-is ~900 KB and 4-9 s; one day (2026-10-16) had 813 native experiments = 5 pages; a week ~10.5k = ~53
-pages ≈ 48 MB. `max_records` (default 20,000) caps a sweep; the host is paced at one request per second.
+Three page shapes come back with HTTP 200, and the adapter tells them apart (`gsa.check_search_page()`):
+a results page carries `Total Items`; a day with no releases renders `No items found` (27.8 KB, no total,
+no facet blocks; verified with a 2027 date) and is treated as zero; anything else, in particular the
+1.3 KB JavaScript cookie challenge titled `正在进行安全检查` that `/gsa/browse/**` already serves, raises
+`RuntimeError` so the pipeline records the failure in its error list instead of a plausible-looking zero.
 
-Verified one-day sweep (2026-10-16, first 400 of 813): ILLUMINA 271 / BGISEQ 121 / OXFORD_NANOPORE 8;
-38 CRA studies; strategies RNASeq 316 / Genome 53 / Other 23 / EpiGenomics 8; 14.6 s.
+**Pagination is unstable, so the adapter never walks pages.** The search has no sort parameter and the
+Elasticsearch order changes between requests: the same page-1 request issued twice shared 156 of 200
+accessions, pages 2-4 of one day overlapped each other, and five pages of 200 for the 813-hit day
+2026-10-16 produced only 739 distinct accessions (9% lost; a 13-page day lost 27%). One page sized to the
+result set is complete, because the instability is only across pages: `pageSize=1000` returned 813/813
+distinct (3.5 MB, 20.5 s) and `pageSize=3000` returned 2,593/2,593 (11 MB, 53.5 s); server time grows at
+~20-25 ms per hit.
+
+`gsa.fetch(http, start, end)` therefore works day by day (so `first_public` is exact) as follows: one
+probe request of `page_size` (200) hits, which is already complete for a small day and carries the day's
+facet counts; otherwise ONE page sized to the day's total; and when the total exceeds `max_page_size`
+(default 1,500, kept inside the client's 60 s read timeout) the day is partitioned on its facet counts,
+platform first, then strategy, source, selection and file type, each partition again as one sized page
+(a partition that is still too big is probed once for its own facet counts and split further). A
+partition that no facet can split is truncated at `max_page_size` and logged, and a day that ends short
+of its total for any reason is logged as `fetched n of N`; nothing is silently short. `instrument_model`
+is labelled `"<FAMILY> (model n/a)"`; `center_name` is left empty because the hit names no submitting
+centre and the NGDC/INSDC facet is a provenance filter, not a centre. The gazetteer resolves
+`BGISEQ (model n/a)` to the MGI DNBSEQ entry (vendor MGI Tech, 688114.SS); `ILLUMINA (model n/a)`
+resolves to no model, so the digest's vendor-share table falls back to the platform string, which is the
+honest outcome. Cost: a typical day is 2 requests (probe + sized page); 2026-10-15 (2,593 experiments)
+took 8 requests because ILLUMINA (2,125) had to be split by strategy; the two days together were 11
+requests and 110.7 s with every record present. `max_records` (default 20,000) caps a sweep; the host is
+paced at one request per second.
+
+Verified complete two-day fetch (2026-10-17): 2026-10-15 = 2,593 experiments / 75 CRA studies, ILLUMINA
+2,125 / BGISEQ 447 / OXFORD_NANOPORE 17 / PACBIO_SMRT 4, strategies Other 1,165 / RNASeq 931 / Genome 484 /
+EpiGenomics 13; 2026-10-16 = 813 experiments / 41 CRA studies, ILLUMINA 559 / BGISEQ 240 /
+OXFORD_NANOPORE 12 / PACBIO_SMRT 2, strategies RNASeq 623 / Genome 113 / Other 61 / EpiGenomics 16. Both
+platform splits equal the facet histogram of the same day exactly.
 
 Other facet values seen in the 30-day NGDC window: strategies Genome 11,203 / RNASeq 10,380 / Other
 11,057 / unspecified 4,695 / Exome 549 / EpiGenomics 291; sources METAGENOMIC 11,660 / GENOMIC 11,101 /
-TRANSCRIPTOMIC 8,748 / TRANSCRIPTOMIC SINGLE CELL 759. (The strategy facet also lists library-selection
-values such as PCR and RANDOM; they are reported as returned.)
+TRANSCRIPTOMIC 8,748 / TRANSCRIPTOMIC SINGLE CELL 759. Library-selection values (PCR, RANDOM, RT-PCR,
+PolyA, cDNA, size fractionation …) are a separate `selection` facet; one-day digits for 2026-10-16:
+PCR 542 / RANDOM 110 / PolyA 88 / RT-PCR 50 / cDNA 14 / other 6 / ChIP 2 / size fractionation 1, and
+file types fastq 810 / bam 3.
 
 ### 1b. Statistics JSON = the instrument model, as cumulative totals
 
@@ -124,8 +157,11 @@ OAI endpoint `https://chinaxiv.org/oai/request?verb=Identify` answers `Sorry!You
 this web.` (IP allow-list; the "authorization" page says CAS and `.ac.cn`/`.edu.cn` accounts can register).
 Search/list pages return 403 ("系统监测到您访问异常") to scripts, and there is no RSS.
 
-The aggregator https://global.chinaxiv.org documents a public OAI-PMH 2.0 interface in its help page
-(contact eprint@mail.las.ac.cn); it is what `litradar/sources/chinaxiv.py` uses:
+The aggregator https://global.chinaxiv.org exposes a public OAI-PMH 2.0 endpoint, which is what
+`litradar/sources/chinaxiv.py` uses. It is **verified live, not documented**: no help page is reachable
+to a scripted client (the home page is a 2 KB JavaScript shell; `/help`, `/help/index`, `/about`, `/oai`
+answer HTTP 500; `/oaiapi` and `/api` answer 404; checked 2026-10-17), so the interface below is
+described from its live behaviour:
 
 ```
 GET https://global.chinaxiv.org/oaiapi/getdata?verb=ListRecords&metadataPrefix=oai_dc&source=chinaxiv
@@ -195,6 +231,17 @@ aliases plus domains on the existing MGI Tech, BGI Genomics, GenScript, Singlero
 once after merging so stored mentions pick up the new id. Legend Biotech and WuXi Biologics are now their
 own entries (removed as aliases of GenScript / WuXi AppTec), so `check-config` reports no alias collisions.
 
+**Parents and sisters never ride on a subsidiary's ticker.** Group-level names are separate, unlisted
+entries so ticker joins stay clean: `bgi-group` (BGI Group, BGI, BGI-Shenzhen, BGI Research, Beijing
+Genomics Institute, STOmics, 华大集团, 华大时空, 深圳华大基因研究院; also the shared `genomics.cn` / `bgi.com`
+e-mail domains, which cannot distinguish the group from its listed arms) with `bgi-genomics` (300676.SZ)
+and `mgi-tech` (688114.SS) pointing at it through `parent`; `sinopharm` (China National Pharmaceutical
+Group, 国药集团, 中国医药集团有限公司; unlisted) with `sinopharm-group` (Sinopharm Group Co., 国药控股,
+1099.HK, the distribution arm) and `cnbg` (China National Biotec Group, 中国生物技术股份有限公司; unlisted
+vaccine / diagnostics arm) as children; `wuxi-xdc` (WuXi XDC, 药明合联, 2268.HK) separate from
+`wuxi-biologics` (2269.HK). The matcher resolves overlapping aliases to the longest one, so
+"Sinopharm Group Co., Ltd." hits 1099.HK while a bare "Sinopharm" hits the unlisted parent.
+
 **Matcher behaviour with Chinese aliases (verified, see `tests/test_china_sources.py`):**
 
 * Python's `\w` includes CJK ideographs, so the gazetteer's word boundaries treat a Chinese alias as a
@@ -205,6 +252,9 @@ own entries (removed as aliases of GenScript / WuXi AppTec), so `check-config` r
   and already lower-case), so short brands such as 华大基因 or 诺禾致源 need the English name within
   250 characters (`BGI Genomics (华大基因)` matches; `诺禾致源、百迈客生物` alone does not). Registered
   names (> 5 characters) match on their own.
+* The pre-existing bare alias `WuXi` on the WuXi AppTec entry is four mixed-case letters, so it matches
+  case-insensitively and also hits the city name in affiliations ("Wuxi, Jiangsu"); it predates this
+  change and is left as is, but a ticker join on WuXi AppTec mentions should expect that noise.
 * A one-line follow-up in `litradar/extract/gazetteer.py` would lift both limits for CJK aliases: skip the
   `\w` look-arounds and the ambiguity heuristic when an alias contains CJK characters (two ideographs are
   already as specific as an English word). It is not part of this change because the module is shared.
@@ -246,6 +296,27 @@ and no vendor.
 * ChinaXiv OAI: 275 records, 3 requests, 4.5 s; 275/275 stored as new papers.
 * SRA Properties counts: 11 requests with the shared client's pacing; one 429 was retried once.
 * Total: 71 HTTP requests, 1 retry, 0 failures.
+
+Second pass, 2026-10-17 (after review), 57 requests through the shared client across seven scratch
+scripts, 0 retries, 0 failures:
+
+* Page shapes: a 2027 date returns the 27.8 KB "No items found" page (no `Total Items`, no facet blocks);
+  `/gsa/browse/CRA033661` returns the 1.3 KB "正在进行安全检查" challenge; the 2026-10-16 page has the seven
+  facet blocks in the order center, downloadable, fileType, platform, source, strategy, selection.
+* Pagination instability measured on 2026-10-16 (813 hits, pageSize 200): pages 1-5 = 813 hits, 739
+  distinct; page 1 repeated = 156/200 shared; overlaps page 2/3 = 41, 2/4 = 6, 3/4 = 27. A page walk of
+  2026-10-15..16 yielded 1,904 of 2,593 and 584 of 813.
+* Sized pages: pageSize 1000 for 2026-10-16 = 813/813 distinct, 3,481,895 bytes, 20.5 s; pageSize 3000
+  for 2026-10-15 = 2,593/2,593 distinct, 11,010,419 bytes, 53.5 s. Combined filter platform=ILLUMINA +
+  strategy=RNASeq on 2026-10-16 = 381 with facets scoped to the filtered set.
+* Restructured `fetch()` on 2026-10-15..16: 3,406 distinct experiments = both day totals, 11 requests,
+  110.7 s, no shortfall warning (digits in §1a).
+* 30-day histogram re-run: total 33,480, same platform split, plus selections PCR 17,492 / unspecified
+  4,695 / RANDOM 4,049 / PolyA 2,751 / cDNA 1,198 / Hybrid Selection 995 / RANDOM PCR 611 / RT-PCR 472 /
+  size fractionation 298, file types fastq 31,668 / bam 1,744 / 10x genomics 42 / ab1 18 / sra 7; 5.1 s.
+* ChinaXiv aggregator: `Identify` answers an OAI-PMH 2.0 envelope with `<error code="badVerb">`;
+  `ListRecords` 2026-10-10..17 = 51 distinct records in one page, 0.8 s; home page 2,027 bytes of
+  JavaScript, `/help`, `/help/index`, `/about`, `/oai`, `/help/api` HTTP 500, `/oaiapi`, `/api` 404.
 
 ## 8. Not done / open
 
