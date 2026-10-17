@@ -45,17 +45,23 @@ Optional extras: `pip install -e ".[llm]"` for Claude scoring, `pip install mark
 
 | Key | Needed for | Cost | Where |
 |---|---|---|---|
-| `LITRADAR_CONTACT_EMAIL` | polite-pool rate limits at OpenAlex, Crossref, Unpaywall; SEC EDGAR requires a contact in the User-Agent | free | any address you own |
-| `OPENALEX_API_KEY` | OpenAlex works/authors/institutions (anonymous traffic is now metered per IP and runs out) | free | https://help.openalex.org/api/authentication/ |
-| `NCBI_API_KEY` | lifts E-utilities from 3 to 10 requests/s (SRA census, PubMed) | free | NCBI account settings |
-| `SEMANTIC_SCHOLAR_API_KEY` | reserved for citation-velocity enrichment | free | semanticscholar.org/product/api |
-| `ANTHROPIC_API_KEY` | `--llm` rubric scoring of the weekly shortlist | pay-as-you-go (see cost table in `docs/DESIGN.md`) | console.anthropic.com |
+| `LITRADAR_CONTACT_EMAIL` | polite-pool rate limits at OpenAlex, Crossref, Unpaywall; SEC EDGAR 8-K feeds are skipped without a contact | free | any address you own |
+| `OPENALEX_API_KEY` | OpenAlex works/authors/institutions. **Effectively required:** anonymous traffic shares a tiny per-IP daily budget that runs out mid-pull | free | https://help.openalex.org/api/authentication/ |
+| `NCBI_API_KEY` | lifts E-utilities from 3 to 10 requests/s (SRA and GEO census, PubMed) | free | NCBI account settings |
+| `OPENFDA_API_KEY` | 510(k) / PMA source: 1,000 requests/day per IP without a key, 120,000/day with one | free | https://open.fda.gov/apis/authentication/ |
+| `SEMANTIC_SCHOLAR_API_KEY` | citation enrichment (1 request/s with a key) | free | semanticscholar.org/product/api |
+| `ANTHROPIC_API_KEY` | `--llm` rubric scoring of the weekly shortlist | pay-as-you-go (cost table in `litradar/rank/llm.py`; set a spend limit first) | the provider's console |
 | SMTP / Slack | delivery | free tiers exist | your mail provider / Slack app |
 
-You do **not** need publisher logins. A personal Nature or Science subscription is for *reading*
-the items the digest links to; it does not grant automated download or text-mining rights, so the
-pipeline never logs in anywhere. Full text is read only from open-licensed sources (Europe PMC
-open-access subset, preprints via their official routes). See `docs/LEGAL.md`.
+Everything is optional; the pipeline runs with no keys at all. Copy `.env.example` to `.env` locally,
+or add the same names as repository secrets on GitHub Actions (`docs/deploy.md`).
+
+You do **not** need publisher logins, and `.env.example` has no slot for one. A personal journal
+subscription is for *reading* the items the digest links to; publisher terms allow access only
+through a normal web browser and grant no automated-download or text-mining rights, so the pipeline
+never logs in anywhere. Full text is read only from open-licensed sources (the Europe PMC open-access
+subset, preprints under open licences via their official API). The policy, the per-source terms and
+how the code enforces them are in `docs/LEGAL.md`; the short version is `docs/ACCEPTABLE_USE.md`.
 
 ## What the digest contains
 
@@ -91,10 +97,30 @@ Everything lives in `config/` and is meant to be edited:
 
 ## Scheduling
 
-* **GitHub Actions** (recommended for forks): `.github/workflows/weekly.yml` runs every Monday,
-  caches the SQLite database between runs, commits the digest to `digests/`, and e-mails or posts to
-  Slack when the secrets are present. Add secrets under *Settings → Secrets and variables → Actions*.
-* **Laptop**: `cron` or a `launchd` plist calling `python -m litradar run --email`.
+* **GitHub Actions** (recommended for forks): `.github/workflows/weekly.yml` runs every Monday. The
+  job that holds your API keys can only read the repository; a second job with no keys stores the
+  SQLite database as a GitHub release asset (`db-latest`, plus a `db-YYYY-MM` copy per month for
+  roll-back) and commits the digest to `digests/`. Forks do not commit digests unless the repository
+  variable `LITRADAR_COMMIT_DIGESTS=true` is set, because a committed digest reveals your watchlist.
+  *Run workflow* also takes a `timeseries_vendor` input to produce a vendor time series on demand.
+  Step by step, including Pages for the dashboard: `docs/deploy.md`.
+* **Laptop or server**: `cron` or `launchd` calling `python -m litradar run --email`; examples in
+  `docs/examples/`. Windows: Task Scheduler with the same command.
+
+## Security and privacy
+
+* **Keys live in `.env` (git-ignored) or in GitHub Actions secrets, nowhere else**: never in
+  `config/*.yaml`, never in a digest, never in an issue. CI fails if a database, WAL file, snapshot or
+  `.env` is ever tracked; workflow actions are pinned to commit SHAs and workflow inputs reach the
+  shell only through environment variables. Reporting and key rotation: `SECURITY.md`.
+* **What a public repository exposes:** the committed digests (`digests/*.md`), the database snapshot
+  in the `db-*` releases and the Pages dashboard all show which companies, instruments and people you
+  watch. Options: keep a private duplicate instead of a public fork, leave `LITRADAR_COMMIT_DIGESTS`
+  unset in a fork, or keep a personal watchlist in an overlay directory via `LITRADAR_CONFIG_DIR` and
+  ship only the generic lists.
+* **What the data is:** harvested public metadata, abstracts and open-licensed text, each record with
+  its licence string; no credentials, no paywalled text, no logins. The MIT licence covers the code
+  and the gazetteers only; third-party content keeps its own terms (`NOTICE`, `docs/LEGAL.md`).
 
 ## How ranking works
 

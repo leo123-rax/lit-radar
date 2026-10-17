@@ -10,9 +10,10 @@ git clone <your fork>
 cd lit-radar
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,llm]"
-cp .env.example .env            # fill in what you have; everything is optional
-python -m litradar check-config  # validates the YAML gazetteers
-pytest -q                        # offline tests, no network needed
+cp .env.example .env                   # fill in what you have; everything is optional
+python -m litradar check-config         # validates the YAML gazetteers
+python -m pytest -q -p no:warnings      # offline tests, no network needed
+ruff check litradar tests
 ```
 
 ## Where things live
@@ -25,27 +26,47 @@ pytest -q                        # offline tests, no network needed
 | `config/journals.yaml`, `config/feeds.yaml` | journals by ISSN/RSS; news and press feeds |
 | `litradar/sources/` | one adapter per data source; they only normalise records |
 | `litradar/extract/` | gazetteer matching and JATS section parsing |
-| `litradar/rank/` | heuristic scoring and the optional Claude scorer |
+| `litradar/rank/` | heuristic scoring and the optional LLM scorer |
 | `litradar/digest/` | Markdown rendering and delivery |
 | `litradar/store.py` | SQLite + FTS5 schema and queries |
-| `docs/` | design notes, source catalog, legal boundaries |
+| `litradar/policy.py` | licence -> storage level (`full` / `facts_only` / `none`); the allow-list lives here |
+| `litradar/http.py` | the one HTTP client: User-Agent, per-host pacing, backoff, host blocking, disk cache |
+| `docs/SOURCES.md`, `docs/sources/` | source catalog and per-source notes with verified limits |
+| `docs/LEGAL.md`, `docs/ACCEPTABLE_USE.md` | data policy, per-source terms, what is never done |
+| `docs/deploy.md` | running a fork on GitHub Actions, locally, or on a schedule |
+| `SECURITY.md`, `NOTICE` | reporting, key rotation; third-party data acknowledgements and licence scope |
 
 ## The most useful contributions
 
 1. **Gazetteer entries.** New instruments, new aliases as they appear in Methods sections, fixed
    launch years, ownership changes after acquisitions. Run `python -m litradar check-config` to catch
-   duplicate ids and alias collisions, then `pytest`.
+   duplicate ids and alias collisions, then the tests.
 2. **Context terms for ambiguous names.** If a product name is also a common word, set
    `context_required: true` and list `context_terms`. The tests in `tests/test_gazetteer.py` show the
    pattern.
 3. **New sources.** Add a module under `litradar/sources/` that yields `Paper`, `ArchiveRecord` or
-   `NewsItem` objects, wire it into `litradar/pipeline.py`, and add an offline test with a canned payload.
+   `NewsItem` objects, wire it into `litradar/pipeline.py`, add an offline test with a canned payload,
+   and add a note under `docs/sources/` with the source's terms and documented rate limit. Only
+   documented API endpoints and RSS feeds that serve scripts are accepted (see the ground rules).
 4. **OpenAlex topic ids and author ids** in `config/subgroups.yaml`; these make researcher tracking exact.
 
 ## Ground rules
 
-* Never commit `.env`, database files, or anything from behind a paywall. The pipeline stores metadata,
-  abstracts and open-licensed full text only (see `docs/LEGAL.md`).
-* Keep adapters polite: use the shared `Http` client so rate limits and User-Agent rules are honoured.
+* **Never commit `.env`, database files, snapshots, or anything from behind a paywall.** The pipeline
+  stores metadata, abstracts and open-licensed full text only (`docs/LEGAL.md`). CI fails if a
+  database, WAL/SHM file, `.zst` snapshot, `.cache/` or `.env*` file is tracked.
+* **No credentials in YAML, Markdown or digests**, and no slot for a publisher login anywhere: the
+  pipeline does not log in (`SECURITY.md`, `docs/LEGAL.md`).
+* **No HTML scrapers.** Adapters call documented APIs or RSS feeds only. Pull requests that scrape
+  publisher pages, Google Scholar, or any site whose `robots.txt` or `/.well-known/tdmrep.json`
+  reserves rights will be closed. A feed that answers 403 is dropped, not worked around.
+* **Keep adapters polite:** use the shared `Http` client so rate limits and User-Agent rules are
+  honoured, and add a `DEFAULT_MIN_INTERVAL` entry for any new host at or below its documented limit.
+* **Licence-aware storage:** anything that stores text must go through `litradar/policy.py` and keep
+  the record's licence string.
+* **Workflow changes** keep every third-party action pinned to a full commit SHA with the tag in a
+  comment, pass `workflow_dispatch` inputs through `env:` (never inline `${{ }}` in `run:`), and keep
+  the job that holds API keys on `contents: read`.
 * Keep Python 3.9 compatibility (no `match`, no `X | Y` unions at runtime).
-* Run `ruff check .` and `pytest -q` before opening a pull request.
+* Run `ruff check litradar tests` and `python -m pytest -q -p no:warnings` before opening a pull
+  request. Security problems go to `SECURITY.md`, not the issue tracker.

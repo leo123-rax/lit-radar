@@ -1,7 +1,22 @@
-# Runs the radar every Monday, commits the digest into digests/, and (optionally) e-mails it.
-# Fork this repo, add your keys under Settings -> Secrets and variables -> Actions, and it just runs.
-# Notes: GitHub may delay or skip scheduled runs on busy mornings, and disables schedules on repos
-# with no activity for 60 days; the workflow_dispatch trigger lets you run it by hand any time.
+# Weekly digest.
+#
+# Two jobs, deliberately split:
+#   radar   : holds the API keys, can only READ the repository (contents: read, persist-credentials: false)
+#   publish : can WRITE the repository (release assets + the digest commit) but sees no API key
+#
+# State lives in a GitHub Release, not in actions/cache. The cache is evicted after 7 idle days, which is
+# exactly the cadence of this job, and it silently drops the SQLite -wal/-shm side files.
+#   db-latest  : radar.sqlite.zst, replaced on every successful run
+#   db-YYYY-MM : the same file, replaced on every run of that month -> one roll-back point per month
+# Size expectations: one 7-day window is ~3.5k papers + ~120k archive rows; after the first week the DB
+# measured ~118 MB raw / ~27 MB zstd. GitHub release assets may be up to 2 GiB each. See docs/deploy.md.
+#
+# Forks: scheduled workflows are disabled in a fork until you enable them (Actions tab -> weekly-digest ->
+# "Enable workflow"). GitHub also disables schedules after 60 days without repository activity and may
+# delay scheduled runs on busy mornings; workflow_dispatch runs it by hand any time.
+#
+# Every third-party action is pinned to a full commit SHA (the tag it came from is in the comment).
+# workflow_dispatch inputs reach the shell ONLY through env: variables, never inline in run:.
 name: weekly-digest
 on:
   schedule:
@@ -9,26 +24,44 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: "look-back window in days"
+        description: "look-back window in days (integer)"
+        type: string
         default: "7"
       llm:
-        description: "score the shortlist with Claude (needs ANTHROPIC_API_KEY secret)"
+        description: "score the shortlist with the LLM rubric (needs the ANTHROPIC_API_KEY secret)"
         type: boolean
         default: false
-permissions:
-  contents: write
+      timeseries_vendor:
+        description: "INSTEAD of the digest: run `litradar timeseries --vendor <value>` (vendor name, ticker or id prefix) and attach the CSV/Markdown as an artifact; nothing is committed"
+        type: string
+        default: ""
+
+permissions: {}                      # nothing by default; each job asks for what it needs
+
 concurrency:
   group: weekly-digest
   cancel-in-progress: false
+
+env:
+  STATE_RELEASE: db-latest
+  STATE_ASSET: radar.sqlite.zst
+
 jobs:
-  digest:
+  radar:
+    name: fetch, extract, rank, render
+    if: ${{ !inputs.timeseries_vendor }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: read                 # checkout and `gh release download`; this job cannot push
     env:
+      DAYS_INPUT: ${{ inputs.days || '7' }}
+      LLM_INPUT: ${{ inputs.llm }}
       LITRADAR_CONTACT_EMAIL: ${{ secrets.LITRADAR_CONTACT_EMAIL }}
       NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
       OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
       SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+      OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       LITRADAR_LLM_MODEL: ${{ vars.LITRADAR_LLM_MODEL }}
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -39,40 +72,164 @@ jobs:
       DIGEST_TO: ${{ secrets.DIGEST_TO }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       LITRADAR_DB: data/radar.sqlite
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install -e ".[llm]" markdown
-      - name: Restore database from the previous run
-        uses: actions/cache/restore@v4
+      - name: Install
+        run: python -m pip install -e ".[llm]" markdown
+      - name: Restore the database from the state release
+        run: |
+          set -euo pipefail
+          # never open a database next to a stale WAL/SHM pair: SQLite would replay it over the restored file
+          rm -f data/radar.sqlite data/radar.sqlite-wal data/radar.sqlite-shm
+          mkdir -p data state
+          if out=$(gh release view "$STATE_RELEASE" --json tagName 2>&1); then
+            gh release download "$STATE_RELEASE" --pattern "$STATE_ASSET" --dir state --clobber
+            zstd -d -q -f "state/$STATE_ASSET" -o data/radar.sqlite
+            status=$(python3 -c "import sqlite3; c = sqlite3.connect('data/radar.sqlite'); print(c.execute('PRAGMA integrity_check').fetchone()[0]); c.close()")
+            if [ "$status" != "ok" ]; then
+              echo "::error::restored database failed integrity_check ($status). Roll $STATE_RELEASE back from a db-YYYY-MM release (docs/deploy.md) rather than starting over."
+              exit 1
+            fi
+            echo "restored $(stat -c %s data/radar.sqlite) bytes from release $STATE_RELEASE"
+          elif printf '%s' "$out" | grep -qi 'not found'; then
+            echo "::notice::no $STATE_RELEASE release yet: starting from an empty database (first run)"
+          else
+            echo "::error::could not query the $STATE_RELEASE release: $out"
+            exit 1
+          fi
+      - name: Restore the HTTP cache (an optimisation only; evicted by GitHub after 7 idle days)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            data/radar.sqlite
-            .cache
-          key: radar-db-${{ github.run_id }}
-          restore-keys: radar-db-
+          path: .cache
+          key: radar-http-cache-${{ github.run_id }}
+          restore-keys: radar-http-cache-
       - name: Run the radar
         run: |
-          FLAGS="--days ${{ github.event.inputs.days || '7' }}"
-          if [ "${{ github.event.inputs.llm }}" = "true" ] && [ -n "$ANTHROPIC_API_KEY" ]; then FLAGS="$FLAGS --llm"; fi
-          if [ -n "$SMTP_HOST" ]; then FLAGS="$FLAGS --email"; fi
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then FLAGS="$FLAGS --slack"; fi
-          python -m litradar run $FLAGS
-      - name: Save database for next week
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: |
-            data/radar.sqlite
-            .cache
-          key: radar-db-${{ github.run_id }}
-      - name: Commit the digest
+          set -euo pipefail
+          case "$DAYS_INPUT" in ''|*[!0-9]*) echo "::error::days must be an integer, got '$DAYS_INPUT'"; exit 1;; esac
+          # an undefined repository variable arrives as "", which the code would take literally as the model name
+          [ -n "${LITRADAR_LLM_MODEL:-}" ] || unset LITRADAR_LLM_MODEL
+          FLAGS="--days $DAYS_INPUT"
+          if [ "$LLM_INPUT" = "true" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then FLAGS="$FLAGS --llm"; fi
+          if [ -n "${SMTP_HOST:-}" ]; then FLAGS="$FLAGS --email"; fi
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then FLAGS="$FLAGS --slack"; fi
+          # SIGINT lets Python unwind and checkpoint SQLite; the runner's own job kill would not reach it
+          timeout -s INT -k 60 100m python -m litradar run $FLAGS
+      - name: Checkpoint and compress the database
         run: |
-          git config user.name "lit-radar bot"
-          git config user.email "lit-radar-bot@users.noreply.github.com"
+          set -euo pipefail
+          python3 -c "import sqlite3; c = sqlite3.connect('data/radar.sqlite'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()"
+          zstd -T0 -15 -q -f data/radar.sqlite -o "$STATE_ASSET"
+          ls -l data/radar.sqlite "$STATE_ASSET"
+      - name: Prune the HTTP cache to 14 days
+        run: find .cache -type f -mtime +14 -delete 2>/dev/null || true
+      - name: Save the HTTP cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache
+          key: radar-http-cache-${{ github.run_id }}
+      - name: Hand the database and the digest to the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: radar-state
+          path: |
+            radar.sqlite.zst
+            digests/*.md
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: store the database, commit the digest
+    needs: radar
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write                # release assets + digest commit; this job holds NO API keys
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      COMMIT_DIGESTS: ${{ vars.LITRADAR_COMMIT_DIGESTS }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: radar-state
+          path: incoming
+      - name: Upload the database to the state releases (db-latest and db-YYYY-MM)
+        run: |
+          set -euo pipefail
+          new_size=$(stat -c %s "incoming/$STATE_ASSET")
+          # a snapshot that shrank to less than half of the published one is never published automatically
+          old_size=$(gh release view "$STATE_RELEASE" --json assets --jq ".assets[] | select(.name == \"$STATE_ASSET\") | .size" 2>/dev/null || true)
+          if [ -n "$old_size" ] && [ $((new_size * 2)) -lt "$old_size" ]; then
+            echo "::error::new snapshot is $new_size bytes, the published one is $old_size bytes. Refusing to overwrite $STATE_RELEASE; the file is attached to this run as the radar-state artifact. See docs/deploy.md (rolling back)."
+            exit 1
+          fi
+          month="db-$(date -u +%Y-%m)"
+          for tag in "$STATE_RELEASE" "$month"; do
+            if ! gh release view "$tag" --json tagName >/dev/null 2>&1; then
+              gh release create "$tag" --title "$tag" --latest=false \
+                --notes "Automated state snapshot: the radar's SQLite database, zstd-compressed. db-latest is replaced on every successful weekly run; db-YYYY-MM holds the last run of that month so the series can be rolled back. Restore with: zstd -d $STATE_ASSET -o data/radar.sqlite. Contents: harvested public metadata, abstracts and open-licensed text from the sources listed in NOTICE; see docs/LEGAL.md."
+            fi
+            gh release upload "$tag" "incoming/$STATE_ASSET" --clobber
+          done
+          echo "uploaded $new_size bytes to $STATE_RELEASE and $month"
+      - name: Commit the digest (skipped in forks unless the LITRADAR_COMMIT_DIGESTS variable is "true")
+        run: |
+          set -euo pipefail
+          is_fork=$(gh api "repos/$GH_REPO" --jq .fork)
+          if [ "$is_fork" = "true" ] && [ "${COMMIT_DIGESTS:-}" != "true" ]; then
+            echo "::notice::this repository is a fork, so the digest is not committed (committed digests reveal your watchlist). Set the repository variable LITRADAR_COMMIT_DIGESTS=true to commit them; meanwhile the digest is attached to this run as the radar-state artifact."
+            exit 0
+          fi
+          cp incoming/digests/*.md digests/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add digests/*.md
-          git diff --cached --quiet || git commit -m "digest: $(date -u +%F)"
-          git push
+          if git diff --cached --quiet; then echo "digest unchanged"; exit 0; fi
+          git commit -m "digest: $(date -u +%F)" -m "$RUN_URL"
+          git push || { git pull --rebase && git push; }
+
+  timeseries:
+    name: monthly instrument time series for one vendor
+    if: ${{ inputs.timeseries_vendor }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      VENDOR_INPUT: ${{ inputs.timeseries_vendor }}
+      LITRADAR_CONTACT_EMAIL: ${{ secrets.LITRADAR_CONTACT_EMAIL }}
+      NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+      LITRADAR_DB: data/timeseries-scratch.sqlite
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e .
+      - name: Run the time series
+        run: |
+          set -euo pipefail
+          printf '%s' "$VENDOR_INPUT" | grep -Eq '^[A-Za-z0-9 ._-]{1,60}$' || { echo "::error::vendor may only contain letters, digits, space, dot, underscore or dash (1-60 characters)"; exit 1; }
+          mkdir -p data
+          python -m litradar timeseries --vendor "$VENDOR_INPUT" --no-chart --out timeseries-out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: timeseries-${{ github.run_id }}
+          path: timeseries-out
+          retention-days: 30
+          if-no-files-found: error
