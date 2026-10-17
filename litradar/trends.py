@@ -13,9 +13,15 @@ Definitions
   Archive records use ``first_public``.
 * **Baseline** = weeks 1..``weeks`` (default 13) that actually contain data for that family
   (papers or archive records). Weeks before the corpus started are *not* counted as zeros, so
-  a corpus with five weeks of history is compared against five weeks, not thirteen.
+  a corpus with five weeks of history is compared against five weeks, not thirteen. A week whose
+  family total is below ``min_week_fraction`` (default 0.25) of the median of the *other* positive
+  weekly totals is a **partial week** (the first run of a corpus, an interrupted run, a 7-day pull
+  whose extra boundary day lands alone in an earlier bucket) and is excluded from the baseline as
+  well; the excluded weeks are listed in ``history`` and in the rendered header.
+  ``min_week_fraction=0`` disables the rule.
 * **mean / std** = arithmetic mean and sample standard deviation of the entity's weekly count
-  over the baseline weeks (an entity absent in a baseline week counts as 0 there).
+  over the baseline weeks (an entity absent in a baseline week counts as 0 there). ``std`` is
+  ``None`` with fewer than two baseline weeks (undefined, rendered as ``n/a``).
 * **z** = ``(current - mean) / max(std, 1.0)``. The floor of one count keeps integer series
   with a near-zero spread (3, 3, 3, 3 ...) from producing infinite scores. ``z`` is ``None``
   when fewer than ``min_baseline_weeks`` (default 3) baseline weeks have data.
@@ -29,7 +35,18 @@ Definitions
   says so instead of listing them all.
 * **conversion** = a preprint whose ``published_doi`` resolves to another paper in the store
   (``papers.id = 'doi:' || lower(published_doi)``), reported in the week in which the journal
-  version was published or first seen, or the preprint row was updated.
+  version was published or first seen. A preprint row being re-upserted (new version, overlap
+  day of consecutive pulls) does not re-report an old conversion; the flip side is that a
+  ``published_doi`` back-filled onto a preprint whose journal version was already stored in an
+  earlier week is never reported.
+
+Week length versus the digest window
+------------------------------------
+Trend weeks are seven-day buckets ending on ``until``. The pipeline's own window
+(``pipeline.window(days=7)``) is eight inclusive days, so a digest table and the trends section
+in the same document can show different counts for the same entity. ``render_trends_markdown``
+always states the bucket rule; pass ``window_note=digest_window_note(since, until)`` from the
+digest renderer to spell out the digest window next to it.
 
 Entity families
 ---------------
@@ -41,9 +58,12 @@ tracked-author papers/week from ``tracked_author_hits``) and journals (papers/we
 
 Public API
 ----------
-``compute_trends(store, until, weeks=13, ...)`` returns a JSON-serialisable dict;
-``render_trends_markdown(trends)`` turns it into a compact "What changed" section;
-``top_movers(trends)`` picks the risers and fallers the renderer shows.
+``compute_trends(store, until, weeks=13, ...)`` returns a JSON-serialisable dict (including a
+``warnings`` list: anything that silently degraded, such as a failed keyword query, is named
+there and printed by the renderer); ``render_trends_markdown(trends, window_note=None)`` turns
+it into a compact "What changed" section; ``top_movers(trends)`` picks the risers and fallers
+the renderer shows; ``digest_window_note(since, until)`` builds the sentence that reconciles the
+digest window with the seven-day trend week.
 """
 from __future__ import annotations
 
@@ -63,6 +83,7 @@ NOTABLE_MIN_COUNT = 5
 MIN_BASELINE_WEEKS = 3
 STD_FLOOR = 1.0
 DEFAULT_WEEKS = 13
+MIN_WEEK_FRACTION = 0.25  # a baseline week below this fraction of the median weekly total is partial
 
 ROLE_SECTIONS = {
     "as_author": ("affiliations",),
@@ -112,10 +133,10 @@ def _delta(
     baseline = [int(by_week.get(w, 0)) for w in active_baseline]
     n = len(baseline)
     mean = statistics.fmean(baseline) if n else None
-    std = statistics.stdev(baseline) if n >= 2 else (0.0 if n else None)
+    std = statistics.stdev(baseline) if n >= 2 else None  # undefined below two weeks
     z: Optional[float] = None
-    if n >= min_baseline_weeks and mean is not None and std is not None:
-        z = (current - mean) / max(std, STD_FLOOR)
+    if n >= min_baseline_weeks and mean is not None:
+        z = (current - mean) / max(std if std is not None else 0.0, STD_FLOOR)
     notable = False
     if z is not None and abs(z) >= notable_z:
         gate = current if z > 0 else (mean or 0.0)
@@ -139,6 +160,39 @@ def _delta(
 
 def _week_ok(wk: Any, weeks: int) -> bool:
     return isinstance(wk, int) and 0 <= wk <= weeks
+
+
+def _week_bounds(end: date, k: int) -> Tuple[str, str]:
+    """(start, end) ISO dates of week k, where week 0 ends on `end`."""
+    return _iso(end - timedelta(days=7 * k + 6)), _iso(end - timedelta(days=7 * k))
+
+
+def _active_weeks(totals: Dict[int, int], weeks: int, min_week_fraction: float, end: date) -> Tuple[List[int], List[Dict[str, Any]]]:
+    """Baseline weeks (1..weeks) with data, minus partial weeks.
+
+    A week is partial when its family total is below `min_week_fraction` of the median of the
+    *other* positive weekly totals (leave-one-out, so a week is never measured against itself and
+    two weeks of history already separate a 20 % boundary-day bucket from a full week). With a
+    single week of data nothing is compared, so nothing is dropped.
+    Returns (active week indices, dropped weeks as {week, start, end, total, median}).
+    """
+    active = [w for w in range(1, weeks + 1) if totals.get(w, 0) > 0]
+    dropped: List[Dict[str, Any]] = []
+    if min_week_fraction > 0 and len(active) >= 2:
+        keep: List[int] = []
+        for w in active:
+            med = float(statistics.median([totals[o] for o in active if o != w]))
+            if totals[w] < min_week_fraction * med:
+                start, stop = _week_bounds(end, w)
+                dropped.append({"week": w, "start": start, "end": stop, "total": int(totals[w]), "median": _round(med, 1)})
+            else:
+                keep.append(w)
+        active = keep
+    return active, dropped
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def _collect(rows: Iterable[Tuple], weeks: int, key_cols: int, count_cols: int) -> Dict[Tuple, Dict[str, Dict[int, int]]]:
@@ -240,8 +294,13 @@ def _tracked_rows(conn: sqlite3.Connection, params: Dict[str, Any]) -> List[Tupl
     ).fetchall()
 
 
-def _subgroup_paper_weeks(conn: sqlite3.Connection, params: Dict[str, Any], group: Dict[str, Any]) -> Dict[int, int]:
-    """Weekly paper counts for one subgroup: keyword phrases in title/abstract (FTS5) OR primary OpenAlex topic."""
+def _subgroup_paper_weeks(
+    conn: sqlite3.Connection, params: Dict[str, Any], group: Dict[str, Any], warnings: Optional[List[str]] = None
+) -> Dict[int, int]:
+    """Weekly paper counts for one subgroup: keyword phrases in title/abstract (FTS5) OR primary OpenAlex topic.
+
+    A failed keyword query (no FTS table, bad syntax) contributes nothing and is recorded in `warnings`.
+    """
     week_of: Dict[str, int] = {}
     kws = [str(k) for k in (group.get("keywords") or []) if k and str(k).strip()]
     if kws:
@@ -254,7 +313,10 @@ def _subgroup_paper_weeks(conn: sqlite3.Connection, params: Dict[str, Any], grou
                 if isinstance(wk, int):
                     week_of[pid] = wk
         except sqlite3.OperationalError as exc:  # bad FTS syntax or no FTS table: keywords contribute nothing
-            log.warning("subgroup %s: keyword query failed (%s)", group.get("id"), exc)
+            msg = f"subgroup {group.get('id')}: keyword query failed ({exc}); keyword papers counted as 0"
+            log.warning(msg)
+            if warnings is not None:
+                warnings.append(msg)
     topics = [str(t) for t in (group.get("openalex_topics") or []) if t]
     if topics:
         # one parameter style per statement: the window dates are passed by name, the topics inline as a
@@ -314,14 +376,18 @@ def _new_archive_models(conn: sqlite3.Connection, week_start: str, until: str) -
 
 
 def _conversions(conn: sqlite3.Connection, week_start: str, until: str) -> List[Dict[str, Any]]:
+    """Preprint -> journal pairs whose journal version was published or first seen in the current week.
+
+    The preprint row's own `updated_at` is deliberately not a trigger: preprints are re-upserted on
+    every new version and on the overlap day of consecutive pulls, which would resurface old pairs.
+    """
     cur = conn.execute(
         """SELECT p.id, p.doi, p.title, p.journal, p.pub_date, p.url,
                   j.id, j.doi, j.title, j.journal, j.pub_date, j.url, substr(j.first_seen, 1, 10)
            FROM papers p JOIN papers j ON j.id = 'doi:' || lower(trim(p.published_doi))
            WHERE p.published_doi IS NOT NULL AND trim(p.published_doi) != '' AND p.id != j.id
              AND ((j.pub_date != '' AND j.pub_date >= :ws AND j.pub_date <= :until)
-                  OR (substr(j.first_seen, 1, 10) >= :ws AND substr(j.first_seen, 1, 10) <= :until)
-                  OR (substr(p.updated_at, 1, 10) >= :ws AND substr(p.updated_at, 1, 10) <= :until))
+                  OR (substr(j.first_seen, 1, 10) >= :ws AND substr(j.first_seen, 1, 10) <= :until))
            ORDER BY j.pub_date DESC, p.id""",
         {"ws": week_start, "until": until},
     )
@@ -352,26 +418,32 @@ def compute_trends(
     min_baseline_weeks: int = MIN_BASELINE_WEEKS,
     notable_z: float = NOTABLE_Z,
     min_count: int = NOTABLE_MIN_COUNT,
+    min_week_fraction: float = MIN_WEEK_FRACTION,
 ) -> Dict[str, Any]:
     """Structured week-over-week and week-vs-baseline deltas for every entity family.
 
     `store` is a litradar.store.Store (anything with a sqlite3 `conn` works). `until` (YYYY-MM-DD)
     is the last day of the current week. `subgroups` is the list from config/subgroups.yaml (see
-    `load_subgroups`); without it, subgroup trends use tracked-author hits only.
+    `load_subgroups`); without it, subgroup trends use tracked-author hits only. Baseline weeks
+    whose family total is below `min_week_fraction` of the median weekly total are treated as
+    partial and left out of the baseline (0 disables this).
     """
     if weeks < 1:
         raise ValueError("weeks must be >= 1")
+    if not 0 <= min_week_fraction < 1:
+        raise ValueError("min_week_fraction must be in [0, 1)")
     end = _parse_date(until)
     until = _iso(end)
     week_start = _iso(end - timedelta(days=6))
     since = _iso(end - timedelta(days=7 * (weeks + 1) - 1))
-    prev_start, prev_end = _iso(end - timedelta(days=13)), _iso(end - timedelta(days=7))
+    prev_start, prev_end = _week_bounds(end, 1)
     conn: sqlite3.Connection = store.conn
     params = {"until": until, "since": since}
+    warnings: List[str] = []
 
     paper_totals, archive_totals = _weekly_totals(conn, params, weeks)
-    active_papers = [w for w in range(1, weeks + 1) if paper_totals.get(w, 0) > 0]
-    active_archive = [w for w in range(1, weeks + 1) if archive_totals.get(w, 0) > 0]
+    active_papers, dropped_papers = _active_weeks(paper_totals, weeks, min_week_fraction, end)
+    active_archive, dropped_archive = _active_weeks(archive_totals, weeks, min_week_fraction, end)
 
     def delta(by_week: Dict[int, int], active: Sequence[int]) -> Dict[str, Any]:
         return _delta(by_week, weeks, active, min_baseline_weeks, notable_z, min_count)
@@ -411,7 +483,7 @@ def compute_trends(
         if not gid:
             continue
         row = {"id": gid, "name": names[gid], "kind": "subgroup", "metric": "papers"}
-        row.update(delta(_subgroup_paper_weeks(conn, params, g), active_papers))
+        row.update(delta(_subgroup_paper_weeks(conn, params, g, warnings), active_papers))
         row["tracked_author_papers"] = delta(tracked.get(gid, {}), active_papers)
         subgroup_rows.append(row)
     for gid, by_week in tracked.items():
@@ -457,15 +529,21 @@ def compute_trends(
         "until": until,
         "week_start": week_start,
         "previous_week": {"start": prev_start, "end": prev_end},
-        "baseline": {"weeks": weeks, "since": since, "end": prev_end, "min_weeks_for_z": min_baseline_weeks},
+        "baseline": {"weeks": weeks, "since": since, "end": prev_end, "min_weeks_for_z": min_baseline_weeks,
+                     "min_week_fraction": min_week_fraction},
         "history": {
             "paper_weeks_with_data": len(active_papers),
             "archive_weeks_with_data": len(active_archive),
             "z_available_papers": len(active_papers) >= min_baseline_weeks,
             "z_available_archive": len(active_archive) >= min_baseline_weeks,
+            "paper_weeks_dropped_partial": dropped_papers,
+            "archive_weeks_dropped_partial": dropped_archive,
+            "previous_week_partial_papers": any(d["week"] == 1 for d in dropped_papers),
+            "previous_week_partial_archive": any(d["week"] == 1 for d in dropped_archive),
         },
         "thresholds": {"notable_z": notable_z, "min_count": min_count, "std_floor": STD_FLOOR},
         "cold_start": cold_start,
+        "warnings": warnings,
         "totals": {
             "papers": delta(paper_totals, active_papers),
             "archive_experiments": delta(archive_totals, active_archive),
@@ -541,7 +619,8 @@ def _fmt_z(z: Optional[float]) -> str:
 def _fmt_mean(r: Dict[str, Any]) -> str:
     if r.get("mean") is None:
         return "n/a"
-    return f"{r['mean']:.1f} ± {r['std'] or 0:.1f}"
+    std = "n/a" if r.get("std") is None else f"{r['std']:.1f}"  # std is undefined for a one-week baseline
+    return f"{r['mean']:.1f} ± {std}"
 
 
 def _detail(r: Dict[str, Any]) -> str:
@@ -569,22 +648,61 @@ def _mover_rows(rows: List[Dict[str, Any]]) -> List[List[Any]]:
 def _fmt_total(d: Dict[str, Any]) -> str:
     base = f"{d['current']:,} (last week {d['previous']:,}"
     if d["mean"] is not None:
-        base += f", baseline {d['mean']:,.0f} ± {d['std'] or 0:,.0f}, z {_fmt_z(d['z'])}"
+        std = "n/a" if d.get("std") is None else f"{d['std']:,.0f}"
+        base += f", baseline {d['mean']:,.0f} ± {std}, z {_fmt_z(d['z'])}"
     return base + ")"
 
 
-def render_trends_markdown(trends: Dict[str, Any], top_n: int = 10, heading_level: int = 2) -> str:
-    """Compact "What changed" Markdown section from `compute_trends` output."""
+def digest_window_note(since: str, until: str) -> str:
+    """Sentence reconciling the digest's window with the seven-day trend week, for `window_note`."""
+    try:
+        days = (date.fromisoformat(str(until)[:10]) - date.fromisoformat(str(since)[:10])).days + 1
+        span = f"{days} inclusive days"
+    except ValueError:
+        span = "a window of its own"
+    return (f"The digest tables cover {since} to {until} ({span}), so their counts can differ from the "
+            f"seven-day figures in this section.")
+
+
+def _partial_note(label: str, dropped: List[Dict[str, Any]], unit: str) -> str:
+    parts = [f"{d['start']} to {d['end']} ({d['total']:,} {unit} vs median {d['median']:,.0f})" for d in dropped]
+    return f"{label}: " + "; ".join(parts)
+
+
+def render_trends_markdown(
+    trends: Dict[str, Any], top_n: int = 10, heading_level: int = 2, window_note: Optional[str] = None
+) -> str:
+    """Compact "What changed" Markdown section from `compute_trends` output.
+
+    `window_note` is an optional sentence printed under the header, meant for the digest renderer
+    to state its own (longer) window; see `digest_window_note`.
+    """
     h = "#" * max(1, heading_level)
     hh = "#" * (max(1, heading_level) + 1)
     hist, thr, base = trends["history"], trends["thresholds"], trends["baseline"]
     md: List[str] = [f"{h} What changed: {trends['week_start']} to {trends['until']}\n"]
     md.append(
         f"This week vs last week ({trends['previous_week']['start']} to {trends['previous_week']['end']}) vs the trailing "
-        f"{base['weeks']}-week baseline ({hist['paper_weeks_with_data']} weeks with paper data, {hist['archive_weeks_with_data']} with archive data). "
+        f"{base['weeks']}-week baseline ({_plural(hist['paper_weeks_with_data'], 'week')} with paper data, "
+        f"{_plural(hist['archive_weeks_with_data'], 'week')} with archive data). "
+        f"Weeks are seven-day buckets ending {trends['until']}. "
         f"z = (this week − baseline mean) / max(std, {thr['std_floor']:g}). **Bold** = notable: |z| ≥ {thr['notable_z']:g} with at least "
         f"{thr['min_count']} counts (this week for risers, the baseline mean for fallers).\n"
     )
+    if window_note:
+        md.append(f"_{window_note.strip()}_\n")
+    dropped_p, dropped_a = hist.get("paper_weeks_dropped_partial") or [], hist.get("archive_weeks_dropped_partial") or []
+    if dropped_p or dropped_a:
+        notes = []
+        if dropped_p:
+            notes.append(_partial_note("papers", dropped_p, "papers"))
+        if dropped_a:
+            notes.append(_partial_note("archive", dropped_a, "experiments"))
+        tail = " 'Last week' above is one of them." if hist.get("previous_week_partial_papers") or hist.get("previous_week_partial_archive") else ""
+        md.append(f"_Partial weeks excluded from the baseline (below {base.get('min_week_fraction', MIN_WEEK_FRACTION):.0%} of the median "
+                  f"weekly total): " + " · ".join(notes) + f".{tail}_\n")
+    if trends.get("warnings"):
+        md.append("_Warnings:_\n" + "\n".join(f"- {w}" for w in trends["warnings"]) + "\n")
     if not hist["z_available_papers"] and not hist["z_available_archive"]:
         md.append(f"_Fewer than {base['min_weeks_for_z']} weeks of history: z-scores are suppressed and movers are ranked by week-over-week change._\n")
     elif not hist["z_available_papers"] or not hist["z_available_archive"]:

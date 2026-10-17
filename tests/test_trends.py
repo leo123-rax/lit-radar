@@ -250,3 +250,154 @@ def test_cli_trends_prints_and_writes(tmp_path, monkeypatch, capsys):
     assert cli.main(["trends", "--until", UNTIL, "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["until"] == UNTIL and data["instruments"]["papers"][0]["id"] == "x"
+
+
+def _bulk_instrument_papers(st: Store, entity: str, weeks_back: int, n: int) -> None:
+    """Like _add_instrument_papers but with an entity-specific id prefix so entities never collide."""
+    _add_instrument_papers(st, entity, entity.title(), weeks_back, n, prefix=f"{entity}-")
+
+
+@pytest.fixture()
+def partial_week(tmp_path):
+    """Three full baseline weeks (family total 50) + one 10%-size week (total 5) + the current week.
+
+    x: 40, 40, 40, 4 then 60   y: 10, 10, 10, 1 then 0
+    """
+    st = Store(tmp_path / "partial.sqlite")
+    for wk in (4, 3, 2):
+        _bulk_instrument_papers(st, "x", wk, 40)
+        _bulk_instrument_papers(st, "y", wk, 10)
+    _bulk_instrument_papers(st, "x", 1, 4)
+    _bulk_instrument_papers(st, "y", 1, 1)
+    _bulk_instrument_papers(st, "x", 0, 60)
+    st.commit()
+    return st
+
+
+def test_partial_week_is_dropped_from_baseline(partial_week):
+    tr = trends.compute_trends(partial_week, UNTIL, weeks=4)
+    hist = tr["history"]
+    assert hist["paper_weeks_with_data"] == 3 and hist["z_available_papers"] is True
+    assert [d["week"] for d in hist["paper_weeks_dropped_partial"]] == [1]
+    d = hist["paper_weeks_dropped_partial"][0]
+    assert (d["start"], d["end"], d["total"], d["median"]) == ("2026-10-04", "2026-10-10", 5, 50.0)  # median of {50, 50, 50, 5}
+    assert hist["previous_week_partial_papers"] is True and hist["archive_weeks_dropped_partial"] == []
+    x = {r["id"]: r for r in tr["instruments"]["papers"]}["x"]
+    # baseline is the three full weeks only: mean 40, std 0 -> floored to 1 -> z = +20
+    assert x["series"] == [40, 40, 40, 4, 60] and x["previous"] == 4
+    assert x["baseline_weeks"] == 3 and x["mean"] == 40.0 and x["std"] == 0.0 and x["z"] == 20.0 and x["notable"] is True
+    md = trends.render_trends_markdown(tr)
+    assert "3 weeks with paper data" in md
+    assert "Partial weeks excluded from the baseline (below 25% of the median weekly total): papers: 2026-10-04 to 2026-10-10 (5 papers vs median 50)" in md
+    assert "'Last week' above is one of them." in md
+
+
+def test_partial_week_filter_disabled_restores_damped_z(partial_week):
+    tr = trends.compute_trends(partial_week, UNTIL, weeks=4, min_week_fraction=0)
+    hist = tr["history"]
+    assert hist["paper_weeks_with_data"] == 4 and hist["paper_weeks_dropped_partial"] == []
+    x = {r["id"]: r for r in tr["instruments"]["papers"]}["x"]
+    assert x["baseline_weeks"] == 4 and x["mean"] == 31.0
+    assert x["std"] == pytest.approx(statistics.stdev([40, 40, 40, 4]), abs=0.01)
+    assert x["z"] == pytest.approx((60 - 31) / statistics.stdev([40, 40, 40, 4]), abs=0.01) and x["z"] < 2 and x["notable"] is False
+    assert "Partial weeks excluded" not in trends.render_trends_markdown(tr)
+    with pytest.raises(ValueError):
+        trends.compute_trends(partial_week, UNTIL, min_week_fraction=1.0)
+
+
+def test_partial_week_rule_needs_two_weeks_to_compare(tmp_path):
+    st = Store(tmp_path / "one.sqlite")
+    _add_instrument_papers(st, "x", "X", 1, 2)  # a single tiny baseline week: nothing to compare against
+    _add_instrument_papers(st, "x", "X", 0, 9)
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    assert tr["history"]["paper_weeks_with_data"] == 1 and tr["history"]["paper_weeks_dropped_partial"] == []
+    # one-week baseline with min_baseline_weeks=1: std is undefined, rendered as n/a, z uses the floor
+    tr1 = trends.compute_trends(st, UNTIL, weeks=4, min_baseline_weeks=1)
+    x = {r["id"]: r for r in tr1["instruments"]["papers"]}["x"]
+    assert x["mean"] == 2.0 and x["std"] is None and x["z"] == 7.0
+    md = trends.render_trends_markdown(tr1)
+    assert "1 week with paper data" in md and "| 9 | 2 | 2.0 ± n/a | +7.0 |" in md
+    assert "baseline 2 ± n/a" in md  # corpus line
+
+
+def test_conversion_not_rereported_on_preprint_reupsert(tmp_path):
+    st = Store(tmp_path / "conv.sqlite")
+    pre = "doi:10.1101/2026.01.01.1"
+    art = "doi:10.1038/s41586-026-0001-1"
+    st.upsert_paper(_paper(pre, _day(9), journal="biorxiv", kind="preprint", title="Old preprint", published_doi="10.1038/s41586-026-0001-1"))
+    st.upsert_paper(_paper(art, _day(5), journal="Nature", title="Journal version"))
+    _set_first_seen(st, pre, _day(9))
+    _set_first_seen(st, art, _day(5))  # journal version published and first seen five weeks ago
+    st.commit()
+    assert trends.compute_trends(st, UNTIL, weeks=13)["conversions"] == []
+    # the preprint is re-upserted this week (new version / overlap day): updated_at moves, published_doi unchanged
+    st.upsert_paper(_paper(pre, _day(9), journal="biorxiv", kind="preprint", title="Old preprint v2", published_doi="10.1038/s41586-026-0001-1"))
+    st.conn.execute("UPDATE papers SET updated_at=? WHERE id=?", (f"{_day(0)}T09:00:00Z", pre))
+    st.commit()
+    assert st.conn.execute("SELECT substr(updated_at,1,10) FROM papers WHERE id=?", (pre,)).fetchone()[0] == _day(0)
+    assert trends.compute_trends(st, UNTIL, weeks=13)["conversions"] == []
+    # but a journal version first seen this week is reported even if its pub_date is older
+    st.conn.execute("UPDATE papers SET first_seen=? WHERE id=?", (f"{_day(0, 2)}T09:00:00Z", art))
+    st.commit()
+    conv = trends.compute_trends(st, UNTIL, weeks=13)["conversions"]
+    assert [c["article_id"] for c in conv] == [art] and conv[0]["article_first_seen"] == _day(0, 2)
+
+
+def test_keyword_query_failure_is_reported_as_warning(tmp_path):
+    st = Store(tmp_path / "nofts.sqlite")
+    _add_instrument_papers(st, "x", "X", 0, 6, first_seen_day=_day(0))
+    st.conn.execute("DROP TABLE papers_fts")
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, subgroups=SUBGROUPS)
+    assert len(tr["warnings"]) == 1 and tr["warnings"][0].startswith("subgroup spatial: keyword query failed")
+    sg = {r["id"]: r for r in tr["subgroups"]}["spatial"]
+    assert sg["current"] == 0  # keywords contributed nothing, topics matched nothing
+    md = trends.render_trends_markdown(tr)
+    assert "_Warnings:_\n- subgroup spatial: keyword query failed" in md
+    json.dumps(tr)
+
+
+def test_window_note_and_digest_window_note(synthetic):
+    tr = trends.compute_trends(synthetic, UNTIL, weeks=4)
+    md = trends.render_trends_markdown(tr)
+    assert "Weeks are seven-day buckets ending 2026-10-17." in md and "digest tables" not in md
+    note = trends.digest_window_note("2026-10-10", UNTIL)
+    assert note == "The digest tables cover 2026-10-10 to 2026-10-17 (8 inclusive days), so their counts can differ from the seven-day figures in this section."
+    md2 = trends.render_trends_markdown(tr, window_note=note)
+    assert f"_{note}_" in md2
+    assert "a window of its own" in trends.digest_window_note("bad", UNTIL)
+
+
+def test_cli_rejects_bad_arguments_at_the_parser(tmp_path, monkeypatch, capsys):
+    from litradar import cli
+
+    monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "unused.sqlite"))
+    cases = [
+        (["trends", "--weeks", "0"], "expected a positive integer, got '0'"),
+        (["trends", "--until", "17/10/2026"], "expected YYYY-MM-DD, got '17/10/2026'"),
+        (["trends", "--top", "x"], "expected a positive integer, got 'x'"),
+    ]
+    for argv, message in cases:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "usage: litradar trends" in err and message in err and "Traceback" not in err
+
+
+def test_partial_week_rule_with_two_weeks_uses_the_other_week(tmp_path):
+    """Leave-one-out: with two baseline weeks a 20 % week is measured against the full one, not their average."""
+    st = Store(tmp_path / "two-weeks.sqlite")
+    _bulk_instrument_papers(st, "x", 2, 50)
+    _bulk_instrument_papers(st, "x", 1, 10)  # 20 % of the other week -> partial
+    _bulk_instrument_papers(st, "x", 0, 55)
+    st.commit()
+    hist = trends.compute_trends(st, UNTIL, weeks=4)["history"]
+    assert hist["paper_weeks_with_data"] == 1 and [(d["week"], d["total"], d["median"]) for d in hist["paper_weeks_dropped_partial"]] == [(1, 10, 50.0)]
+    assert hist["previous_week_partial_papers"] is True
+    # 30 % of the other week is a slow week, not a partial one
+    _add_instrument_papers(st, "x", "X", 1, 5, prefix="x-extra-")  # distinct ids: 10 + 5 = 15 papers
+    st.commit()
+    hist = trends.compute_trends(st, UNTIL, weeks=4)["history"]
+    assert hist["paper_weeks_with_data"] == 2 and hist["paper_weeks_dropped_partial"] == []

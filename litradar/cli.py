@@ -174,12 +174,33 @@ def cmd_check_config(args) -> int:
     return 0 if ok else 1
 
 
+def _positive_int(s: str) -> int:
+    try:
+        n = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {s!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {s!r}")
+    return n
+
+
+def _iso_date(s: str) -> str:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {s!r}") from None
+
+
 def cmd_trends(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
     until = args.until or datetime.now(timezone.utc).date().isoformat()
     subgroups = (settings.yaml("subgroups") or {}).get("subgroups") or []
-    tr = trends.compute_trends(store, until, weeks=args.weeks, subgroups=subgroups)
+    try:
+        tr = trends.compute_trends(store, until, weeks=args.weeks, subgroups=subgroups)
+    except ValueError as exc:
+        print(f"trends: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(tr, indent=1, default=str))
         return 0
@@ -253,9 +274,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.set_defaults(func=cmd_check_config)
 
     p = sub.add_parser("trends", help="what changed: this week vs last week vs the trailing 13-week baseline")
-    p.add_argument("--until", help="last day of the current week, YYYY-MM-DD (default: today, UTC)")
-    p.add_argument("--weeks", type=int, default=trends.DEFAULT_WEEKS, help="baseline length in weeks (default 13)")
-    p.add_argument("--top", type=int, default=10, help="rows per risers/fallers table (default 10)")
+    p.add_argument("--until", type=_iso_date, help="last day of the current week, YYYY-MM-DD (default: today, UTC)")
+    p.add_argument("--weeks", type=_positive_int, default=trends.DEFAULT_WEEKS, help="baseline length in weeks (default 13)")
+    p.add_argument("--top", type=_positive_int, default=10, help="rows per risers/fallers table (default 10)")
     p.add_argument("--out", help="directory for trends-<date>.md (default: the digest directory)")
     p.add_argument("--print", action="store_true", help="print the Markdown instead of writing a file")
     p.add_argument("--json", action="store_true", help="print the structured result as JSON")

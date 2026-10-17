@@ -19,7 +19,9 @@ python -m litradar trends --until 2026-10-17 --weeks 8 --top 15 --out /tmp/out
 ```
 
 `--until` is the last day of the current week (default: today, UTC). `--weeks` is the baseline
-length (default 13). `LITRADAR_DB` selects another database file, as for every other command.
+length (default 13). Both are validated at the parser (`--weeks 0` or `--until 17/10/2026` exit
+with the usual argparse message, status 2). `LITRADAR_DB` selects another database file, as for
+every other command.
 
 From Python:
 
@@ -39,11 +41,12 @@ print(trends.render_trends_markdown(tr))
 | Week *k* | the seven days ending `until − 7k`; *k* = 0 is the current week `[until − 6, until]`, *k* = 1 the previous week |
 | Event date | a paper's `pub_date`, or the date part of `first_seen` when `pub_date` is empty (same rule as `Store.papers_in_window`); archive records use `first_public` |
 | Baseline | weeks 1..`weeks` that contain any data for the family (papers, or archive records). Weeks before the corpus started are *not* counted as zeros, so five weeks of history are compared against five weeks |
-| mean, std | arithmetic mean and **sample** standard deviation of the entity's weekly count over the baseline weeks; an entity absent in a baseline week counts 0 there |
+| Partial week | a baseline week whose **family total** is below `min_week_fraction` (default 0.25) of the median of the *other* positive weekly totals (leave-one-out, so a week is never measured against itself). It is excluded from the baseline (not from `series` or from "last week"), listed in `history.*_weeks_dropped_partial` with the median it was compared against, and named in the rendered header. Typical causes: the first run of a corpus, an interrupted run, the extra boundary day of an 8-day pull landing alone in an earlier bucket. The rule needs at least two baseline weeks to compare; `min_week_fraction=0` disables it |
+| mean, std | arithmetic mean and **sample** standard deviation of the entity's weekly count over the baseline weeks; an entity absent in a baseline week counts 0 there. `std` is `null` (rendered `n/a`) with fewer than two baseline weeks |
 | z | `(current − mean) / max(std, 1.0)`. The floor of one count stops integer series with no spread (3, 3, 3, …) from producing infinite scores. `z` is `null` while fewer than `min_baseline_weeks` (default 3) baseline weeks have data |
 | notable | `|z| ≥ 2` **and** at least 5 counts on the side that carries the signal: this week's count for a riser, the baseline mean for a faller (a platform that went from 20 papers a week to 0 is a faller worth seeing although its current count is 0) |
 | new this week | an entity whose earliest `papers.first_seen` over all its mentions falls in the current week, i.e. its first appearance in the corpus. Archive instrument models have no ingestion timestamp, so their earliest `first_public` is used. On a **cold start** (nothing in the store was seen before the current week) every entity is new; the renderer says so and omits the list |
-| conversion | a preprint whose `published_doi` resolves to another paper in the store (`papers.id = 'doi:' ‖ lower(published_doi)`), reported in the week in which the journal version was published or first seen, or the preprint row was updated. `lag_days` = journal `pub_date` − preprint `pub_date` |
+| conversion | a preprint whose `published_doi` resolves to another paper in the store (`papers.id = 'doi:' ‖ lower(published_doi)`), reported in the week in which the journal version was published or first seen. A re-upserted preprint (new version, overlap day of consecutive pulls) does **not** re-report an old pair. `lag_days` = journal `pub_date` − preprint `pub_date` |
 
 ### Entity families and metrics
 
@@ -59,6 +62,17 @@ The subgroup rule mirrors `Pipeline.assign_subgroups` (which is computed but not
 phrase matching is token-based with Porter stemming, so it is marginally broader than the
 pipeline's substring test (`scRNA-seq` also matches `scRNA seq`).
 
+### Why the partial-week rule exists
+
+Without it, a short first week sits in the baseline for the whole `weeks` horizon. On a corpus whose
+first 8-day pull put one boundary day (a few hundred papers) into its own bucket next to full weeks
+of several thousand, an entity moving from 40 papers a week to 60 scores z = +20 against three full
+weeks but only z = +1.5 (not notable) once the short week is mixed in: the spread it adds damps every
+score for a quarter. The family total tells the two cases apart where an entity's own series cannot
+(a slow week is 70 % of the median, not 8 %). The median is taken over the *other* weeks so that
+with two weeks of history a 20 % boundary-day bucket is already separated from the full week next
+to it (a plain median of the pair would be their average and let it through).
+
 ### Ranking of risers and fallers
 
 `top_movers(trends, n)` takes every entity with at least `min_count` counts this week, last week or
@@ -72,10 +86,13 @@ header states that z-scores are suppressed.
 {
   "until": "2026-10-17", "week_start": "2026-10-11",
   "previous_week": {"start": "2026-10-04", "end": "2026-10-10"},
-  "baseline": {"weeks": 13, "since": "2026-07-12", "end": "2026-10-10", "min_weeks_for_z": 3},
-  "history": {"paper_weeks_with_data": 0, "archive_weeks_with_data": 0, "z_available_papers": false, "z_available_archive": false},
+  "baseline": {"weeks": 13, "since": "2026-07-12", "end": "2026-10-10", "min_weeks_for_z": 3, "min_week_fraction": 0.25},
+  "history": {"paper_weeks_with_data": 0, "archive_weeks_with_data": 0, "z_available_papers": false, "z_available_archive": false,
+              "paper_weeks_dropped_partial": [{"week": 1, "start": "2026-10-04", "end": "2026-10-10", "total": 282, "median": 3280.0}],
+              "archive_weeks_dropped_partial": [], "previous_week_partial_papers": true, "previous_week_partial_archive": false},
   "thresholds": {"notable_z": 2.0, "min_count": 5, "std_floor": 1.0},
   "cold_start": true,
+  "warnings": ["subgroup spatial: keyword query failed (...); keyword papers counted as 0"],
   "totals": {"papers": {...delta...}, "archive_experiments": {...delta...}},
   "instruments": {"papers": [row, ...], "experiments": [row, ...]},
   "companies": [row, ...], "subgroups": [row, ...], "journals": [row, ...],
@@ -94,9 +111,12 @@ subgroup rows add `tracked_author_papers`. Everything is JSON-serialisable.
 
 ## Rendered section
 
-`render_trends_markdown(trends, top_n=10, heading_level=2)` produces:
+`render_trends_markdown(trends, top_n=10, heading_level=2, window_note=None)` produces:
 
-* a header with the window, the amount of history available and the exact z / notable rule;
+* a header with the window, the amount of history available, the statement that weeks are
+  seven-day buckets ending `until`, and the exact z / notable rule; then, when applicable, the
+  optional `window_note` sentence, the partial weeks excluded from the baseline, and any
+  `warnings`;
 * a corpus line (papers and archive experiments: this week, last week, baseline, z);
 * **Biggest risers** and **Biggest fallers** tables (entity, kind, this week, last week,
   baseline mean ± std, z, detail — company role split, archive study count or ticker);
@@ -116,20 +136,34 @@ from .. import trends as trends_mod                         # near the other imp
 
     # ---- what changed (after the "Top N innovations" loop, before "Instruments named in this week's papers")
     tcfg = cfg.get("trends") or {}
+    trend_data = None
     if tcfg.get("enabled", True):
-        tr = trends_mod.compute_trends(store, until, weeks=int(tcfg.get("weeks", 13)), subgroups=trends_mod.load_subgroups())
-        md.append(trends_mod.render_trends_markdown(tr, top_n=int(tcfg.get("top_n", 10))))
-        summary["trends"] = {"notable": tr["notable"], "new_entities": tr["new_entities"], "conversions": tr["conversions"], "totals": tr["totals"]}
+        trend_data = trends_mod.compute_trends(
+            store, until, weeks=int(tcfg.get("weeks", 13)), subgroups=trends_mod.load_subgroups(),
+            min_week_fraction=float(tcfg.get("min_week_fraction", 0.25)),
+        )
+        md.append(trends_mod.render_trends_markdown(
+            trend_data, top_n=int(tcfg.get("top_n", 10)), window_note=trends_mod.digest_window_note(since, until),
+        ))
 ```
 
-(`summary` is built at the end of `render()`, so either move the assignment below it or add the
-key there.) Optional `config/radar.yaml` block:
+and in the `summary = {...}` dict at the end of `render()` add
+`"trends": {"notable": trend_data["notable"], "new_entities": trend_data["new_entities"], "conversions": trend_data["conversions"], "totals": trend_data["totals"], "warnings": trend_data["warnings"]} if trend_data else None`.
+
+**Counts differ from the digest tables.** The digest's own tables count the pipeline window
+(`pipeline.window(days=7)` gives 8 inclusive days, `since..until`), while the trends section
+counts the seven-day bucket `until − 6..until`. The same entity can therefore show, say, 46 papers
+in "Instruments named in this week's papers" and 40 in "What changed" in the same document. The
+`window_note` argument above prints the digest window and this caveat directly under the header.
+
+Optional `config/radar.yaml` block (defaults apply when absent):
 
 ```yaml
 trends:
   enabled: true
   weeks: 13
   top_n: 10
+  min_week_fraction: 0.25
 ```
 
 ## Limitations
@@ -139,8 +173,21 @@ trends:
   retroactively. Weekly snapshots of `--json` output capture what the radar knew at the time.
 * The first run of a corpus is a cold start: no baseline, every entity new. The section becomes
   informative from the second weekly run and reaches its full design from week fourteen.
+* Trend weeks are seven-day buckets ending `until`; the digest tables use the pipeline window, which
+  is eight inclusive days for `--days 7`. Counts for the same entity differ between the two parts of
+  one document (see the wiring section); `window_note` makes the reason visible.
+* A week whose family total is below 25 % of the median weekly total is treated as partial and left
+  out of the baseline. A genuinely slow week is never that slow; but a corpus that is deliberately
+  tiny (a handful of sources) with a bursty week can see the quiet weeks excluded. Set
+  `min_week_fraction=0` to keep every week.
+* A `published_doi` back-filled onto a preprint whose journal version was already stored in an
+  earlier week is not reported as a conversion (there is no persisted "already reported" state, so
+  the alternative would be re-reporting old pairs every time a preprint is re-upserted).
 * `first_seen` is an ingestion timestamp, so "new this week" means new to *this* database, not new
   to the world.
 * Conversions depend on sources that expose a `published_doi` (bioRxiv / medRxiv) and on the journal
   version being in the store under its DOI id; conversions whose journal version was never ingested
   are not visible.
+* Anything that silently degraded during the computation (a subgroup keyword query that failed, so
+  its keyword papers count 0) is listed in `warnings` and printed under the header, so a zero is
+  never mistaken for a measurement.
