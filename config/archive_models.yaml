@@ -29,11 +29,10 @@ entities:
     notes: "legacy SMRT instruments (2011-2016)"
   pacb-sequel:
     vendor: Pacific Biosciences
-    proposed: true
     sra: ["sequel"]
     ena: ["Sequel"]
     epmc_terms: []
-    notes: "first-generation Sequel; Europe PMC cannot separate 'Sequel' from 'Sequel II' (prefix match), so no epmc terms"
+    notes: "first-generation Sequel (gazetteer entry landed 2026-10-17); Europe PMC cannot separate 'Sequel' from 'Sequel II' (prefix match), so no epmc terms"
   pacb-sequel-ii:
     vendor: Pacific Biosciences
     sra: ["sequel ii", "sequel iie"]

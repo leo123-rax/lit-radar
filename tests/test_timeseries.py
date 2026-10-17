@@ -272,10 +272,11 @@ def test_real_config_is_consistent_with_gazetteer_and_vocabulary():
     # every archive model string is claimed by exactly one entity
     claimed = [m for s in specs.values() for m in s.ena]
     assert len(claimed) == len(set(claimed)), "an ENA model string is listed under two entities"
-    # only the first-generation Sequel is still pre-registered ahead of the gazetteer
-    assert {eid for eid, s in specs.items() if s.proposed} == {"pacb-sequel"}
+    # every pre-registered entity has landed in the gazetteer (pacb-sequel on 2026-10-17), so nothing is `proposed`
+    assert {eid for eid, s in specs.items() if s.proposed} == set()
+    assert "pacb-sequel" in instruments
     warnings = ts.check_models(specs, instruments)
-    assert warnings == ["pacb-sequel: proposed, add the gazetteer entry"]
+    assert warnings == []
     # Flongle has no archive model; it is reachable through Europe PMC only
     assert "Flongle" in specs["ont-minion"].epmc_terms and "Vega" in specs["pacb-vega"].ena
 
@@ -422,5 +423,5 @@ def test_check_config_validates_archive_models(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     line = [ln for ln in out.splitlines() if ln.startswith("archive_models:")]
-    assert len(line) == 1 and "entities" in line[0] and "1 warnings" in line[0], out
-    assert "  pacb-sequel: proposed, add the gazetteer entry" in out
+    assert len(line) == 1 and "entities" in line[0] and "0 warnings" in line[0], out
+    assert "proposed" not in out

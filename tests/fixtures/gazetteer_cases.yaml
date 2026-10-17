@@ -1,0 +1,429 @@
+# Regression cases for the gazetteers, driven by tests/test_gazetteer.py::test_fixture_cases.
+# Each case: text, gazetteer (instrument | company), expect (entity ids that MUST fire), reject (ids that must NOT).
+# Texts are paraphrases of the false positives / misses found in the 2026-10-17 live audit of the mentions table.
+cases:
+# ---------------- PacBio generations ----------------
+- text: "Libraries were sequenced on the PacBio Sequel platform using 2.1 chemistry."
+  gazetteer: instrument
+  expect: [pacb-sequel]
+  reject: [pacb-sequel-ii]
+- text: "Jersey blood PacBio Sequel 2,641,709,256 bp were generated."
+  gazetteer: instrument
+  expect: [pacb-sequel]
+  reject: [pacb-sequel-ii]
+- text: "The sequel to this study will address the remaining questions."
+  gazetteer: instrument
+  expect: []
+  reject: [pacb-sequel, pacb-sequel-ii]
+- text: "SMRTbell libraries were run on a Sequel IIe system with 30-h movies."
+  gazetteer: instrument
+  expect: [pacb-sequel-ii]
+  reject: [pacb-sequel]
+- text: "HiFi libraries were sequenced on a Revio (PacBio, Menlo Park, CA) with 24-h movies."
+  gazetteer: instrument
+  expect: [pacb-revio]
+  reject: []
+- text: "Libraries were sequenced on a Revio instrument."
+  gazetteer: instrument
+  expect: [pacb-revio]
+  reject: []
+- text: "the revio of the data was done"
+  gazetteer: instrument
+  expect: []
+  reject: [pacb-revio]
+# ---------------- dictionary-word aliases ----------------
+- text: "A 100-Hounsfield-unit attenuation was evident on the monitor and an evident score indicated enhancement."
+  gazetteer: instrument
+  expect: []
+  reject: [evident-microscopy]
+- text: "Covariance Nonstationarity is Evident in Spatial Transcriptomics"
+  gazetteer: instrument
+  expect: []
+  reject: [evident-microscopy]
+- text: "Sections were imaged on an Olympus IX73 microscope (Evident, Tokyo, Japan)."
+  gazetteer: instrument
+  expect: [evident-microscopy]
+  reject: []
+- text: "Participants were interviewed to enrich understanding of the survey; the ENRICh scale was validated; the ENRICH Project continued."
+  gazetteer: instrument
+  expect: []
+  reject: [biorad-ngc]
+- text: "The protein was purified by size-exclusion chromatography (ENrich SEC 650 10/300, Bio-Rad)."
+  gazetteer: instrument
+  expect: [biorad-ngc]
+  reject: []
+- text: "Bowel transit time was measured; memory CD8 T cells transit through a progenitor-like state; pulse transit time was derived."
+  gazetteer: instrument
+  expect: []
+  reject: [mirus]
+- text: "Cells were transfected with TransIT-LT1 (Mirus Bio) according to the manufacturer."
+  gazetteer: instrument
+  expect: [mirus]
+  reject: []
+- text: "HEK293T cells were transfected using TransIT reagent (Mirus Bio, Madison, WI)."
+  gazetteer: instrument
+  expect: [mirus]
+  reject: []
+- text: "The ectodomains of Izumo1 and Juno were cloned into pFastBac1; sperm IZUMO1 binds egg JUNO."
+  gazetteer: instrument
+  expect: []
+  reject: [fluidigm-biomark]
+- text: "Samples were loaded on 96.96 Dynamic Array IFCs using the Juno controller (Fluidigm)."
+  gazetteer: instrument
+  expect: [fluidigm-biomark]
+  reject: []
+- text: "Transect lines were walked for chameleon surveys inside the remaining forests; apricot orchards were sampled."
+  gazetteer: instrument
+  expect: []
+  reject: [spt-labtech]
+- text: "Two-photon imaging used a Coherent Chameleon Ultra II Ti:sapphire laser."
+  gazetteer: instrument
+  expect: [coherent-lasers]
+  reject: [spt-labtech]
+- text: "Grids were prepared on a chameleon plunge freezer (SPT Labtech) before cryo-EM."
+  gazetteer: instrument
+  expect: [spt-labtech]
+  reject: []
+- text: "Cells were washed with PBS 3 times and fixed in 4% PFA."
+  gazetteer: instrument
+  expect: []
+  reject: [pbs-biotech]
+- text: "Cells were expanded in a PBS 3 MAG Vertical-Wheel bioreactor (PBS Biotech)."
+  gazetteer: instrument
+  expect: [pbs-biotech]
+  reject: []
+- text: "The study will be conducted in New Brunswick, Canada, with approval from the University of New Brunswick."
+  gazetteer: instrument
+  expect: []
+  reject: [eppendorf-bioflo]
+- text: "Cultures were shaken in an Innova 44 incubator (New Brunswick Scientific)."
+  gazetteer: instrument
+  expect: [eppendorf-bioflo]
+  reject: []
+- text: "Brain growth was accompanied by remodeling of mesoscale functional networks."
+  gazetteer: instrument
+  expect: []
+  reject: [msd-mesoscale]
+- text: "Cytokines were measured with a V-PLEX panel on a Meso Scale Discovery (MSD) reader."
+  gazetteer: instrument
+  expect: [msd-mesoscale]
+  reject: []
+- text: "DNA was extracted with the Clear-S Quick-DNA Extraction Kit (InVirusTech, Gwangju, South Korea)."
+  gazetteer: instrument
+  expect: []
+  reject: [zymo]
+- text: "DNA was extracted with the Quick-DNA Miniprep Plus kit (Zymo Research)."
+  gazetteer: instrument
+  expect: [zymo]
+  reject: []
+- text: "The octet rule explains the valence of the main-group elements."
+  gazetteer: instrument
+  expect: []
+  reject: [sartorius-octet, sartorius-incucyte]
+- text: "Binding kinetics were measured by biolayer interferometry on an Octet RED96e (ForteBio)."
+  gazetteer: instrument
+  expect: [sartorius-octet]
+  reject: [sartorius-incucyte]
+- text: "A new generation of highly advanced analytical platforms such as UHPLC-QTOF was used."
+  gazetteer: instrument
+  expect: []
+  reject: [agilent-fragment-analyzer]
+- text: "Library size was checked on a Fragment Analyzer (Advanced Analytical, Agilent)."
+  gazetteer: instrument
+  expect: [agilent-fragment-analyzer]
+  reject: []
+- text: "RNA was isolated with the Plasma/Serum Exosome RNA Isolation Kit (Norgen Biotek)."
+  gazetteer: instrument
+  expect: []
+  reject: [biotek-synergy]
+- text: "Luminescence was read on a BioTek Synergy H1 plate reader."
+  gazetteer: instrument
+  expect: [biotek-synergy]
+  reject: []
+# ---------------- software never credits hardware ----------------
+- text: "Data were acquired on a Helios mass cytometer and analyzed using Cytobank and FlowJo software."
+  gazetteer: instrument
+  expect: [bd-flowjo]
+  reject: [bd-facs]
+- text: "Cells were sorted on a MA900 Multi-Application Cell Sorter (SONY) and analyzed with FlowJo v10."
+  gazetteer: instrument
+  expect: [sony-cytometry, bd-flowjo]
+  reject: [bd-facs]
+- text: "Cells were analysed on a BD FACSCanto II and gated in FACSDiva."
+  gazetteer: instrument
+  expect: [bd-facs, bd-flowjo]
+  reject: []
+- text: "Images were acquired with ZEN Blue (Carl Zeiss Microscopy) and 3D rendered in Imaris (Bitplane)."
+  gazetteer: instrument
+  expect: [zeiss-zen, andor-imaris]
+  reject: [zeiss-lsm, andor-dragonfly]
+- text: "Raw single-cell reads were processed with Cell Ranger (10x Genomics) and clustered in Seurat."
+  gazetteer: instrument
+  expect: [txg-software, scrna-open-source-tools]
+  reject: [txg-single-cell-3prime, txg-chromium]
+- text: "Public GEO matrices (GSM7518067) were re-aligned with Cell Ranger v7."
+  gazetteer: instrument
+  expect: [txg-software]
+  reject: [txg-single-cell-3prime, txg-chromium]
+- text: "Reads were basecalled with Dorado v0.7 in super-accuracy mode (basecalling on GPU)."
+  gazetteer: instrument
+  expect: [ont-software]
+  reject: [ont-chemistry]
+- text: "Reads were basecalled with Dorado (Oxford Nanopore) in super-accuracy mode."
+  gazetteer: instrument
+  expect: [ont-software, ont-chemistry]
+  reject: []
+- text: "A dorado was caught off the coast and its guppy prey counted."
+  gazetteer: instrument
+  expect: []
+  reject: [ont-software]
+- text: "Images were quantified in NIS-Elements (Nikon), cellSens (Olympus) and MetaMorph (Molecular Devices)."
+  gazetteer: instrument
+  expect: [nikon-nis-elements, evident-cellsens, molecular-devices-software]
+  reject: [nikon-ax, evident-microscopy, molecular-devices-imagexpress]
+- text: "Blots were quantified with Image Lab software (Bio-Rad) and droplets read in QuantaSoft."
+  gazetteer: instrument
+  expect: [biorad-software]
+  reject: [biorad-ngc, biorad-ddpcr]
+# ---------------- vendor names and consumables do not credit instruments ----------------
+- text: "Cells were cryo-sectioned at 10 um using a cryostat (CM1850, Leica Biosystems)."
+  gazetteer: instrument
+  expect: [leica-histology]
+  reject: [leica-stellaris]
+- text: "Samples were plunge-frozen using a Leica EM GP2 plunge freezer (Leica Microsystems)."
+  gazetteer: instrument
+  expect: [leica-em-cryo]
+  reject: [leica-stellaris]
+- text: "Slides were scanned on a Leica Aperio AT2 DX slide scanner."
+  gazetteer: instrument
+  expect: [leica-aperio]
+  reject: [leica-stellaris]
+- text: "Images were acquired on a Leica TCS SP8 confocal microscope."
+  gazetteer: instrument
+  expect: [leica-stellaris]
+  reject: []
+- text: "Cells were grown in RPMI with 10% FBS (Gibco) and penicillin-streptomycin (Invitrogen) and lysed in TRIzol (Invitrogen)."
+  gazetteer: instrument
+  expect: [thermo-molbio-reagents]
+  reject: [thermo-hyperforma]
+- text: "Lysates were cleared at 15 000 rpm in a Sorvall RC 6+ centrifuge."
+  gazetteer: instrument
+  expect: [thermo-benchtop]
+  reject: [thermo-hyperforma]
+- text: "Trypsin was purchased from Promega and antibodies from Abcam."
+  gazetteer: instrument
+  expect: []
+  reject: [promega-glomax]
+- text: "The sample was spotted on Whatman 3MM filter paper and air-dried."
+  gazetteer: instrument
+  expect: [cytiva-consumables]
+  reject: [cytiva-akta]
+- text: "The complex was purified on a Superdex 200 Increase 10/300 GL column using an AKTA pure system (Cytiva)."
+  gazetteer: instrument
+  expect: [cytiva-resins, cytiva-akta]
+  reject: []
+- text: "Metal content was determined by ICP-OES (Avio 200, PerkinElmer) and spermidine from PerkinElmer was used."
+  gazetteer: instrument
+  expect: []
+  reject: [revvity-opera]
+- text: "Mice were imaged on an IVIS Spectrum (PerkinElmer) after luciferin injection."
+  gazetteer: instrument
+  expect: [revvity-ivis]
+  reject: [revvity-opera]
+- text: "Absorbance was read on a SpectraMax 190 (Molecular Devices)."
+  gazetteer: instrument
+  expect: [molecular-devices-spectramax]
+  reject: [molecular-devices-imagexpress]
+- text: "Growth was monitored in a Spark microplate reader (Tecan, Mannedorf, Switzerland)."
+  gazetteer: instrument
+  expect: [tecan-readers]
+  reject: [tecan-fluent]
+- text: "Tissues were homogenized with a gentleMACS Dissociator (Miltenyi Biotec) and T cells isolated with the Pan T Cell Isolation Kit."
+  gazetteer: instrument
+  expect: [miltenyi-macs-reagents]
+  reject: [miltenyi-macsquant]
+- text: "XRD data were collected on a PANalytical Empyrean diffractometer."
+  gazetteer: instrument
+  expect: []
+  reject: [malvern-panalytical]
+- text: "Particle size was measured on a Zetasizer Nano ZS (Malvern)."
+  gazetteer: instrument
+  expect: [malvern-panalytical]
+  reject: []
+- text: "ELISA kits were purchased from Affymetrix eBioscience (San Diego, CA)."
+  gazetteer: instrument
+  expect: []
+  reject: [thermo-axiom]
+- text: "Expression data came from the Affymetrix Human Genome U133 Plus 2.0 Array (GPL570)."
+  gazetteer: instrument
+  expect: [thermo-axiom]
+  reject: []
+- text: "The m5C antibody was from Diagenode (C15200081)."
+  gazetteer: instrument
+  expect: []
+  reject: [hologic-diagenode]
+- text: "Chromatin was sheared with a Bioruptor Pico (Diagenode)."
+  gazetteer: instrument
+  expect: [hologic-diagenode]
+  reject: []
+- text: "Sequencing-grade trypsin was purchased from Promega and peptides were analysed on an Orbitrap Exploris 480."
+  gazetteer: instrument
+  expect: [thermo-orbitrap-exploris]
+  reject: [promega-glomax]
+- text: "Reads were sequenced on an Illumina platform (see Supplementary Methods)."
+  gazetteer: instrument
+  expect: [ilmn-sequencing]
+  reject: []
+- text: "Libraries were sequenced on an Illumina NovaSeq 6000 (2 x 150 bp)."
+  gazetteer: instrument
+  expect: [ilmn-novaseq-6000]
+  reject: [ilmn-sequencing]
+- text: "Libraries were sequenced on a MinION Mk1B flow cell."
+  gazetteer: instrument
+  expect: [ont-minion]
+  reject: []
+- text: "Xenium spatial transcriptomics was performed on ileal tissues."
+  gazetteer: instrument
+  expect: [txg-xenium]
+  reject: []
+- text: "RNA-seq libraries were built with the KAPA Stranded RNA-Seq Library Prep Kit."
+  gazetteer: instrument
+  expect: [roche-kapa]
+  reject: []
+# ---------------- companies ----------------
+- text: "Due to the broad range of rupture events (20-700 pN) we binned the data; this approach has the broad applicability needed."
+  gazetteer: company
+  expect: []
+  reject: [broad-institute]
+- text: "Chemical Biology Program, Broad Institute, Cambridge, MA, United States"
+  gazetteer: company
+  expect: [broad-institute]
+  reject: []
+- text: "Polycystic kidney diseases are linked to a myriad of hepatobiliary diseases; Myriad biological processes depend on acetylation."
+  gazetteer: company
+  expect: []
+  reject: [myriad]
+- text: "Germline testing was performed by Myriad Genetics (Salt Lake City, UT) using the MyRisk panel."
+  gazetteer: company
+  expect: [myriad]
+  reject: []
+- text: "Primers were synthesized by IDT (Coralville, IA, USA) and resuspended in TE buffer."
+  gazetteer: company
+  expect: [danaher]
+  reject: []
+- text: "We derive a recursion for the factor suppressing the leading mutation load; we can acquire recursion from linguistic examples."
+  gazetteer: company
+  expect: []
+  reject: [recursion]
+- text: "J.D. serves on the board of directors of Recursion Pharmaceuticals and holds stock."
+  gazetteer: company
+  expect: [recursion]
+  reject: []
+- text: "Terpene lactones and flavonoid glycosides from Ginkgo biloba were dereplicated."
+  gazetteer: company
+  expect: []
+  reject: [ginkgo]
+- text: "Strains were designed with Ginkgo Bioworks (Boston, MA)."
+  gazetteer: company
+  expect: [ginkgo]
+  reject: []
+- text: "After the formulation of the Schrodinger equation in 1926, the time-independent Schrödinger equation became standard."
+  gazetteer: company
+  expect: []
+  reject: [schrodinger]
+- text: "Data were analysed using Bio-Rad CFX Maestro software (v4.1)."
+  gazetteer: company
+  expect: [bio-rad]
+  reject: [schrodinger]
+- text: "Structures were prepared in Schrödinger Maestro 14.3 (Schrödinger LLC) and rendered in PyMOL (Schrödinger, LLC)."
+  gazetteer: company
+  expect: [schrodinger]
+  reject: []
+- text: "Wuxi Mental Health Centre, Wuxi, Jiangsu, China; dishes were from Wuxi Nest Biotechnology."
+  gazetteer: company
+  expect: []
+  reject: [wuxi]
+- text: "Compounds were synthesized by WuXi AppTec (Shanghai) Co., Ltd."
+  gazetteer: company
+  expect: [wuxi]
+  reject: []
+- text: "JS has received consulting fees from GSK, Pfizer and Sanofi; honoraria from Bayer, Biogen and Janssen; and owns stock in Lilly and Vertex."
+  gazetteer: company
+  expect: [gsk, pfizer, sanofi, bayer, biogen, jnj, lilly-tune, vertex]
+  reject: []
+- text: "Daiichi Sankyo, MSD, Novartis Pharma K.K. provided research funding."
+  gazetteer: company
+  expect: [merck-us, novartis]
+  reject: []
+- text: "The phylogenetic tree was built with q2-fragment-insertion (Janssen et al., 2018)."
+  gazetteer: company
+  expect: []
+  reject: [jnj]
+- text: "How plants decode immunogenic glycans; to decode a read the decoder takes each possible barcode."
+  gazetteer: company
+  expect: []
+  reject: [amgen]
+- text: "pQTL data were extracted from the deCODE genetics database (Reykjavik, Iceland)."
+  gazetteer: company
+  expect: [amgen]
+  reject: []
+- text: "This work was supported by the Spastic Paraplegia Foundation and the Lilly & Blair Foundation."
+  gazetteer: company
+  expect: []
+  reject: [lilly-tune]
+- text: "Supported by the French National Research Agency (ANR-10-INSB-04 FBI BIOGEN)."
+  gazetteer: company
+  expect: []
+  reject: [biogen]
+- text: "This work was funded by the Novo Nordisk Foundation (NNF21OC0066551) and Novo Nordisk Fonden."
+  gazetteer: company
+  expect: [novo-nordisk-foundation]
+  reject: [novo-nordisk]
+- text: "Ann-Kristin Zoller owns stock in Novo Nordisk and Vertex Pharmaceuticals."
+  gazetteer: company
+  expect: [novo-nordisk, vertex]
+  reject: [novo-nordisk-foundation]
+- text: "AlphaFold3 modelling of the complex predicted Phe339 at the kinase pocket; structures were downloaded from the AlphaFold database."
+  gazetteer: company
+  expect: [google-deepmind]
+  reject: [isomorphic]
+- text: "Isomorphic Labs, London, UK"
+  gazetteer: company
+  expect: [isomorphic]
+  reject: []
+- text: "The anthropic principle constrains the parameters; an anthropic argument was offered."
+  gazetteer: company
+  expect: []
+  reject: [anthropic-co]
+- text: "Claude (Anthropic, models 4.7-5) was used to improve the readability of the code."
+  gazetteer: company
+  expect: [anthropic-co]
+  reject: []
+- text: "Representative genomes were downloaded from progenomes3.embl.de and trees drawn with itol.embl.de."
+  gazetteer: company
+  expect: []
+  reject: [embl]
+- text: "Developmental Biology Unit, European Molecular Biology Laboratory (EMBL), Heidelberg, Germany"
+  gazetteer: company
+  expect: [embl]
+  reject: []
+- text: "Rumen pH was measured with a Sartorius PB-10 pH meter; the sartorius muscle was dissected."
+  gazetteer: company
+  expect: [sartorius]
+  reject: []
+- text: "The sartorius muscle was dissected and weighed."
+  gazetteer: company
+  expect: []
+  reject: [sartorius]
+- text: "RNA was quantified on a NanoDrop 2000 (Fisher Scientific, Pittsburgh, PA)."
+  gazetteer: company
+  expect: [thermo-fisher]
+  reject: []
+- text: "A cryostat (Leica CM1950, Leica, Wetzlar, Germany) was used for sectioning."
+  gazetteer: company
+  expect: [danaher]
+  reject: []
+- text: "Camera traps (Nikon D850) were deployed along transects; images were examined with an Olympus BX53 microscope (Olympus, Tokyo, Japan)."
+  gazetteer: company
+  expect: [evident, nikon]
+  reject: []
