@@ -8,6 +8,7 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
+  litradar tag      [--since 365d] [--translate]              tag papers with language + country codes; optionally translate non-English titles with Claude
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__
+from . import __version__, i18n
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -172,6 +173,33 @@ def cmd_check_config(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_tag(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    since, until = _parse_since(args.since), args.until
+    report = i18n.tag_store(store, since=since, until=until)
+    if args.translate:
+        report["translation"] = i18n.translate_titles(
+            store, since=since, until=until, model=settings.llm_model, api_key=settings.anthropic_api_key, max_items=args.max_translate
+        )
+    if args.json:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+        return 0
+    print(f"tagged {report['tagged']} papers ({report['with_country']} with at least one country)")
+    print("languages: " + ", ".join(f"{k} {v}" for k, v in report["languages"].items()))
+    top = list(report["countries"].items())[:30]
+    print("countries: " + ", ".join(f"{k} {v}" for k, v in top) + (" …" if len(report["countries"]) > 30 else ""))
+    if args.translate:
+        t = report["translation"]
+        line = f"translation: {t['status']}"
+        if t["status"] == "skipped":
+            line += f" ({t.get('reason')})"
+        else:
+            line += f" model={t['model']} candidates={t['candidates']} translated={t['translated']} refused_or_invalid={t['refused_or_invalid']} errored={t['errored']}"
+        print(line)
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="litradar", description="Weekly science-literature radar")
     ap.add_argument("--config-dir", default=None, help="directory with radar.yaml etc. (default: ./config)")
@@ -228,6 +256,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("check-config", help="validate config files")
     p.set_defaults(func=cmd_check_config)
+
+    p = sub.add_parser("tag", help="write language ('lang') and country codes ('countries') into papers.extra_json for dashboards and trends")
+    p.add_argument("--since", help="YYYY-MM-DD or Nd (e.g. 365d); default: everything")
+    p.add_argument("--until", help="YYYY-MM-DD; default: open-ended")
+    p.add_argument("--translate", action="store_true", help="translate non-English titles/abstracts into English with Claude via one Message Batches request (needs ANTHROPIC_API_KEY; model from LITRADAR_LLM_MODEL)")
+    p.add_argument("--max-translate", type=int, default=1000, help="cap on papers sent for translation per run")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_tag)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
