@@ -30,6 +30,7 @@ DEFAULT_MIN_INTERVAL = {
     "api.semanticscholar.org": 1.0,  # 1 req/s without a key
     "clinicaltrials.gov": 1.25,  # API v2 asks for ~50 requests/minute per IP; 1.25 s is ~48/min
     "api.reporter.nih.gov": 1.0,  # NIH RePORTER asks for no more than one request per second
+    "api.fda.gov": 0.25,  # openFDA: 240 req/min per IP or key; 1,000/day anonymous, 120,000/day with a free key
 }
 
 
