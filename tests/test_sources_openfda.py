@@ -1,17 +1,46 @@
 """openFDA device adapter tested against canned payloads (no network)."""
+import logging
+
 import pytest
 
 from litradar.sources import openfda
 
+NOT_JSON = object()
+
+
+class FakeResp:
+    """The two attributes of requests.Response the adapter reads."""
+
+    def __init__(self, status_code, body=None):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        if self._body is NOT_JSON:
+            raise ValueError("not json")
+        return self._body
+
+
+NO_MATCH = FakeResp(404, {"error": {"code": "NOT_FOUND", "message": "No matches found!"}})  # openFDA's empty-window answer
+
 
 class FakeHttp:
+    """Mimics Http.get: a canned payload is served as a 200 response, a FakeResp as itself, None as a failed request."""
+
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.calls = []
+        self.kwargs = []
 
-    def get_json(self, url, params=None, cache=False):
+    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,)):
         self.calls.append((url, params))
-        return self.payloads.pop(0) if self.payloads else None
+        self.kwargs.append({"headers": headers, "cache": cache, "ok_statuses": ok_statuses})
+        if not self.payloads:
+            return None
+        payload = self.payloads.pop(0)
+        if payload is None or isinstance(payload, FakeResp):
+            return payload
+        return FakeResp(200, payload)
 
 
 def _meta(total, skip=0, limit=1000):
@@ -92,13 +121,15 @@ def test_510k_normal_payload_yields_510k_and_denovo_items(monkeypatch):
     assert d.url == "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpmn/denovo.cfm?ID=DEN260007"
     assert "De Novo DEN260007" in d.summary and "decision DENG (De Novo granted) 2026-09-29" in d.summary
     assert "Unknown" not in d.summary and "clearance type Direct" in d.summary
+    assert "review advisory committee CV" in d.summary  # advisory_committee is blank on De Novo rows
     assert q.published == "2026-09-24"  # compact date normalised
     assert "advisory committee MI (Microbiology)" in q.summary and "third-party review" in q.summary and "expedited review" in q.summary
-    # one request, anonymous, with the documented parameters
+    # one request, anonymous, with the documented parameters; 404 is an expected answer, pages are 250 records
     assert len(http.calls) == 1
     url, params = http.calls[0]
     assert url == "https://api.fda.gov/device/510k.json"
-    assert params == {"search": "decision_date:[20260917 TO 20261017]", "limit": 1000, "skip": 0}
+    assert params == {"search": "decision_date:[20260917 TO 20261017]", "limit": 250, "skip": 0}
+    assert http.kwargs[0] == {"headers": {"Accept": "application/json"}, "cache": False, "ok_statuses": (200, 404)}
 
 
 def test_pma_normal_payload_original_and_supplement(monkeypatch):
@@ -121,13 +152,43 @@ def test_pma_normal_payload_original_and_supplement(monkeypatch):
 
 
 def test_empty_payloads_yield_nothing():
-    # HTTP 404 "No matches found!" is returned by the shared client as None
-    http = FakeHttp([None, None])
+    # HTTP 404 "No matches found!" is openFDA's answer for an empty window
+    http = FakeHttp([NO_MATCH, NO_MATCH])
     assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", api_key="")) == []
     assert len(http.calls) == 2  # one per endpoint, no retry paging
     http = FakeHttp([{"meta": _meta(0), "results": []}])
     assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="")) == []
     assert len(http.calls) == 1
+
+
+def test_no_match_is_info_but_failed_request_is_warning(caplog):
+    logger = "litradar.sources.openfda"
+    with caplog.at_level(logging.INFO, logger=logger):
+        http = FakeHttp([NO_MATCH])
+        assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="")) == []
+    assert any(r.levelno == logging.INFO and "no matches" in r.getMessage() for r in caplog.records)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=logger):
+        http = FakeHttp([None])  # network error / 5xx after retries / 429 host block: the client returns None
+        assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="")) == []
+    assert any(r.levelno == logging.WARNING and "request failed" in r.getMessage() for r in caplog.records)
+    assert not any("no matches" in r.getMessage() for r in caplog.records)
+
+
+def test_non_json_and_bad_request_answers_are_warnings(caplog):
+    logger = "litradar.sources.openfda"
+    with caplog.at_level(logging.INFO, logger=logger):
+        http = FakeHttp([FakeResp(200, NOT_JSON)])
+        assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="")) == []
+    assert any(r.levelno == logging.WARNING and "non-JSON" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=logger):
+        http = FakeHttp([FakeResp(400, {"error": {"code": "BAD_REQUEST", "message": "Skip value must 25000 or less."}})])
+        assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="")) == []
+    assert any(r.levelno == logging.WARNING and "Skip value must 25000 or less." in r.getMessage() for r in caplog.records)
+    http = FakeHttp([FakeResp(400, NOT_JSON)])  # non-JSON error body does not raise either
+    assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="")) == []
 
 
 @pytest.mark.parametrize(
@@ -180,10 +241,14 @@ def test_pagination_stops_on_short_page_without_total():
     assert len(http.calls) == 2
 
 
-def test_pagination_stops_when_a_page_fails_midway():
-    http = FakeHttp([_page("K", 0, 1000, 3000), None, _page("K", 2000, 1000, 3000)])
-    items = list(openfda.search(http, "510k", "q"))
+def test_pagination_stops_when_a_page_fails_midway(caplog):
+    with caplog.at_level(logging.WARNING, logger="litradar.sources.openfda"):
+        http = FakeHttp([_page("K", 0, 1000, 3000), None, _page("K", 2000, 1000, 3000)])
+        items = list(openfda.search(http, "510k", "q"))
     assert len(items) == 1000 and len(http.calls) == 2
+    assert any("skip=1000 failed" in r.getMessage() for r in caplog.records)
+    http = FakeHttp([_page("K", 0, 1000, 3000), NO_MATCH, _page("K", 2000, 1000, 3000)])  # 404 mid-run also stops
+    assert len(list(openfda.search(http, "510k", "q"))) == 1000 and len(http.calls) == 2
 
 
 def test_pagination_respects_skip_cap_and_max_records():
@@ -201,6 +266,10 @@ def test_page_size_is_clamped_to_openfda_maximum():
     http = FakeHttp([{"meta": _meta(1), "results": [K_SESE]}])
     list(openfda.search(http, "510k", "q", page_size=5000))
     assert http.calls[0][1]["limit"] == 1000
+    http = FakeHttp([{"meta": _meta(1), "results": [K_SESE]}])
+    list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="", page_size=1000))
+    assert http.calls[0][1]["limit"] == 1000  # fetch() default is 250 but callers may raise it
+    assert openfda.DEFAULT_PAGE_SIZE == 250 and openfda.RECOMMENDED_LOOKBACK_DAYS >= 45
 
 
 def test_api_key_from_env_is_sent_first(monkeypatch):
@@ -228,6 +297,19 @@ def test_filters_advisory_committee_and_supplements():
     assert [i.id for i in items] == ["openfda:P250050"]
 
 
+def test_denovo_review_committee_counts_for_the_filter():
+    # Live De Novo rows have advisory_committee == "" and only review_advisory_committee set
+    den_ivd = dict(K_DENG, k_number="DEN260008", review_advisory_committee="MI")
+    http = FakeHttp([{"meta": _meta(2), "results": [K_DENG, den_ivd]}])
+    items = list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="", advisory_committees=openfda.IVD_ADVISORY_COMMITTEES))
+    assert [i.id for i in items] == ["openfda:DEN260008"]  # the CV-reviewed De Novo is still excluded
+    assert items[0].feed == "fda-denovo" and "review advisory committee MI" in items[0].summary
+    # the top-level code wins when both are present
+    both = dict(K_DENG, k_number="DEN260009", advisory_committee="CV", review_advisory_committee="MI")
+    http = FakeHttp([{"meta": _meta(1), "results": [both]}])
+    assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("510k",), api_key="", advisory_committees=["MI"])) == []
+
+
 def test_unknown_kind_is_skipped_without_requests():
     http = FakeHttp([])
     assert list(openfda.fetch(http, "2026-09-17", "2026-10-17", kinds=("denovo",), api_key="")) == []
@@ -235,8 +317,17 @@ def test_unknown_kind_is_skipped_without_requests():
 
 
 def test_applicant_counts():
-    http = FakeHttp([{"meta": _meta(3), "results": [K_SESE]}, None, {"meta": _meta(1), "results": [P_CDX]}, {"error": {"code": "NOT_FOUND"}}])
+    http = FakeHttp([{"meta": _meta(3), "results": [K_SESE]}, NO_MATCH, {"meta": _meta(1), "results": [P_CDX]}, {"error": {"code": "NOT_FOUND"}}])
     out = openfda.applicant_counts(http, "2026-09-17", "2026-10-17", ["Roche", 'Gu"ardant'], api_key="")
     assert out == {"510k": {"Roche": 3, 'Gu"ardant': 0}, "pma": {"Roche": 1, 'Gu"ardant': 0}}
     assert http.calls[0][1]["search"] == 'decision_date:[20260917 TO 20261017] AND applicant:"Roche"'
     assert http.calls[1][1]["search"].endswith('applicant:"Guardant"') and http.calls[0][1]["limit"] == 1
+    assert all(k["ok_statuses"] == (200, 404) for k in http.kwargs)
+
+
+def test_applicant_counts_accepts_a_generator_and_marks_failed_lookups():
+    http = FakeHttp([{"meta": _meta(3), "results": [K_SESE]}, NO_MATCH, {"meta": _meta(1), "results": [P_CDX]}, None])
+    names = (n for n in ["Roche", "Guardant"])  # one-shot iterable must be consumed for every kind
+    out = openfda.applicant_counts(http, "2026-09-17", "2026-10-17", names, api_key="")
+    assert out == {"510k": {"Roche": 3, "Guardant": 0}, "pma": {"Roche": 1, "Guardant": None}}  # 0 = no matches, None = request failed
+    assert len(http.calls) == 4

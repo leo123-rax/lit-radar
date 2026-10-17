@@ -28,8 +28,8 @@ GET https://api.fda.gov/device/pma.json?search=decision_date:[20260917+TO+202610
 | Parameter | Value | Notes |
 |---|---|---|
 | `search` | `decision_date:[YYYYMMDD TO YYYYMMDD]` | inclusive range; the space is sent as `+` (percent-encoded `%20` also works). `AND applicant:"Roche"` narrows to an applicant phrase (token match: `"Roche"` finds `Roche Diagnostics`). |
-| `limit` | 1000 | the maximum openFDA allows per page |
-| `skip` | 0, 1000, … | **capped at 25,000** (`"Skip value must 25000 or less."`), so skip/limit paging covers 26,000 matches. Larger sets need the `Link` header `search_after` cursor or the bulk download. A week is ~50 510(k)s and ~30 PMA decisions. |
+| `limit` | 250 (`fetch()` default; max 1000) | a 510(k) record is 8-20 KB because of the `openfda.registration_number` / `fei_number` lists, so 250 keeps one response at ~2-5 MB (250 records of Aug-Oct 2026 = 2.1 MB, 1.3 s live). Pass `page_size=1000` for the openFDA maximum. |
+| `skip` | 0, 250, … | **capped at 25,000** (`"Skip value must 25000 or less."`), so skip/limit paging covers 26,000 matches. Larger sets need the `Link` header `search_after` cursor or the bulk download. A month is ~220-325 510(k)s and ~110-120 PMA decisions (2026 live counts). |
 | `api_key` | from `OPENFDA_API_KEY` | optional; sent first, as the docs show |
 
 Response shape (both endpoints):
@@ -41,9 +41,27 @@ Response shape (both endpoints):
 ```
 
 Empty window or no match: **HTTP 404** with `{"error": {"code": "NOT_FOUND", "message": "No matches found!"}}`.
-The shared `Http` client returns `None` for that, and the adapter treats `None` on the first page as
-"no matches". (The client also counts the 404 in `http.stats["failures"]`, so a run over an empty window
-shows one "failure" per endpoint that is not an error.)
+The adapter calls `http.get(..., ok_statuses=(200, 404))`, so this routine answer is not retried, not logged
+with the request URL (which carries `api_key` when a key is set) and not counted in `http.stats["failures"]`;
+it is logged at INFO as "no matches". A request that actually fails (network error, 5xx after retries, 429
+host block) reaches the adapter as `None` and is logged at **WARNING** ("request failed … no results"), so an
+openFDA outage is distinguishable from an empty window in the run log. A 400 (e.g. `skip` over the cap) is
+logged at WARNING with the API's message.
+
+## Refresh cadence and the look-back window
+
+The official 510(k) and PMA pages state **"Frequency of API updates: Monthly"**. Live on 2026-10-17:
+`meta.last_updated` 2026-10-05, newest indexed `decision_date` **2026-10-02** (510k, K260232) and
+**2026-10-03** (PMA), bulk-file `export_date` 2026-10-12, and `count=decision_date` for 2026 shows October
+at 37 510(k) records against 217-325 for every full month. The index is therefore ~15 days behind today and
+can be **4-6 weeks behind just before a monthly refresh**.
+
+Consequence for a weekly caller: the look-back must exceed one refresh interval plus the weekly cadence.
+With a 21-day look-back, the run after a refresh would compute `start = since - 21` and never request the
+decisions dated between the previous index edge and `start` (`INSERT OR IGNORE` dedupes, but cannot recover
+rows that were never fetched). Use **`lookback_days: 45`** (`openfda.RECOMMENDED_LOOKBACK_DAYS`; 60 is safer).
+The store dedupes re-fetched decisions by id, and `news_in_window()` also selects on `first_seen`, so a
+decision indexed late still appears in the digest of the week it is first seen.
 
 ### 510(k) record fields seen live
 
@@ -55,7 +73,8 @@ Top level: `k_number` (`K254179`; De Novo grants appear as `DEN260007`), `applic
 `date_received`, `contact`, `address_1`, `address_2`, `city`, `state`, `zip_code`, `postal_code`,
 `country_code`. `openfda`: `device_name` (the product-code classification name), `regulation_number`,
 `device_class`, `medical_specialty_description`, `registration_number[]`, `fei_number[]` (the two lists
-can hold 150+ entries and dominate the payload; a 1,000-record page is tens of MB).
+can hold 150+ entries and dominate the payload: a record is 8-20 KB and a 1,000-record page 10-20 MB,
+which is why `fetch()` pages by 250).
 
 Decision codes, all time (`count=decision_code.exact`): SESE 172,800 · SN 1,397 · SESK 499 · **DENG 490** ·
 SESU 434 · SEKD 254 · ST 226 · SESD 128 · SESP 121 · PT 16 · SI 1.
@@ -104,11 +123,13 @@ stray control characters (`Liverty\x99`), which the adapter strips.
 Set `OPENFDA_API_KEY` in `.env` (sign-up link on the authentication page). The adapter reads it with
 `os.environ` (`openfda.api_key_from_env()`) and sends it as the `api_key` query parameter; pass
 `api_key=""` to force anonymous access. Because it travels in the URL, the key appears in the HTTP
-client's warning/info log lines when a request fails (same as the NCBI key).
+client's retry / failure log lines (5xx, 429, 400), same as the NCBI key; the routine 404 "no matches"
+answer is no longer logged with the URL.
 
 `litradar/http.py` paces `api.fda.gov` at 0.25 s between requests (240/min). A weekly run with the
-default settings makes **2 requests** (one page per endpoint); the applicant-count helper makes one
-request per applicant per endpoint.
+recommended 45-day look-back and 250-record pages makes **3-4 requests** (two 510(k) pages, one or two
+PMA pages); the applicant-count helper makes one request per applicant per endpoint. All well inside the
+1,000/day anonymous quota.
 
 ## Mapping to `NewsItem`
 
@@ -134,23 +155,49 @@ All three FDA link patterns returned HTTP 200 on 2026-10-17.
   **CH 108**, EN 90, OP 70, **IM 41**, **HE 36**, **TX 32**, **PA 23**, **MG 1**.
 * `include_supplements=True`, `exclude_supplement_types=()`: PMA noise control
   (`["30-Day Notice"]` removes manufacturing-change notices).
+  The filter reads `advisory_committee` and falls back to `review_advisory_committee`, because De Novo rows
+  leave the former blank (live `DEN260007`: `advisory_committee=""`, `review_advisory_committee="CV"`);
+  the summary shows the fallback as `review advisory committee CV`.
 * `api_key=None`: read the environment; `""`: anonymous.
-* `page_size=1000`, `max_records=26000`: paging guards; a warning is logged when a window exceeds the cap.
+* `page_size=250`, `max_records=26000`: paging guards; `page_size` is clamped to 1000 and a warning is
+  logged when a window exceeds the skip cap. Monthly backfill chunks fit the defaults (max ~325 510(k)s).
 
 `openfda.applicant_counts(http, start, end, ["Roche", ...])` returns `{kind: {name: total}}` using
-`meta.results.total` with `limit=1`.
+`meta.results.total` with `limit=1`; `0` means HTTP 404 "no matches", `None` means the request failed.
+Any iterable (including a generator) is accepted for the names.
 
-## Live test, 2026-10-17 (window 2026-09-17..2026-10-17, anonymous)
+## Live test, 2026-10-17 (anonymous, through the project's `Http` client)
 
-Through the project's `Http` client, `openfda.fetch()` produced **298 items**: 181 `fda-510k`,
-1 `fda-denovo`, 116 `fda-pma`; 298 unique ids; 0 items without a decision date; decision dates span
-2026-09-17..2026-10-03 while the dataset's `last_updated` was 2026-10-05, i.e. openFDA indexes decisions
-with a lag of roughly one to two weeks. With `advisory_committees=IVD_ADVISORY_COMMITTEES`: 31 items
-(20 510(k), 11 PMA), including an EBV serology trio, a respiratory PCR panel, a blood-culture ID/AMR panel,
-three PD-L1/HER2/MAGE-A4 IHC companion-diagnostic supplements and two liquid-biopsy CDx supplements.
-Excluding 30-Day Notices leaves 53 of the 116 PMA decisions.
+Re-run after the review fixes (`page_size=250`, `ok_statuses=(200, 404)`, committee fallback). **30 requests
+in total, 0 retries, 0 failures** in `http.stats` (the empty-window 404s no longer count); `last_updated`
+2026-10-05 on every response.
 
-510(k) and PMA decisions in the window by applicant phrase (sequencing / IVD names used as the probe):
+| Run | Window | Items | Feeds | Requests |
+|---|---|---|---|---|
+| adapter defaults (all devices) | 2026-09-17..2026-10-17 (30 d) | **298** | 181 `fda-510k` · 1 `fda-denovo` · 116 `fda-pma` | 2 |
+| recommended config: IVD committees, no 30-Day Notices | 2026-09-02..2026-10-17 (45 d) | **40** | 31 `fda-510k` · 0 `fda-denovo` · 9 `fda-pma` | 3 |
+| all devices | 2026-09-02..2026-10-17 (45 d) | 549 | 344 · 2 · 203 | 3 |
+| all devices | 2026-08-18..2026-10-17 (60 d) | 762 | 476 · 7 · 279 | 4 |
+| empty window | 2030-01-01..2030-01-31 | 0 | HTTP 404 on both endpoints, logged at INFO, `failures` unchanged | 2 |
+
+Every run: all ids unique, no item without a decision date, and decision dates end at 2026-10-02 (510k) /
+2026-10-03 (PMA) whatever the window, because the index has not refreshed since 2026-10-05 (see "Refresh
+cadence"). Excluding 30-Day Notices keeps 53 of the 116 PMA decisions in the 30-day window.
+
+The 40 items of the recommended configuration: an EBV serology trio (K260232 / K260221 / K260233),
+respiratory PCR panels (K261336, K263120, K263054, K263035), a blood-culture ID/AMR panel (K262168),
+antimicrobial-susceptibility cards, an HCV antibody assay, an NT-proBNP assay, an SMA newborn-screening kit,
+a hematology analyser; on the PMA side, companion-diagnostic supplements for a tumour-profiling NGS test
+(P210011S002), an NGS oncology panel (P240040S005), an IHC CDx (P230016S003), a tissue CDx (P170019S069) and
+a liquid-biopsy CDx (P200010S024, P200010S029), a stool RNA screening test (P230001S014), an original PMA for
+an MSI analysis system (P250046) and one insulin-pump system supplement (P160017S140). Note that the CH
+(Clinical Chemistry) panel also carries diabetes-management devices: six of the 31 510(k)s here are glucose
+monitors, insulin pumps or dosing software. Drop `CH` from `advisory_committees` if those are noise, at the
+cost of the chemistry assays. The one De Novo in the 45-day window (DEN260007, review panel CV) is correctly
+excluded by the IVD filter; the 60-day all-device run carried 7 De Novo grants.
+
+510(k) and PMA decisions in the 30-day window by applicant phrase (`applicant_counts`, names passed as a
+generator, 16 requests, 0 failures):
 
 | Applicant phrase | 510(k) | PMA | Items |
 |---|---|---|---|
@@ -163,8 +210,8 @@ Excluding 30-Day Notices leaves 53 of the 116 PMA decisions.
 | Foundation Medicine | 0 | 1 | P190032 S032, FoundationOne Liquid CDx (F1LCDx), 2026-09-18, product code PQP |
 | Exact Sciences | 0 | 0 | |
 
-A zero means no decision with that applicant phrase was dated inside the window (HTTP 404 from the API),
-not that the search failed. 21 requests in total, 0 retries.
+A zero means openFDA answered HTTP 404 "No matches found!" for that applicant phrase inside the window, not
+that the search failed; a failed lookup is reported as `None`.
 
 ## Wiring (not applied here; the pipeline and config files are owned by other work)
 
@@ -176,7 +223,7 @@ not that the search failed. 21 requests in total, 0 retries.
    ocfg = self._src("openfda")
    if ocfg.get("enabled", False):
        try:
-           lookback = int(ocfg.get("lookback_days", 21))  # openFDA indexes decisions 1-2 weeks late
+           lookback = int(ocfg.get("lookback_days", openfda_src.RECOMMENDED_LOOKBACK_DAYS))  # datasets refresh monthly
            start = (date.fromisoformat(since) - timedelta(days=lookback)).isoformat()
            until = datetime.now(timezone.utc).date().isoformat()
            items: List[NewsItem] = []
@@ -206,13 +253,19 @@ not that the search failed. 21 requests in total, 0 retries.
 
    ```yaml
      openfda:
-       enabled: true             # FDA 510(k) clearances, De Novo grants, PMA decisions via api.fda.gov
+       enabled: true             # FDA 510(k) clearances, De Novo grants, PMA decisions via api.fda.gov (OPENFDA_API_KEY optional)
        kinds: [510k, pma]        # 510k also yields the fda-denovo feed
-       lookback_days: 21         # the API indexes decisions 1-2 weeks after the decision date
-       advisory_committees: []   # e.g. [CH, HE, IM, MI, PA, TX, MG] to keep in-vitro diagnostics only
+       lookback_days: 45         # the datasets refresh MONTHLY; the look-back must exceed one refresh interval (60 is safer)
+       advisory_committees: [CH, HE, IM, MI, PA, TX, MG]   # in-vitro diagnostics only; [] = every device (see note)
        include_supplements: true
        exclude_supplement_types: ["30-Day Notice"]   # manufacturing-change notices are ~half of PMA decisions
    ```
+
+   `advisory_committees: []` is the opt-out that ingests every device decision (~400-500 510(k)s plus
+   ~100 PMA decisions per 45-day window live). The digest reads `store.news_in_window(since, limit=news_n*4)`
+   ordered by `published DESC`, and FDA decision dates lag by weeks, so with `[]` the SQL limit can cut
+   company-matched FDA items before the renderer groups them and unmatched items never reach the capped
+   "Other headlines" section. If you use `[]`, raise `digest.news_n` (e.g. to 150) or keep the IVD list.
 
 3. `.env.example`: `OPENFDA_API_KEY=   # https://open.fda.gov/apis/authentication/ (1,000/day anonymous -> 120,000/day)`.
 

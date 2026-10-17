@@ -8,7 +8,8 @@ Official documentation
     authentication:  https://open.fda.gov/apis/authentication/
     field reference: https://open.fda.gov/apis/openfda-fields/
 
-Verified live on 2026-10-17 (window 2026-09-17..2026-10-17; dataset `last_updated` 2026-10-05):
+Verified live on 2026-10-17 (window 2026-09-17..2026-10-17; dataset `last_updated` 2026-10-05; newest
+indexed decision 2026-10-02 for 510(k) and 2026-10-03 for PMA; bulk-file export_date 2026-10-12):
 
     GET https://api.fda.gov/device/510k.json?search=decision_date:[20260917+TO+20261017]&limit=1000&skip=0
     GET https://api.fda.gov/device/pma.json?search=decision_date:[20260917+TO+20261017]&limit=1000&skip=0
@@ -40,10 +41,22 @@ Verified live on 2026-10-17 (window 2026-09-17..2026-10-17; dataset `last_update
     `fda-denovo` feed and links them to the FDA De Novo database page. The web database remains the
     authoritative De Novo listing: https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpmn/denovo.cfm
 
-    Empty window: HTTP 404 with {"error": {"code": "NOT_FOUND", "message": "No matches found!"}}.
-    Paging: `limit` max 1000; `skip` max 25000 ("Skip value must 25000 or less."); larger result
-    sets need the Link-header `search_after` cursor or the bulk download. A week is ~50 510(k)s and
-    ~30 PMA decisions, so skip/limit paging is ample; backfills should go month by month.
+    Empty window: HTTP 404 with {"error": {"code": "NOT_FOUND", "message": "No matches found!"}}. The
+    adapter requests with ok_statuses=(200, 404), so this routine answer is not retried, not logged with
+    the request URL (which may carry the api_key) and not counted in http.stats["failures"]; it is logged
+    at INFO as "no matches". None from the client (network error, 5xx after retries, 429 host block) is
+    logged as a WARNING so an outage is distinguishable from an empty window.
+    Refresh cadence: the official 510(k) and PMA pages state "Frequency of API updates: Monthly". On
+    2026-10-17 the index ended at 2026-10-02 (510k) / 2026-10-03 (PMA), i.e. 15 days behind, and just
+    before a monthly refresh it can be 4-6 weeks behind. A weekly caller's look-back must exceed one
+    refresh interval plus the weekly cadence, so use >= 45 days (RECOMMENDED_LOOKBACK_DAYS; 60 is safer);
+    the store dedupes re-fetched decisions by id.
+    Paging: `limit` max 1000 (PAGE_SIZE clamp); fetch() defaults to pages of 250 (DEFAULT_PAGE_SIZE)
+    because a 510(k) record is 8-20 KB (openfda.registration_number / fei_number lists), which keeps a
+    page at ~2-5 MB (250 records of Aug-Oct 2026 = 2.1 MB live). `skip` max 25000 ("Skip value must
+    25000 or less."); larger result sets need the Link-header `search_after` cursor or the bulk download.
+    A month is ~220-325 510(k)s and ~110-120 PMA decisions, so a 45-60 day window is 3-4 requests;
+    multi-year backfills should go month by month.
     Rate limits (per the authentication page): 240 requests/minute and 1,000/day per IP without a
     key; 240/minute and 120,000/day with a free key. The key is read from OPENFDA_API_KEY and sent
     as the documented `api_key` query parameter.
@@ -58,7 +71,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Dict, Iterable, Iterator, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, Optional, Sequence, Tuple
 
 from ..http import Http
 from ..models import NewsItem
@@ -70,9 +83,11 @@ ENDPOINTS = {"510k": f"{BASE}/510k.json", "pma": f"{BASE}/pma.json"}
 FEED_510K = "fda-510k"
 FEED_PMA = "fda-pma"
 FEED_DENOVO = "fda-denovo"
-PAGE_SIZE = 1000  # openFDA maximum for `limit`
+PAGE_SIZE = 1000  # openFDA maximum for `limit` (clamp)
+DEFAULT_PAGE_SIZE = 250  # fetch() default: a 510(k) record is 8-20 KB, so 250 keeps one response at ~2-5 MB
 MAX_SKIP = 25000  # openFDA refuses skip > 25000
 DEFAULT_MAX_RECORDS = MAX_SKIP + PAGE_SIZE
+RECOMMENDED_LOOKBACK_DAYS = 45  # the datasets refresh monthly: one refresh interval + the weekly cadence, with margin
 ID_PREFIX = "openfda:"
 
 DB_510K = "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfpmn/pmn.cfm?ID={number}"
@@ -137,6 +152,34 @@ def _params(query: str, limit: int, skip: int, api_key: str) -> Dict[str, Any]:
     return p
 
 
+def _request(http: Http, url: str, params: Dict[str, Any], label: str) -> Tuple[Optional[int], Any]:
+    """One GET against openFDA. Returns (status, parsed JSON body).
+
+    status None -> the request failed (network error, 5xx after retries, 429 host block); the caller logs it.
+    status 404  -> openFDA's routine "No matches found!" answer (not a failure; body is None).
+    status 200  -> body is the parsed JSON, or None when the response was not JSON (logged as WARNING).
+    Other 4xx (e.g. 400 "Skip value must 25000 or less.") are logged as WARNING with the API's message.
+    """
+    resp = http.get(url, params=params, headers={"Accept": "application/json"}, ok_statuses=(200, 404))
+    if resp is None:
+        return None, None
+    status = getattr(resp, "status_code", None)
+    if status == 404:
+        return 404, None
+    body: Any = None
+    try:
+        body = resp.json()
+    except ValueError:
+        if status == 200:
+            log.warning("openFDA %s: non-JSON response", label)
+            return 200, None
+    if status != 200:
+        err = body.get("error") if isinstance(body, dict) else body
+        log.warning("openFDA %s: HTTP %s %s", label, status, err or "")
+        return status, None
+    return 200, body
+
+
 def search(
     http: Http,
     endpoint: str,
@@ -148,20 +191,29 @@ def search(
     """Yield raw result records from one endpoint ('510k' or 'pma', or a full URL), paging with skip/limit.
 
     Stops when the reported total is reached, a short page arrives, the skip cap is hit, or a page fails.
-    An empty window answers HTTP 404, which the shared client returns as None; that is treated as "no matches".
+    An empty window answers HTTP 404 ("No matches found!"), logged at INFO; a failed request (None from
+    the client) is logged at WARNING so an outage never looks like an empty window.
     """
     url = ENDPOINTS.get(endpoint, endpoint)
     page_size = max(1, min(int(page_size), PAGE_SIZE))
     skip = 0
     total: Optional[int] = None
     while True:
-        data = http.get_json(url, params=_params(query, page_size, skip, api_key))
-        if data is None:
+        status, data = _request(http, url, _params(query, page_size, skip, api_key), f"{endpoint} skip={skip}")
+        if status is None:
             if skip == 0:
-                log.info("openFDA %s: no matches (HTTP 404) or request failed for %s", endpoint, query)
+                log.warning("openFDA %s: request failed for %s (network error, server error or host blocked); no results", endpoint, query)
             else:
-                log.warning("openFDA %s: page at skip=%d failed; stopping early", endpoint, skip)
+                log.warning("openFDA %s: page at skip=%d failed; stopping early after %d records", endpoint, skip, skip)
             return
+        if status == 404:
+            if skip == 0:
+                log.info("openFDA %s: no matches for %s", endpoint, query)
+            else:
+                log.warning("openFDA %s: HTTP 404 at skip=%d after %d records (result set changed mid-run?)", endpoint, skip, skip)
+            return
+        if data is None:
+            return  # non-JSON or non-200 answer, already logged by _request
         if not isinstance(data, dict):
             log.warning("openFDA %s: unexpected payload type %s", endpoint, type(data).__name__)
             return
@@ -193,6 +245,11 @@ def search(
             return
 
 
+def _committee_code(rec: Dict[str, Any]) -> str:
+    """advisory_committee, falling back to review_advisory_committee (De Novo rows leave the former blank)."""
+    return _clean(rec.get("advisory_committee")) or _clean(rec.get("review_advisory_committee"))
+
+
 def _committee(rec: Dict[str, Any]) -> str:
     code = _clean(rec.get("advisory_committee"))
     desc = _clean(rec.get("advisory_committee_description"))
@@ -200,7 +257,10 @@ def _committee(rec: Dict[str, Any]) -> str:
         desc = ""
     if code and desc:
         return f"advisory committee {code} ({desc})"
-    return f"advisory committee {code or desc}" if (code or desc) else ""
+    if code or desc:
+        return f"advisory committee {code or desc}"
+    review = _clean(rec.get("review_advisory_committee"))
+    return f"review advisory committee {review}" if review else ""
 
 
 def _product(rec: Dict[str, Any]) -> str:
@@ -334,15 +394,18 @@ def fetch(
     advisory_committees: Sequence[str] = (),
     include_supplements: bool = True,
     exclude_supplement_types: Sequence[str] = (),
-    page_size: int = PAGE_SIZE,
+    page_size: int = DEFAULT_PAGE_SIZE,
     max_records: int = DEFAULT_MAX_RECORDS,
 ) -> Iterator[NewsItem]:
     """Yield NewsItems for every 510(k) / De Novo / PMA decision dated in [start, end] (inclusive).
 
     kinds: any of '510k' (also yields the fda-denovo feed) and 'pma'.
     api_key: None -> read OPENFDA_API_KEY from the environment; '' -> anonymous.
-    advisory_committees: keep only these codes (e.g. IVD_ADVISORY_COMMITTEES); empty = all.
+    advisory_committees: keep only these codes (e.g. IVD_ADVISORY_COMMITTEES); empty = all. The record's
+        advisory_committee is used, falling back to review_advisory_committee (De Novo rows leave the former blank).
     include_supplements / exclude_supplement_types: trim PMA supplement noise (30-day notices are ~half of PMA decisions).
+    page_size: 250 by default (one response ~2-5 MB); the openFDA maximum is 1000.
+    Callers should request a window that reaches back >= RECOMMENDED_LOOKBACK_DAYS: the datasets refresh monthly.
     """
     key = api_key_from_env() if api_key is None else api_key
     keep = {c.upper() for c in advisory_committees}
@@ -354,7 +417,7 @@ def fetch(
             continue
         n = 0
         for rec in search(http, kind, query, api_key=key, page_size=page_size, max_records=max_records):
-            if keep and _clean(rec.get("advisory_committee")).upper() not in keep:
+            if keep and _committee_code(rec).upper() not in keep:
                 continue
             if kind == "pma":
                 if _clean(rec.get("supplement_number")):
@@ -377,19 +440,27 @@ def applicant_counts(
     applicants: Iterable[str],
     kinds: Sequence[str] = ("510k", "pma"),
     api_key: Optional[str] = None,
-) -> Dict[str, Dict[str, int]]:
-    """{kind: {applicant: total}} for decisions in the window whose applicant matches the phrase (one request each)."""
+) -> Dict[str, Dict[str, Optional[int]]]:
+    """{kind: {applicant: total}} for decisions in the window whose applicant matches the phrase (one request each).
+
+    total is 0 when openFDA answers 404 ("No matches found!") and None when the request itself failed.
+    """
     key = api_key_from_env() if api_key is None else api_key
-    out: Dict[str, Dict[str, int]] = {}
+    names = list(applicants)  # a one-shot iterable must survive the per-kind loop
+    out: Dict[str, Dict[str, Optional[int]]] = {}
     for kind in kinds:
         url = ENDPOINTS.get(kind)
         if not url:
             continue
-        counts: Dict[str, int] = {}
-        for name in applicants:
+        counts: Dict[str, Optional[int]] = {}
+        for name in names:
             phrase = _clean(name).replace('"', "")
             query = date_range_query(start, end, f'applicant:"{phrase}"')
-            data = http.get_json(url, params=_params(query, 1, 0, key))
+            status, data = _request(http, url, _params(query, 1, 0, key), f"{kind} applicant {phrase!r}")
+            if status is None:
+                log.warning("openFDA %s: applicant count for %r failed (network error, server error or host blocked)", kind, name)
+                counts[name] = None
+                continue
             total = 0
             if isinstance(data, dict):
                 meta_total = ((data.get("meta") or {}).get("results") or {}).get("total")
