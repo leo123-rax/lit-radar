@@ -8,6 +8,8 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
+  litradar show     <id|name|ticker|"First Last"> [--since 365d] [--json]   entity dossier from the store
+  litradar watch    add|remove|list <term> | run [--since 7d] [--json]      free-text / entity / author watchlist
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__
+from . import __version__, entities
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -172,6 +174,68 @@ def cmd_check_config(args) -> int:
     return 0 if ok else 1
 
 
+def _entity_context(settings: Settings) -> tuple:
+    instruments = Gazetteer.from_yaml(settings.yaml("instruments"), "instrument")
+    companies = Gazetteer.from_yaml(settings.yaml("companies"), "company")
+    subgroups = (settings.yaml("subgroups") or {}).get("subgroups", []) or []
+    return instruments, companies, subgroups
+
+
+def cmd_show(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    instruments, companies, subgroups = _entity_context(settings)
+    since = _parse_since(args.since) or _parse_since("365d")
+    until = args.until or datetime.now(timezone.utc).date().isoformat()
+    res = entities.resolve(store, args.query, instruments, companies, subgroups)
+    if res.kind == "unknown":
+        if args.json:
+            print(json.dumps(res.to_dict(), indent=1, ensure_ascii=False))
+        else:
+            print(f"nothing in the gazetteers, mentions or author lists matches {args.query!r}")
+            for c in res.candidates:
+                print(f"  did you mean: {c['id']:32} {c['kind']:10} {c['name']}")
+        return 1
+    d = entities.dossier(store, res, since, until, limit=args.limit, instruments=instruments, subgroups=subgroups)
+    print(json.dumps(d, indent=1, default=str, ensure_ascii=False) if args.json else entities.render_dossier(d))
+    return 0
+
+
+def cmd_watch(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    as_json = bool(getattr(args, "json", False))
+    if args.action == "add":
+        instruments, companies, subgroups = _entity_context(settings)
+        row = entities.watch_add(store, args.term, kind=args.kind, instruments=instruments, companies=companies, subgroups=subgroups)
+        if as_json:
+            print(json.dumps(row, indent=1, ensure_ascii=False))
+        else:
+            verb = "added" if row.get("created") else "already present"
+            print(f"{verb}: {row['term']!r} as {row['kind']}" + (f" ({row['resolved']['kind']} {row['resolved']['id']})" if row.get("resolved") else ""))
+        return 0
+    if args.action == "remove":
+        ok = entities.watch_remove(store, args.term)
+        print(json.dumps({"term": args.term, "removed": ok}) if as_json else (f"removed {args.term!r}" if ok else f"{args.term!r} was not on the watchlist"))
+        return 0 if ok else 1
+    if args.action == "list":
+        rows = entities.watch_list(store)
+        if as_json:
+            print(json.dumps(rows, indent=1, ensure_ascii=False))
+        elif not rows:
+            print("watchlist is empty")
+        else:
+            for r in rows:
+                print(f"{r['kind']:8} {r['added_at'][:10]}  {r['term']}")
+        return 0
+    instruments, companies, subgroups = _entity_context(settings)
+    since = _parse_since(args.since) or _parse_since("7d")
+    until = args.until or datetime.now(timezone.utc).date().isoformat()
+    rep = entities.watch_run(store, since, until, limit=args.limit, instruments=instruments, companies=companies, subgroups=subgroups)
+    print(json.dumps(rep, indent=1, default=str, ensure_ascii=False) if as_json else entities.render_watch_report(rep))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="litradar", description="Weekly science-literature radar")
     ap.add_argument("--config-dir", default=None, help="directory with radar.yaml etc. (default: ./config)")
@@ -228,6 +292,32 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("check-config", help="validate config files")
     p.set_defaults(func=cmd_check_config)
+
+    p = sub.add_parser("show", help="entity dossier: instrument / company id, name, alias, ticker, or an author's 'First Last'")
+    p.add_argument("query")
+    p.add_argument("--since", default="365d", help="YYYY-MM-DD or Nd (default 365d)")
+    p.add_argument("--until", help="YYYY-MM-DD (default today)")
+    p.add_argument("--limit", type=int, default=15, help="rows per list (recent papers, co-mentions, news)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("watch", help="watchlist of free-text terms, entities and authors, evaluated against the store")
+    wsub = p.add_subparsers(dest="action", required=True)
+    w = wsub.add_parser("add", help="add a term (kind is auto-detected unless --kind is given)")
+    w.add_argument("term")
+    w.add_argument("--kind", choices=list(entities.WATCH_KINDS))
+    w.add_argument("--json", action="store_true")
+    w = wsub.add_parser("remove", help="remove a term")
+    w.add_argument("term")
+    w.add_argument("--json", action="store_true")
+    w = wsub.add_parser("list", help="list watched terms")
+    w.add_argument("--json", action="store_true")
+    w = wsub.add_parser("run", help="report matches for every watched term in the window")
+    w.add_argument("--since", default="7d", help="YYYY-MM-DD or Nd (default 7d)")
+    w.add_argument("--until", help="YYYY-MM-DD (default today)")
+    w.add_argument("--limit", type=int, default=20)
+    w.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_watch)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
