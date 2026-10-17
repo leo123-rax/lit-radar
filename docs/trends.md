@@ -1,0 +1,146 @@
+# Trends: what changed this week
+
+`litradar/trends.py` turns the accumulating SQLite corpus into a weekly "What changed" section:
+this week versus last week versus a trailing baseline, for instruments, companies, research
+subgroups and journals, plus first appearances and preprint-to-journal conversions.
+
+It is pure SQL + Python over tables the pipeline already writes (`papers`, `mentions`,
+`archive_records`, `tracked_author_hits`). **No external API is involved**, so there is nothing to
+verify live and nothing new to install; it runs the same against a laptop database or a snapshot
+restored from the GitHub Actions cache.
+
+## Usage
+
+```bash
+python -m litradar trends                      # writes digests/trends-<today>.md
+python -m litradar trends --print              # Markdown to stdout
+python -m litradar trends --json > trends.json # the structured result
+python -m litradar trends --until 2026-10-17 --weeks 8 --top 15 --out /tmp/out
+```
+
+`--until` is the last day of the current week (default: today, UTC). `--weeks` is the baseline
+length (default 13). `LITRADAR_DB` selects another database file, as for every other command.
+
+From Python:
+
+```python
+from litradar import trends
+from litradar.store import Store
+
+store = Store("data/radar.sqlite")
+tr = trends.compute_trends(store, "2026-10-17", weeks=13, subgroups=trends.load_subgroups())
+print(trends.render_trends_markdown(tr))
+```
+
+## Method
+
+| Term | Definition |
+|---|---|
+| Week *k* | the seven days ending `until − 7k`; *k* = 0 is the current week `[until − 6, until]`, *k* = 1 the previous week |
+| Event date | a paper's `pub_date`, or the date part of `first_seen` when `pub_date` is empty (same rule as `Store.papers_in_window`); archive records use `first_public` |
+| Baseline | weeks 1..`weeks` that contain any data for the family (papers, or archive records). Weeks before the corpus started are *not* counted as zeros, so five weeks of history are compared against five weeks |
+| mean, std | arithmetic mean and **sample** standard deviation of the entity's weekly count over the baseline weeks; an entity absent in a baseline week counts 0 there |
+| z | `(current − mean) / max(std, 1.0)`. The floor of one count stops integer series with no spread (3, 3, 3, …) from producing infinite scores. `z` is `null` while fewer than `min_baseline_weeks` (default 3) baseline weeks have data |
+| notable | `|z| ≥ 2` **and** at least 5 counts on the side that carries the signal: this week's count for a riser, the baseline mean for a faller (a platform that went from 20 papers a week to 0 is a faller worth seeing although its current count is 0) |
+| new this week | an entity whose earliest `papers.first_seen` over all its mentions falls in the current week, i.e. its first appearance in the corpus. Archive instrument models have no ingestion timestamp, so their earliest `first_public` is used. On a **cold start** (nothing in the store was seen before the current week) every entity is new; the renderer says so and omits the list |
+| conversion | a preprint whose `published_doi` resolves to another paper in the store (`papers.id = 'doi:' ‖ lower(published_doi)`), reported in the week in which the journal version was published or first seen, or the preprint row was updated. `lag_days` = journal `pub_date` − preprint `pub_date` |
+
+### Entity families and metrics
+
+| Family | Metric per week | Source |
+|---|---|---|
+| instruments (literature) | distinct papers mentioning the gazetteer entry | `mentions` with `kind='instrument'` |
+| instruments (archives) | sequencing experiments, plus distinct studies | `archive_records` grouped by declared `instrument_model` (vendor / ticker / gazetteer id carried along) |
+| companies | distinct papers, with a role split: `as_author` (affiliations), `as_funder_or_coi` (funding, coi, ack), `as_subject` (title, abstract, methods) | `mentions` with `kind='company'`; `unlisted:` ids are kept and flagged `unlisted` |
+| subgroups | papers whose title or abstract contains a subgroup keyword phrase (FTS5 phrase match on `papers_fts`) or whose OpenAlex `primary_topic` is one of the subgroup's topic ids; plus `tracked_author_papers` from `tracked_author_hits` | `config/subgroups.yaml` (passed in as `subgroups=`); without it only tracked-author counts are produced |
+| journals | papers, grouped case-insensitively by journal name | `papers.journal` |
+
+The subgroup rule mirrors `Pipeline.assign_subgroups` (which is computed but not persisted). FTS
+phrase matching is token-based with Porter stemming, so it is marginally broader than the
+pipeline's substring test (`scRNA-seq` also matches `scRNA seq`).
+
+### Ranking of risers and fallers
+
+`top_movers(trends, n)` takes every entity with at least `min_count` counts this week, last week or
+on baseline average, and ranks by `z` when it exists, otherwise by the week-over-week change. The
+renderer bolds notable rows. On a cold start the tables therefore show the largest counts, and the
+header states that z-scores are suppressed.
+
+## Output structure (`compute_trends`)
+
+```json
+{
+  "until": "2026-10-17", "week_start": "2026-10-11",
+  "previous_week": {"start": "2026-10-04", "end": "2026-10-10"},
+  "baseline": {"weeks": 13, "since": "2026-07-12", "end": "2026-10-10", "min_weeks_for_z": 3},
+  "history": {"paper_weeks_with_data": 0, "archive_weeks_with_data": 0, "z_available_papers": false, "z_available_archive": false},
+  "thresholds": {"notable_z": 2.0, "min_count": 5, "std_floor": 1.0},
+  "cold_start": true,
+  "totals": {"papers": {...delta...}, "archive_experiments": {...delta...}},
+  "instruments": {"papers": [row, ...], "experiments": [row, ...]},
+  "companies": [row, ...], "subgroups": [row, ...], "journals": [row, ...],
+  "new_entities": {"instrument": [...], "company": [...], "journal": [...], "archive_instrument": [...]},
+  "conversions": [{"preprint_id", "preprint_doi", "preprint_title", "preprint_server", "preprint_date", "preprint_url",
+                   "article_id", "article_doi", "article_title", "journal", "article_date", "article_url", "article_first_seen", "lag_days"}],
+  "notable": [row + {"group": "instrument_papers" | "instrument_experiments" | "company" | "subgroup" | "journal"}]
+}
+```
+
+Every `row` carries `id`, `name`, `kind`, `metric` and the delta fields `current`, `previous`,
+`delta`, `pct_change`, `mean`, `std`, `z`, `notable`, `direction`, `baseline_weeks`, `series`
+(weekly counts, oldest first, `weeks + 1` long). Company rows add `ticker`, `parent`, `unlisted` and
+`roles` (a delta per role); archive rows add `vendor`, `ticker`, `entity_id` and `studies`;
+subgroup rows add `tracked_author_papers`. Everything is JSON-serialisable.
+
+## Rendered section
+
+`render_trends_markdown(trends, top_n=10, heading_level=2)` produces:
+
+* a header with the window, the amount of history available and the exact z / notable rule;
+* a corpus line (papers and archive experiments: this week, last week, baseline, z);
+* **Biggest risers** and **Biggest fallers** tables (entity, kind, this week, last week,
+  baseline mean ± std, z, detail — company role split, archive study count or ticker);
+* **New this week** (instruments, companies, journals, archive instrument models), or the
+  cold-start note;
+* **Preprints that became journal articles** with posting / publication dates, lag and the
+  median lag.
+
+## Wiring into the digest
+
+`litradar/digest/render.py` is not modified by this change. To add the section after the top
+innovations block:
+
+```python
+# litradar/digest/render.py
+from .. import trends as trends_mod                         # near the other imports
+
+    # ---- what changed (after the "Top N innovations" loop, before "Instruments named in this week's papers")
+    tcfg = cfg.get("trends") or {}
+    if tcfg.get("enabled", True):
+        tr = trends_mod.compute_trends(store, until, weeks=int(tcfg.get("weeks", 13)), subgroups=trends_mod.load_subgroups())
+        md.append(trends_mod.render_trends_markdown(tr, top_n=int(tcfg.get("top_n", 10))))
+        summary["trends"] = {"notable": tr["notable"], "new_entities": tr["new_entities"], "conversions": tr["conversions"], "totals": tr["totals"]}
+```
+
+(`summary` is built at the end of `render()`, so either move the assignment below it or add the
+key there.) Optional `config/radar.yaml` block:
+
+```yaml
+trends:
+  enabled: true
+  weeks: 13
+  top_n: 10
+```
+
+## Limitations
+
+* Trends are computed on the current contents of the store. A paper published three weeks ago but
+  ingested this week is counted in the week it was published, so earlier weeks' counts can rise
+  retroactively. Weekly snapshots of `--json` output capture what the radar knew at the time.
+* The first run of a corpus is a cold start: no baseline, every entity new. The section becomes
+  informative from the second weekly run and reaches its full design from week fourteen.
+* `first_seen` is an ingestion timestamp, so "new this week" means new to *this* database, not new
+  to the world.
+* Conversions depend on sources that expose a `published_doi` (bioRxiv / medRxiv) and on the journal
+  version being in the store under its DOI id; conversions whose journal version was never ingested
+  are not visible.

@@ -8,6 +8,8 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
+  litradar trends   [--until YYYY-MM-DD] [--weeks 13] [--out DIR | --print | --json]
+                                                              what changed: this week vs last week vs the trailing baseline
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__
+from . import __version__, trends
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -172,6 +174,27 @@ def cmd_check_config(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_trends(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    until = args.until or datetime.now(timezone.utc).date().isoformat()
+    subgroups = (settings.yaml("subgroups") or {}).get("subgroups") or []
+    tr = trends.compute_trends(store, until, weeks=args.weeks, subgroups=subgroups)
+    if args.json:
+        print(json.dumps(tr, indent=1, default=str))
+        return 0
+    md = trends.render_trends_markdown(tr, top_n=args.top)
+    if args.print:
+        print(md)
+        return 0
+    out_dir = Path(args.out or settings.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"trends-{tr['until']}.md"
+    path.write_text(md, encoding="utf-8")
+    print(f"trends written to {path} ({len(tr['notable'])} notable movers, {len(tr['conversions'])} conversions)")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="litradar", description="Weekly science-literature radar")
     ap.add_argument("--config-dir", default=None, help="directory with radar.yaml etc. (default: ./config)")
@@ -228,6 +251,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("check-config", help="validate config files")
     p.set_defaults(func=cmd_check_config)
+
+    p = sub.add_parser("trends", help="what changed: this week vs last week vs the trailing 13-week baseline")
+    p.add_argument("--until", help="last day of the current week, YYYY-MM-DD (default: today, UTC)")
+    p.add_argument("--weeks", type=int, default=trends.DEFAULT_WEEKS, help="baseline length in weeks (default 13)")
+    p.add_argument("--top", type=int, default=10, help="rows per risers/fallers table (default 10)")
+    p.add_argument("--out", help="directory for trends-<date>.md (default: the digest directory)")
+    p.add_argument("--print", action="store_true", help="print the Markdown instead of writing a file")
+    p.add_argument("--json", action="store_true", help="print the structured result as JSON")
+    p.set_defaults(func=cmd_trends)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
