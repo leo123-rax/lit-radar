@@ -19,6 +19,8 @@
   litradar backfill --from YYYY-MM --to YYYY-MM [--subgroup id ...] [--country CC ...] [--max-per-month N]
                     [--topics-only] [--redo] [--dry-run] | --snapshot-dir DIR | --status
                                                               fill the corpus from OpenAlex (resumable; exit 3 = paused)
+  litradar trends   [--until YYYY-MM-DD] [--weeks 13] [--out DIR | --print | --json]
+                                                              what changed: this week vs last week vs the trailing baseline
 """
 from __future__ import annotations
 
@@ -32,9 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, browser, toolkit
-from . import __version__, entities
-from . import __version__, backfill
+from . import __version__, backfill, browser, entities, toolkit, trends
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -338,6 +338,8 @@ def cmd_watch(args) -> int:
     rep = entities.watch_run(store, since, until, limit=args.limit, instruments=instruments, companies=companies, subgroups=subgroups)
     print(json.dumps(rep, indent=1, default=str, ensure_ascii=False) if as_json else entities.render_watch_report(rep))
     return 0
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -418,6 +420,37 @@ def cmd_backfill(args) -> int:
     print(json.dumps(report, indent=1, default=str))
     print(report.get("message", ""))
     return 3 if report.get("stopped") else 0
+
+def _iso_date(s: str) -> str:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {s!r}") from None
+
+
+def cmd_trends(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    until = args.until or datetime.now(timezone.utc).date().isoformat()
+    subgroups = (settings.yaml("subgroups") or {}).get("subgroups") or []
+    try:
+        tr = trends.compute_trends(store, until, weeks=args.weeks, subgroups=subgroups)
+    except ValueError as exc:
+        print(f"trends: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(tr, indent=1, default=str))
+        return 0
+    md = trends.render_trends_markdown(tr, top_n=args.top)
+    if args.print:
+        print(md)
+        return 0
+    out_dir = Path(args.out or settings.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"trends-{tr['until']}.md"
+    path.write_text(md, encoding="utf-8")
+    print(f"trends written to {path} ({len(tr['notable'])} notable movers, {len(tr['conversions'])} conversions)")
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -559,6 +592,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--status", action="store_true", help="show recorded backfill progress and exit")
     p.add_argument("--json", action="store_true", help="with --status: print JSON")
     p.set_defaults(func=cmd_backfill)
+    p = sub.add_parser("trends", help="what changed: this week vs last week vs the trailing 13-week baseline")
+    p.add_argument("--until", type=_iso_date, help="last day of the current week, YYYY-MM-DD (default: today, UTC)")
+    p.add_argument("--weeks", type=_positive_int, default=trends.DEFAULT_WEEKS, help="baseline length in weeks (default 13)")
+    p.add_argument("--top", type=_positive_int, default=10, help="rows per risers/fallers table (default 10)")
+    p.add_argument("--out", help="directory for trends-<date>.md (default: the digest directory)")
+    p.add_argument("--print", action="store_true", help="print the Markdown instead of writing a file")
+    p.add_argument("--json", action="store_true", help="print the structured result as JSON")
+    p.set_defaults(func=cmd_trends)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")

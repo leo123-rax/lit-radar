@@ -37,7 +37,11 @@ python -m litradar check-config
 python -m litradar run --days 7      # 10-30 minutes on first run; the digest lands in digests/
 python -m litradar search "spatial transcriptomics" --since 30d
 python -m litradar entity txg-xenium --since 90d
+python -m litradar trends --print   # what changed vs last week and the 13-week baseline
 ```
+
+Trends (risers, fallers, new entities, preprint-to-journal conversions) are described in
+`docs/trends.md`; the section becomes informative from the second weekly run.
 
 Optional extras: `pip install -e ".[llm]"` for Claude scoring, `pip install markdown` for HTML e-mail.
 
