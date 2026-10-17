@@ -50,6 +50,17 @@ class _Pattern:
     regex: re.Pattern[str]
     needs_context: bool
     context_regex: Optional[re.Pattern[str]]
+    token: str = ""  # longest alphanumeric chunk of the alias, lower-cased; a cheap necessary condition for a match
+
+
+def _literal_token(alias: str) -> str:
+    """The longest run of word characters in an alias, lower-cased.
+
+    Every alias regex matches that run literally (case-insensitively at most), so `token in text.lower()` is a
+    necessary condition for the regex to match and lets `find` skip the regex for the vast majority of patterns.
+    (The only theoretical gap is Unicode case folding that `str.lower` does not perform, such as the long s.)"""
+    chunks = re.findall(r"[^\W_]+", alias)
+    return max(chunks, key=len).lower() if chunks else ""
 
 
 def _alias_to_regex(alias: str, case_sensitive: bool) -> re.Pattern[str]:
@@ -121,7 +132,7 @@ class Gazetteer:
                 if e.context_required:
                     needs_context = True
                 self._patterns.append(
-                    _Pattern(e, alias, _alias_to_regex(alias, case_sensitive), needs_context, context_regex)
+                    _Pattern(e, alias, _alias_to_regex(alias, case_sensitive), needs_context, context_regex, _literal_token(alias))
                 )
         # longest alias first so overlapping spans resolve to the most specific entry
         self._patterns.sort(key=lambda p: -len(p.alias))
@@ -131,16 +142,20 @@ class Gazetteer:
         items = data.get("entries") if isinstance(data, dict) else data
         return cls(load_entries(items or [], kind))
 
-    def find(self, text: str, section: str = "", paper_id: str = "", ignore_context: bool = False) -> List[Mention]:
+    def find(self, text: str, section: str = "", paper_id: str = "", ignore_context: bool = False, _prefilter: bool = True) -> List[Mention]:
         """Return one Mention per entry found in `text` (count = occurrences).
 
         ignore_context=True disables the context-term requirement; use it only on controlled
-        vocabularies (archive instrument_model strings), never on prose."""
+        vocabularies (archive instrument_model strings), never on prose.
+        _prefilter=False bypasses the literal-token prefilter (identical results, slower; kept for tests)."""
         if not text:
             return []
+        low = text.lower() if _prefilter else ""
         taken: List[Tuple[int, int]] = []
         hits: Dict[str, Mention] = {}
         for pat in self._patterns:
+            if _prefilter and pat.token and pat.token not in low:
+                continue
             for m in pat.regex.finditer(text):
                 span = (m.start(), m.end())
                 if any(s < span[1] and span[0] < e for s, e in taken):
