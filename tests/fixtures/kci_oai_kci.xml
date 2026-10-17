@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.openarchives.org/OAI/2.0/ http://www.openarchives.org/OAI/2.0/OAI-PMH.xsd">
+    <responseDate>2026-10-17T05:18:14Z</responseDate>
+    <request verb="ListRecords" set="ARTI" metadataPrefix="oai_kci" from="2026-09-17" until="2026-10-17">http://open.kci.go.kr/oai/request</request>
+    <ListRecords>
+        <record>
+            <header>
+                <identifier>oai:kci.go.kr:ARTI/900001</identifier>
+                <datestamp>2026-10-05</datestamp>
+                <setSpec>ARTI</setSpec>
+            </header>
+            <metadata>
+                <oai_kci xmlns="http://www.kci.go.kr/kciportal/OAI/" xsi:schemaLocation="http://www.kci.go.kr/kciportal/OAI/oai_kci.xsd">
+                    <journalInfo>
+                        <journal-name>Example Journal of Genomic Medicine</journal-name>
+                        <pissn>1111-2222</pissn>
+                        <eissn>3333-4444</eissn>
+                        <publisher-name>예시학회</publisher-name>
+                        <pub-year>2026</pub-year>
+                        <pub-mon>09</pub-mon>
+                        <volume>12</volume>
+                        <issue>3</issue>
+                        <serno/>
+                    </journalInfo>
+                    <articleInfo article-id="ART009000001">
+                        <article-categories>의학</article-categories>
+                        <article-regularity>Y</article-regularity>
+                        <title-group>
+                            <article-title lang="original">전장유전체 시퀀싱을 이용한 희귀질환 진단</article-title>
+                            <article-title lang="english">Whole-genome sequencing for rare disease diagnosis</article-title>
+                        </title-group>
+                        <author-group>
+                            <author>김민준(예시대학교)</author>
+                            <author>이서연(예시병원)</author>
+                        </author-group>
+                        <author-name>
+                            <author>
+                                <name>김민준</name>
+                                <affiliation>예시대학교</affiliation>
+                            </author>
+                            <author>
+                                <name>이서연</name>
+                                <affiliation>예시병원</affiliation>
+                            </author>
+                        </author-name>
+                        <abstract-group>
+                            <abstract lang="original">희귀질환 환자에서 전장유전체 시퀀싱의 진단율을 평가하였다.</abstract>
+                            <abstract lang="english">We evaluated the diagnostic yield of whole-genome sequencing in rare disease patients.</abstract>
+                        </abstract-group>
+                        <language/>
+                        <fpage>101</fpage>
+                        <lpage>110</lpage>
+                        <orte-open-yn>Y</orte-open-yn>
+                        <doi>http://dx.doi.org/10.99999/ejgm.2026.12.3.101</doi>
+                        <uci>G704-000000.2026.12.3.001</uci>
+                        <citation-count>3</citation-count>
+                        <url>https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART009000001</url>
+                        <verified>N</verified>
+                    </articleInfo>
+                </oai_kci>
+            </metadata>
+        </record>
+        <record>
+            <header>
+                <identifier>oai:kci.go.kr:ARTI/900002</identifier>
+                <datestamp>2026-10-05</datestamp>
+                <setSpec>ARTI</setSpec>
+            </header>
+            <metadata>
+                <oai_kci xmlns="http://www.kci.go.kr/kciportal/OAI/" xsi:schemaLocation="http://www.kci.go.kr/kciportal/OAI/oai_kci.xsd">
+                    <journalInfo>
+                        <journal-name>Example Journal of Literature</journal-name>
+                        <pissn>5555-6666</pissn>
+                        <eissn/>
+                        <publisher-name>예시문학회</publisher-name>
+                        <pub-year>2014</pub-year>
+                        <pub-mon>06</pub-mon>
+                        <volume>44</volume>
+                        <issue>2</issue>
+                        <serno/>
+                    </journalInfo>
+                    <articleInfo article-id="ART009000002">
+                        <article-categories>한국어와문학</article-categories>
+                        <article-regularity>Y</article-regularity>
+                        <title-group>
+                            <article-title lang="original">근대 소설의 서술 구조</article-title>
+                            <article-title lang="english"/>
+                        </title-group>
+                        <author-group>
+                            <author>박지후(예시대학교)</author>
+                        </author-group>
+                        <author-name>
+                            <author>
+                                <name>박지후</name>
+                                <affiliation>예시대학교</affiliation>
+                            </author>
+                        </author-name>
+                        <abstract-group>
+                            <abstract lang="original"/>
+                            <abstract lang="english"/>
+                        </abstract-group>
+                        <language/>
+                        <fpage>30</fpage>
+                        <lpage>51</lpage>
+                        <orte-open-yn>Y</orte-open-yn>
+                        <doi/>
+                        <uci>G704-000000.2014.44.2.001</uci>
+                        <citation-count>0</citation-count>
+                        <url>https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART009000002</url>
+                        <verified>N</verified>
+                    </articleInfo>
+                </oai_kci>
+            </metadata>
+        </record>
+        <resumptionToken>2026-09-17:2026-10-17:100:168917</resumptionToken>
+    </ListRecords>
+</OAI-PMH>

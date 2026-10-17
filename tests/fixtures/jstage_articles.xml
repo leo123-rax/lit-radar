@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed  xmlns="http://www.w3.org/2005/Atom"
+  xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/"
+  xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"
+  xml:lang="ja" >
+  <result>
+    <status>0</status>
+    <message></message>
+  </result>
+  <title>Articles</title>
+  <link href="https://api.jstage.jst.go.jp/searchapi/do?service=3&amp;abst=genome&amp;pubyearfrom=2025&amp;pubyearto=2026&amp;count=2"/>
+  <id>https://api.jstage.jst.go.jp/searchapi/do?service=3&amp;abst=genome&amp;pubyearfrom=2025&amp;pubyearto=2026&amp;count=2</id>
+  <servicecd>3</servicecd>
+  <updated>2026-10-17T12:00+09:00</updated>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <opensearch:startIndex>1</opensearch:startIndex>
+  <opensearch:itemsPerPage>2</opensearch:itemsPerPage>
+  <entry>
+    <article_title>
+      <en><![CDATA[Long-read genome assembly of a <i>Rhodobacter</i> isolate from a hot spring]]></en>
+      <ja><![CDATA[温泉由来<i>Rhodobacter</i>株のロングリードゲノムアセンブリ]]></ja>
+    </article_title>
+    <article_link>
+      <en>https://www.jstage.jst.go.jp/article/examplej/70/3/70_201/_article</en>
+      <ja>https://www.jstage.jst.go.jp/article/examplej/70/3/70_201/_article/-char/ja/</ja>
+    </article_link>
+    <author>
+      <en>
+        <name><![CDATA[Hanako SUZUKI]]></name>
+        <name><![CDATA[Taro YAMADA]]></name>
+      </en>
+      <ja>
+        <name><![CDATA[鈴木 花子]]></name>
+        <name><![CDATA[山田 太郎]]></name>
+      </ja>
+    </author>
+    <cdjournal>examplej</cdjournal>
+    <material_title>
+      <en><![CDATA[Example Journal of Microbiology]]></en>
+      <ja><![CDATA[例微生物学雑誌]]></ja>
+    </material_title>
+    <prism:issn>1234-5678</prism:issn>
+    <prism:eIssn>8765-4321</prism:eIssn>
+    <prism:volume>70</prism:volume>
+    <prism:number>3</prism:number>
+    <prism:startingPage>201</prism:startingPage>
+    <prism:endingPage>210</prism:endingPage>
+    <pubyear>2026</pubyear>
+    <prism:doi>10.9999/examplej.70.201</prism:doi>
+    <systemcode>1</systemcode>
+    <systemname>J-STAGE</systemname>
+    <title><![CDATA[温泉由来Rhodobacter株のロングリードゲノムアセンブリ]]></title>
+    <link href="https://www.jstage.jst.go.jp/article/examplej/70/3/70_201/_article/-char/ja/"/>
+    <id>https://www.jstage.jst.go.jp/article/examplej/70/3/70_201/_article/-char/ja/</id>
+    <updated>2026-10-10T09:00+09:00</updated>
+  </entry>
+  <entry>
+    <article_title>
+      <en><![CDATA[Whole-genome sequencing of rice landraces]]></en>
+      <ja/>
+    </article_title>
+    <article_link>
+      <en>https://www.jstage.jst.go.jp/article/exampleag/55/4/55_285/_article</en>
+      <ja>https://www.jstage.jst.go.jp/article/exampleag/55/4/55_285/_article/-char/ja/</ja>
+    </article_link>
+    <author>
+      <en>
+        <name><![CDATA[Jiro SATO]]></name>
+      </en>
+      <ja/>
+    </author>
+    <cdjournal>exampleag</cdjournal>
+    <material_title>
+      <en><![CDATA[Example Agricultural Research Quarterly]]></en>
+      <ja><![CDATA[Example Agricultural Research Quarterly]]></ja>
+    </material_title>
+    <prism:issn>0000-1111</prism:issn>
+    <prism:eIssn>2222-3333</prism:eIssn>
+    <prism:volume>55</prism:volume>
+    <prism:number>4</prism:number>
+    <prism:startingPage>285</prism:startingPage>
+    <prism:endingPage>294</prism:endingPage>
+    <pubyear>2025</pubyear>
+    <prism:doi></prism:doi>
+    <systemcode>1</systemcode>
+    <systemname>J-STAGE</systemname>
+    <title><![CDATA[Whole-genome sequencing of rice landraces]]></title>
+    <link href="https://www.jstage.jst.go.jp/article/exampleag/55/4/55_285/_article/-char/ja/"/>
+    <id>https://www.jstage.jst.go.jp/article/exampleag/55/4/55_285/_article/-char/ja/</id>
+    <updated>2025-11-02T09:00+09:00</updated>
+  </entry>
+</feed>
