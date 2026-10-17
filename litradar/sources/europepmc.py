@@ -7,6 +7,17 @@ downloading anything.
 
 Search:    GET /webservices/rest/search?query=...&format=json&pageSize=1000&cursorMark=*&resultType=core
 Full text: GET /webservices/rest/{PMCID}/fullTextXML
+
+Record shapes worth knowing (resultType=core, verified live):
+* Preprints (``source == "PPR"``) have no top-level ``publisher`` and ``journalInfo`` is null; the
+  server name is ``bookOrReportDetails.publisher`` ("bioRxiv", "medRxiv", "Research Square", ...).
+  ``license`` is null and ``isOpenAccess`` is "N" for PPR records even when the server is CC-licensed.
+* Journal articles carry ``journalInfo.journal.{title, issn, essn}``; ``license`` ("cc by",
+  "cc by-nc-nd", ...) is populated for the open-access subset and null otherwise; ``isOpenAccess``
+  is "Y"/"N". ``fullTextXML`` answers HTTP 500 for non-OA PMCIDs, so attach_fulltext skips records
+  that are explicitly not open access and uses a single retry for the rest.
+``Paper.license`` is set from the search ``license`` field; ``Paper.extra`` keeps ``is_open_access``
+and ``license`` too so the pipeline can gate full-text storage on them.
 """
 from __future__ import annotations
 
@@ -45,11 +56,34 @@ def hit_count(http: Http, query: str) -> int:
     return int((data or {}).get("hitCount") or 0)
 
 
-def fulltext_xml(http: Http, pmcid: str) -> Optional[bytes]:
-    resp = http.get(f"{BASE}/{pmcid}/fullTextXML", cache=True)
+def fulltext_xml(http: Http, pmcid: str, retries: int = 1) -> Optional[bytes]:
+    """Open-access JATS XML for a PMCID. One retry by default: a 5xx here is almost always deterministic
+    (the record is not in the OA subset), and the default policy would sleep 31 s per failing id."""
+    resp = http.get(f"{BASE}/{pmcid}/fullTextXML", cache=True, retries=retries)
     if resp is None or resp.status_code != 200:
         return None
     return resp.content
+
+
+def is_open_access(paper: Paper) -> Optional[bool]:
+    """True/False from the search record's isOpenAccess flag; None when Europe PMC did not say."""
+    flag = str((paper.extra or {}).get("is_open_access") or "").strip().upper()
+    if flag == "Y":
+        return True
+    if flag == "N":
+        return False
+    return None
+
+
+def preprint_server(rec: Dict[str, Any]) -> str:
+    """Server name for a PPR record: bookOrReportDetails.publisher, else journalInfo, else ''."""
+    details = rec.get("bookOrReportDetails") or {}
+    name = (details.get("publisher") or "").strip() if isinstance(details, dict) else ""
+    if not name:
+        name = (((rec.get("journalInfo") or {}).get("journal") or {}).get("title") or "").strip()
+    if not name:
+        name = (rec.get("publisher") or "").strip()
+    return name
 
 
 def to_paper(rec: Dict[str, Any]) -> Paper:
@@ -73,11 +107,15 @@ def to_paper(rec: Dict[str, Any]) -> Paper:
         if name:
             authors.append(Author(name=name, affiliation="; ".join(aff_list), orcid=orcid))
         affs.extend(aff_list)
-    journal = ((rec.get("journalInfo") or {}).get("journal") or {}).get("title") or rec.get("journalTitle") or rec.get("bookOrReportDetails", {}).get("publisher", "") or ""
+    jinfo = ((rec.get("journalInfo") or {}).get("journal") or {}) if isinstance(rec.get("journalInfo"), dict) else {}
+    details = rec.get("bookOrReportDetails") if isinstance(rec.get("bookOrReportDetails"), dict) else {}
+    journal = jinfo.get("title") or rec.get("journalTitle") or details.get("publisher") or ""
+    issns = [x for x in (jinfo.get("issn"), jinfo.get("essn")) if x]
     pmcid = rec.get("pmcid") or ""
     url = f"https://doi.org/{doi}" if doi else f"https://europepmc.org/article/{src}/{rec.get('id')}"
     is_preprint = src == "PPR"
     grants = [g.get("agency") for g in ((rec.get("grantsList") or {}).get("grant") or []) if g.get("agency")]
+    license_str = (rec.get("license") or "").strip()
     p = Paper(
         id=Paper.make_id("europepmc", native, doi),
         source="europepmc",
@@ -85,24 +123,39 @@ def to_paper(rec: Dict[str, Any]) -> Paper:
         title=(rec.get("title") or "").strip().rstrip("."),
         doi=doi,
         abstract=(rec.get("abstractText") or "").strip(),
-        journal=journal if not is_preprint else (rec.get("publisher") or "preprint"),
+        journal=journal if not is_preprint else (preprint_server(rec) or "preprint"),
         pub_date=rec.get("firstPublicationDate") or "",
         url=url,
-        license=rec.get("license") or "",
+        license=license_str,
         authors=authors,
         affiliations=list(dict.fromkeys(a for a in affs if a)),
-        extra={"pmid": rec.get("pmid"), "pmcid": pmcid, "is_open_access": rec.get("isOpenAccess"), "in_epmc": rec.get("inEPMC"), "grants": grants, "epmc_id": native},
+        extra={
+            "pmid": rec.get("pmid"),
+            "pmcid": pmcid,
+            "is_open_access": rec.get("isOpenAccess"),
+            "license": license_str,
+            "in_epmc": rec.get("inEPMC"),
+            "grants": grants,
+            "epmc_id": native,
+            "issn": issns,
+            "medline_abbreviation": jinfo.get("medlineAbbreviation") or "",
+        },
     )
     if grants:
         p.sections["funding"] = "; ".join(grants)
     return p
 
 
-def attach_fulltext(http: Http, paper: Paper) -> bool:
+def attach_fulltext(http: Http, paper: Paper, retries: int = 1) -> bool:
+    """Fetch and attach open-access full text. Records Europe PMC flags as not open access are skipped
+    without a request (fullTextXML answers 500 for them and the licence would not allow storage)."""
     pmcid = (paper.extra or {}).get("pmcid")
     if not pmcid:
         return False
-    xml = fulltext_xml(http, pmcid)
+    if is_open_access(paper) is False:
+        log.debug("%s: not in the Europe PMC open-access subset; metadata only", pmcid)
+        return False
+    xml = fulltext_xml(http, pmcid, retries=retries)
     if not xml:
         return False
     parsed = parse_jats(xml)

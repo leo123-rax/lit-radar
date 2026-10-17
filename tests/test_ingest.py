@@ -39,15 +39,15 @@ class FakeHttp:
                 return payload
         return None
 
-    def get_json(self, url, params=None, cache=False):
+    def get_json(self, url, params=None, cache=False, **kwargs):
         self.calls.append(("json", url, params))
         return self._lookup(url, params)
 
-    def get_text(self, url, params=None, cache=False):
+    def get_text(self, url, params=None, cache=False, **kwargs):
         self.calls.append(("text", url, params))
         return self._lookup(url, params)
 
-    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,)):
+    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,), **kwargs):
         self.calls.append(("get", url, params))
         payload = self._lookup(url, params)
         return FakeResponse(200, payload) if payload is not None else FakeResponse(404)
@@ -58,6 +58,7 @@ class FakeHttp:
 
 def _settings(tmp_path, **overrides):
     s = Settings.from_env()
+    s.radar.setdefault("sources", {}).setdefault("biorxiv", {})["fulltext"] = True  # default is off in radar.yaml; the ingest tests exercise the fetch path
     s.db_path = tmp_path / "add.sqlite"
     s.cache_dir = tmp_path / "cache"
     s.radar = copy.deepcopy(s.radar)
@@ -354,9 +355,9 @@ def test_author_manuscript_in_europepmc_is_facts_only(tmp_path):
     routes = [(f'DOI:"{DOI}"', epmc_record(isOpenAccess="N", license=None)), (f"{PMCID}/fullTextXML", FIX.read_bytes())]
     pipe = _pipe(tmp_path, FakeHttp(routes))
     (r,) = ingest.add_papers(pipe, [DOI])
-    assert not r.error and r.fulltext_level == "facts_only" and "crossref: no record" in r.notes
+    # author manuscripts are not in the PMC open-access subset: the adapter skips the fetch entirely
+    assert not r.error and r.fulltext_level == "none" and "crossref: no record" in r.notes
     assert "methods" not in json.loads(pipe.store.get_paper(r.paper_id)["sections_json"])
-    assert "ilmn-novaseq-x" in {m["entity_id"] for m in pipe.store.mentions_for(r.paper_id)}
 
 
 def test_add_arxiv_id(tmp_path):

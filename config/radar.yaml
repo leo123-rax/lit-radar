@@ -35,11 +35,14 @@ sources:
       - hematology
       - infectious diseases
       - health informatics
-    # Full-text JATS XML: bioRxiv's web host rate-limits scripted clients (HTTP 429, Cloudflare 1015).
-    # The client gives up on the host after two 429s, so leaving this on costs two requests. The official
-    # bulk route is the requester-pays S3 bucket (see docs/SOURCES.md); Europe PMC carries some preprints.
-    fulltext: true
-    fulltext_max: 600       # cap per run (each is one request; cached on disk afterwards)
+    # Full-text JATS XML is OFF by default: www.biorxiv.org / www.medrxiv.org rate-limit scripted clients
+    # (HTTP 429, Cloudflare error 1015) after a handful of requests, and the client then blocks the host
+    # for the run, so a 600-paper cap produced ~570 failures and a 30 s Retry-After sleep per run. The
+    # official bulk route is the requester-pays S3 bucket (s3://biorxiv-src-monthly, MECA archives;
+    # see docs/sources/biorxiv.md for how to enable this flag and the S3 path). Europe PMC carries the
+    # open-access subset of preprints with full text, and Methods-level matching still works through it.
+    fulltext: false
+    fulltext_max: 600       # cap per run when enabled (each is one request; cached on disk afterwards)
 
   europepmc:
     enabled: true
@@ -76,7 +79,9 @@ sources:
     limit: 0                # 0 = all records in the window
 
   sec:
-    enabled: true           # SEC EDGAR 8-K Atom feed for every watched company with a plain US ticker
+    enabled: true           # SEC EDGAR 8-K Atom feed for every watched company with a plain US ticker.
+                            # Requires LITRADAR_CONTACT_EMAIL: EDGAR wants "<tool> <contact e-mail>" (no URL) in
+                            # the User-Agent and answers 403 otherwise; feeds are skipped with a warning without it.
 
   rss:
     enabled: true           # journal TOCs that lack ISSN coverage, trade press, press wires (config/feeds.yaml)
@@ -120,8 +125,26 @@ ranking:
     llm_weight: 0.6         # final = 0.4 * heuristic + 0.6 * llm composite
 
 news:
-  # Google News queries are "<company name>" + a context clause chosen by company type, so bare names
-  # like GRAIL or Roche do not pull unrelated stories. Override per company with news_query in companies.yaml.
+  # Per-company news comes from the GDELT DOC 2.0 API (api.gdeltproject.org), which is built for
+  # programmatic use (GDELT: "unlimited and unrestricted use for any academic, commercial, or governmental
+  # use"). The query is "<company name>" + the query_context clause for the company type (or the company's
+  # own news_query), with sourcelang:<gdelt_language>. GDELT allows one request every 5 seconds, so ~75
+  # watched companies take ~7 minutes; a 429 backs the client off and, if it persists, the remaining
+  # companies are skipped and reported in the digest's error list. GDELT returns no snippet and mostly
+  # mainstream/regional outlets, so it complements publisher RSS, press wires and SEC filings.
+  gdelt: true
+  gdelt_timespan: 7d          # GDELT window (15min .. 3m); keep aligned with window_days
+  gdelt_language: english     # sourcelang: filter; empty string = all languages
+  # Google News RSS is OPT-IN and off by default. news.google.com/robots.txt serves "User-agent: * /
+  # Disallow: /" with an allow-list that omits /rss, and Google's Terms of Service prohibit "using automated
+  # means to access content from any of our services in violation of the machine-readable instructions on
+  # our web pages (for example, robots.txt files that disallow crawling...)". Turning this on is the fork
+  # owner's decision and risk; when on, one query per watched company plus the gnews entries in
+  # config/feeds.yaml are fetched (titles + encoded links only, `when:7d` appended to every query).
+  google_news: false
+  # Query context clauses are "<company name>" + a clause chosen by company type, so bare names like GRAIL
+  # or Roche do not pull unrelated stories. Override per company with news_query in companies.yaml.
+  # GDELT requires OR groups to be parenthesised; keep the parentheses.
   query_context:
     tools: '(sequencing OR genomics OR proteomics OR "life sciences" OR instrument OR biotech)'
     diagnostics: '(cancer OR diagnostic OR test OR genomics OR biotech OR FDA OR Medicare)'

@@ -100,3 +100,101 @@ def test_sra_expxml_parsing():
     assert x["experiment_accession"] == "SRX1" and x["study_accession"] == "SRP1" and x["organism"] == "Homo sapiens"
     assert x["library_strategy"] == "WGS" and x["center_name"] == "Example Center"
     assert sra._term("2026-10-10", "2026-10-17") == "2026/10/10:2026/10/17[PDAT]"
+
+
+def test_sra_expxml_raw_json_form_with_ampersand_is_parsed_fully():
+    """retmode=json hands over raw XML; '&amp;' inside it must survive (the old html.unescape broke it)."""
+    from litradar.sources import sra
+
+    raw = ('<Summary><Title>WGS of Klebsiella:Chicken farm</Title><Platform instrument_model="Illumina NovaSeq 6000">ILLUMINA</Platform>'
+           '<Statistics total_runs="1" total_spots="1" total_bases="1"/></Summary>'
+           '<Submitter acc="SRA2" center_name="Agriculture &amp; Agri-Food Canada" contact_name="x"/>'
+           '<Experiment acc="SRX35734411" status="public" name="n"/><Study acc="SRP677163" name="Farm &amp; field isolates"/>'
+           '<Organism taxid="573" ScientificName="Klebsiella pneumoniae"/><Library_descriptor><LIBRARY_STRATEGY>WGS</LIBRARY_STRATEGY></Library_descriptor>')
+    x = sra._parse_expxml(raw)
+    assert x["experiment_accession"] == "SRX35734411" and x["study_accession"] == "SRP677163"
+    assert x["center_name"] == "Agriculture & Agri-Food Canada" and x["study_title"] == "Farm & field isolates"
+    assert x["instrument_model"] == "Illumina NovaSeq 6000" and x["library_strategy"] == "WGS" and x["organism"] == "Klebsiella pneumoniae"
+
+
+def test_sra_regex_fallback_keeps_the_real_accession_on_malformed_xml():
+    from litradar.sources import sra
+
+    broken = '<Summary><Platform instrument_model="Revio">PACBIO_SMRT</Platform><Experiment acc="SRX9" status="public"/><Study acc="SRP9" name="S"/><Library_descriptor><LIBRARY_STRATEGY>WGS</LIBRARY_STRATEGY>'
+    x = sra._parse_expxml(broken)
+    assert x["experiment_accession"] == "SRX9" and x["study_accession"] == "SRP9" and x["instrument_model"] == "Revio" and x["library_strategy"] == "WGS"
+    assert sra._parse_expxml("") == {}
+
+
+def test_sra_fetch_uses_real_accessions_and_counts_synthetic_ones(caplog):
+    from litradar.sources import sra
+
+    esearch = {"esearchresult": {"count": "2", "webenv": "W", "querykey": "1"}}
+    esummary = {"result": {"uids": ["1", "2"],
+                           "1": {"expxml": '<Summary><Platform instrument_model="Illumina MiSeq">ILLUMINA</Platform></Summary><Submitter center_name="A &amp; B"/><Experiment acc="SRX1"/><Study acc="SRP1" name="t"/>', "createdate": "2026/10/15"},
+                           "2": {"expxml": "", "createdate": "2026/10/15"}}}
+    http = FakeHttp([esearch, esummary])
+    recs = list(sra.fetch(http, "2026-10-10", "2026-10-17"))
+    assert [r.accession for r in recs] == ["SRX1", "SRA-UID-2"] and recs[0].center_name == "A & B" and recs[0].first_public == "2026-10-15"
+    assert "1 record(s) had no parseable experiment accession" in caplog.text
+
+
+def test_crossref_filters_on_created_date_and_falls_back_to_online_pub_date():
+    empty = {"status": "ok", "message": {"items": [], "next-cursor": "c1"}}
+    hit = {"status": "ok", "message": {"items": [{"DOI": "10.1016/x"}], "next-cursor": None}}
+    http = FakeHttp([empty, hit])
+    items = list(crossref.journal_works(http, "0092-8674", "2026-10-03", "2026-10-17", mailto="x@example.org"))
+    assert [i["DOI"] for i in items] == ["10.1016/x"]
+    assert http.calls[0][1]["filter"] == "from-created-date:2026-10-03,until-created-date:2026-10-17"
+    assert http.calls[1][1]["filter"] == "from-online-pub-date:2026-10-03,until-online-pub-date:2026-10-17"
+    assert "created" in http.calls[0][1]["select"] and "published-online" in http.calls[0][1]["select"]
+    # a non-empty created-date answer is not followed by the fallback
+    http = FakeHttp([hit])
+    assert len(list(crossref.journal_works(http, "0092-8674", "2026-10-03", "2026-10-17"))) == 1 and len(http.calls) == 1
+
+
+def test_crossref_pub_date_prefers_full_dates_and_uses_created_for_month_precision():
+    full = {"published": {"date-parts": [[2026, 10, 13]]}, "created": {"date-time": "2026-10-01T00:00:00Z"}}
+    assert crossref.pub_date(full) == "2026-10-13"
+    month = {"published": {"date-parts": [[2026, 10]]}, "created": {"date-time": "2026-10-15T14:39:56Z", "date-parts": [[2026, 10, 15]]}}
+    assert crossref.pub_date(month) == "2026-10-15"
+    online = {"published": {"date-parts": [[2026, 10]]}, "published-online": {"date-parts": [[2026, 10, 9]]}, "created": {"date-time": "2026-10-15T14:39:56Z"}}
+    assert crossref.pub_date(online) == "2026-10-09"
+    assert crossref.pub_date({"published": {"date-parts": [[2026, 10]]}}) == "2026-10-01"
+    assert crossref._date({"date-parts": [[None]]}) == "" and crossref._date({"date-parts": [["2026", "10"]]}) == "2026-10-01"
+    p = crossref.to_paper({"DOI": "10.1016/j.cell.2026.09.065", "title": ["T"], "published": {"date-parts": [[2026, 10]]}, "created": {"date-time": "2026-10-14T19:54:44Z"}, "ISSN": ["0092-8674", "1097-4172"], "type": "journal-article"})
+    assert p.pub_date == "2026-10-14" and p.extra["issn"] == ["0092-8674", "1097-4172"] and p.extra["published_parts"] == [2026, 10] and p.extra["created"] == "2026-10-14"
+
+
+def test_ena_date_bound_includes_the_last_day_and_rows_are_deduplicated():
+    from litradar.sources import ena
+
+    assert ena.exclusive_end("2026-10-15") == "2026-10-16" and ena.exclusive_end("2026-12-31") == "2027-01-01"
+    assert ena.date_query("2026-10-15", "2026-10-15") == 'first_public>="2026-10-15" AND first_public<"2026-10-16"'
+    assert ena.date_query("2026-10-10", "2026-10-17", quoted=False) == "first_public>=2026-10-10 AND first_public<2026-10-18"
+    rows = [
+        {"experiment_accession": "ERX1", "run_accession": "ERR1", "instrument_model": "Illumina NovaSeq X", "first_public": "2026-10-15"},
+        {"experiment_accession": "ERX1", "run_accession": "ERR2", "instrument_model": "Illumina NovaSeq X", "first_public": "2026-10-15"},
+        {"experiment_accession": "ERX2", "run_accession": "ERR3", "instrument_model": "PacBio Revio", "first_public": "2026-10-15"},
+    ]
+    http = FakeHttp([rows])
+    recs = list(ena.fetch(http, "2026-10-15", "2026-10-15"))
+    assert [r.accession for r in recs] == ["ERX1", "ERX2"]
+    assert http.calls[0][1]["query"] == 'first_public>="2026-10-15" AND first_public<"2026-10-16"'
+
+
+def test_europepmc_preprint_server_license_and_open_access_gate():
+    rec = {"id": "PPR1344081", "source": "PPR", "doi": "10.64898/2026.10.14.759099", "title": "A preprint", "firstPublicationDate": "2026-10-14",
+           "bookOrReportDetails": {"publisher": "bioRxiv", "yearOfPublication": 2026}, "journalInfo": None, "isOpenAccess": "N", "license": None}
+    p = europepmc.to_paper(rec)
+    assert p.kind == "preprint" and p.journal == "bioRxiv" and p.license == "" and p.extra["is_open_access"] == "N"
+    assert europepmc.preprint_server({"bookOrReportDetails": None, "journalInfo": {"journal": {"title": "Research Square"}}}) == "Research Square"
+    assert europepmc.to_paper({"id": "1", "source": "PPR", "title": "x"}).journal == "preprint"
+    art = {"id": "2", "source": "MED", "pmcid": "PMC999", "title": "Art", "journalInfo": {"journal": {"title": "Cell", "issn": "0092-8674", "essn": "1097-4172", "medlineAbbreviation": "Cell"}},
+           "isOpenAccess": "Y", "license": "cc by"}
+    q = europepmc.to_paper(art)
+    assert q.license == "cc by" and q.extra["license"] == "cc by" and q.extra["issn"] == ["0092-8674", "1097-4172"] and europepmc.is_open_access(q) is True
+    # not open access -> no request is made (FakeHttp has no .get, so a request would raise)
+    closed = europepmc.to_paper({**art, "isOpenAccess": "N", "license": None})
+    assert europepmc.is_open_access(closed) is False and europepmc.attach_fulltext(FakeHttp([]), closed) is False
+    assert europepmc.is_open_access(europepmc.to_paper({"id": "3", "source": "MED", "pmcid": "PMC1", "title": "t"})) is None
