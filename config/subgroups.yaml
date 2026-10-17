@@ -1,127 +1,233 @@
+# OpenAlex ids transcribed from research notes on 2026-10-17; not yet verified against the live API (anonymous OpenAlex access was rate-limited that day). Run `litradar check-config` after editing.
 # Researcher subgroups. Each subgroup carries:
 #   openalex_topics   OpenAlex topic ids (T...) used to pull new works and to assign papers to the subgroup.
+#                     First id(s) = primary topic for the field; the rest are supporting topics (often broad —
+#                     e.g. T10222 has ~700k works — so pair them with keywords rather than relying on them alone).
+#                     OpenAlex has no dedicated topic for perturbation screens, protein design, long-read
+#                     sequencing or MCED; those subgroups are defined by keywords intersected with broad topics.
 #   keywords          free-text terms used when no topic id is available and for assigning papers.
 #   tracked_authors   people whose new papers / preprints you want flagged. Match by OpenAlex author id
-#                     (preferred, unambiguous) or by exact display name.
+#                     (preferred, unambiguous) or by exact display name. An empty openalex_id means the id
+#                     could not be resolved yet (split profile, common name, or budget) — resolve via ORCID.
 # The illustrative seed list below names well-known public researchers in each field. Edit freely.
 subgroups:
   - id: single_cell
     name: Single-cell genomics
-    openalex_topics: []
+    openalex_topics: [T11289, T10222, T10621]  # T11289 Single-cell and spatial transcriptomics (primary); T10222 Genomics and Chromatin Dynamics, T10621 Gene Regulatory Network Analysis (supporting)
     keywords: ["single-cell RNA", "scRNA-seq", "single-nucleus", "snRNA-seq", "single-cell multiome", "scATAC", "CITE-seq", "single cell atlas", "cell atlas"]
     tracked_authors:
-      - {name: "Aviv Regev", openalex_id: "", institution: "Genentech"}
-      - {name: "Sarah A. Teichmann", openalex_id: "", institution: "University of Cambridge"}
-      - {name: "Rahul Satija", openalex_id: "", institution: "New York Genome Center"}
-      - {name: "Fabian J. Theis", openalex_id: "", institution: "Helmholtz Munich"}
-      - {name: "Jay Shendure", openalex_id: "", institution: "University of Washington"}
-      - {name: "Dana Pe'er", openalex_id: "", institution: "Memorial Sloan Kettering"}
-      - {name: "Alexander van Oudenaarden", openalex_id: "", institution: "Hubrecht Institute"}
-      - {name: "Rickard Sandberg", openalex_id: "", institution: "Karolinska Institutet"}
+      - {name: "Aviv Regev", openalex_id: "A5004067604", institution: "Genentech"}
+      - {name: "Sarah A. Teichmann", openalex_id: "A5028596003", institution: "University of Cambridge"}
+      - {name: "Rahul Satija", openalex_id: "A5058180202", institution: "New York Genome Center"}
+      - {name: "Fabian J. Theis", openalex_id: "", institution: "Helmholtz Munich"}  # unresolved: autocomplete returned an 18-work stub
+      - {name: "Jay Shendure", openalex_id: "A5083897996", institution: "University of Washington"}
+      - {name: "Dana Pe'er", openalex_id: "A5074451448", institution: "Memorial Sloan Kettering"}
+      - {name: "Alexander van Oudenaarden", openalex_id: "A5035202405", institution: "Hubrecht Institute"}
+      - {name: "Rickard Sandberg", openalex_id: "A5077749659", institution: "Karolinska Institutet"}
+      - {name: "Allon Klein", openalex_id: "A5064938000", institution: "Harvard Medical School"}
+      - {name: "Evan Z. Macosko", openalex_id: "A5062710108", institution: "Broad Institute"}
+      - {name: "Bosiljka Tasic", openalex_id: "A5012251441", institution: "Allen Institute for Brain Science"}
+      - {name: "Hongkui Zeng", openalex_id: "A5010189175", institution: "Allen Institute for Brain Science"}
+      - {name: "Stephen Quake", openalex_id: "", institution: "Stanford University / CZI"}
+      - {name: "Alex Shalek", openalex_id: "", institution: "MIT / Broad Institute"}
+      - {name: "Ido Amit", openalex_id: "", institution: "Weizmann Institute"}
   - id: spatial
     name: Spatial biology
-    openalex_topics: []
+    openalex_topics: [T11289, T10857]  # T11289 Single-cell and spatial transcriptomics (OpenAlex does not split spatial from single-cell); T10857 Advanced Electron Microscopy Techniques (supporting, imaging-heavy work)
     keywords: ["spatial transcriptomics", "spatial proteomics", "in situ sequencing", "multiplexed imaging", "spatial omics", "MERFISH", "imaging mass cytometry", "Visium", "Xenium", "CosMx"]
     tracked_authors:
-      - {name: "Xiaowei Zhuang", openalex_id: "", institution: "Harvard University"}
-      - {name: "Fei Chen", openalex_id: "", institution: "Broad Institute"}
-      - {name: "Evan Z. Macosko", openalex_id: "", institution: "Broad Institute"}
-      - {name: "Joakim Lundeberg", openalex_id: "", institution: "KTH Royal Institute of Technology"}
-      - {name: "Garry P. Nolan", openalex_id: "", institution: "Stanford University"}
-      - {name: "Long Cai", openalex_id: "", institution: "Caltech"}
-      - {name: "Bernd Bodenmiller", openalex_id: "", institution: "University of Zurich"}
-      - {name: "Rong Fan", openalex_id: "", institution: "Yale University"}
+      - {name: "Xiaowei Zhuang", openalex_id: "A5087959577", institution: "Harvard University"}
+      - {name: "Fei Chen", openalex_id: "", institution: "Broad Institute"}  # unresolved: common name
+      - {name: "Evan Z. Macosko", openalex_id: "A5062710108", institution: "Broad Institute"}
+      - {name: "Joakim Lundeberg", openalex_id: "A5054656710", institution: "KTH Royal Institute of Technology"}
+      - {name: "Garry P. Nolan", openalex_id: "A5033995613", institution: "Stanford University"}
+      - {name: "Long Cai", openalex_id: "A5061996201", institution: "Caltech"}
+      - {name: "Bernd Bodenmiller", openalex_id: "A5010642463", institution: "University of Zurich"}
+      - {name: "Rong Fan", openalex_id: "A5013529158", institution: "Yale University"}
+      - {name: "Jonas Frisén", openalex_id: "A5042664107", institution: "Karolinska Institutet"}
+      - {name: "Patrik Ståhl", openalex_id: "A5083056852", institution: "KTH / SciLifeLab"}
+      - {name: "Ed Lein", openalex_id: "A5085405013", institution: "Allen Institute for Brain Science"}  # split profile; second id A5110230528
+      - {name: "Jeffrey Moffitt", openalex_id: "A5087838801", institution: "Boston Children's Hospital / Harvard"}
+      - {name: "Sten Linnarsson", openalex_id: "A5086924433", institution: "Karolinska Institutet"}
+      - {name: "Xiao Wang", openalex_id: "", institution: "Broad Institute / MIT"}  # unresolved: common name
   - id: long_read
     name: Long-read sequencing & genome assembly
-    openalex_topics: []
+    openalex_topics: [T10015, T11213, T13664, T11582]  # T10015 Genomics and Phylogenetic Studies (primary, broad — intersect with keywords); T11213 Genomic variations and chromosomal abnormalities, T13664 Genome Rearrangement Algorithms, T11582 Nanopore and Nanochannel Transport Studies (physics-leaning)
     keywords: ["long-read sequencing", "nanopore sequencing", "HiFi", "telomere-to-telomere", "pangenome", "structural variant", "genome assembly", "methylation calling"]
     tracked_authors:
-      - {name: "Adam M. Phillippy", openalex_id: "", institution: "NHGRI"}
-      - {name: "Karen H. Miga", openalex_id: "", institution: "UC Santa Cruz"}
-      - {name: "Evan E. Eichler", openalex_id: "", institution: "University of Washington"}
-      - {name: "Benedict Paten", openalex_id: "", institution: "UC Santa Cruz"}
-      - {name: "Michael C. Schatz", openalex_id: "", institution: "Johns Hopkins University"}
-      - {name: "Fritz J. Sedlazeck", openalex_id: "", institution: "Baylor College of Medicine"}
-      - {name: "Winston Timp", openalex_id: "", institution: "Johns Hopkins University"}
+      - {name: "Adam M. Phillippy", openalex_id: "A5086869042", institution: "NHGRI"}
+      - {name: "Karen H. Miga", openalex_id: "A5045267050", institution: "UC Santa Cruz"}
+      - {name: "Evan E. Eichler", openalex_id: "", institution: "University of Washington"}  # unresolved: autocomplete found only stubs
+      - {name: "Benedict Paten", openalex_id: "A5061203088", institution: "UC Santa Cruz"}
+      - {name: "Michael C. Schatz", openalex_id: "", institution: "Johns Hopkins University"}  # unresolved
+      - {name: "Fritz J. Sedlazeck", openalex_id: "A5037440162", institution: "Baylor College of Medicine"}
+      - {name: "Winston Timp", openalex_id: "A5081156860", institution: "Johns Hopkins University"}
+      - {name: "Heng Li", openalex_id: "A5100338825", institution: "Dana-Farber Cancer Institute / Harvard"}  # notes mark this id "probable" (382 works, no institution hint) — verify
+      - {name: "Mark Akeson", openalex_id: "A5012942178", institution: "UC Santa Cruz"}
+      - {name: "Ewan Birney", openalex_id: "A5061379058", institution: "EMBL-EBI"}
+      - {name: "Tobias Marschall", openalex_id: "A5067570776", institution: "Heinrich Heine University Düsseldorf"}
+      - {name: "Charles Lee", openalex_id: "A5100716198", institution: "Jackson Laboratory for Genomic Medicine"}
+      - {name: "Erich Jarvis", openalex_id: "", institution: "Rockefeller University / HHMI"}
+      - {name: "Kerstin Lindblad-Toh", openalex_id: "", institution: "Uppsala University / Broad Institute"}
   - id: proteomics
     name: Proteomics
-    openalex_topics: []
+    openalex_topics: [T10519, T10683, T10836, T11124]  # T10519 Advanced Proteomics Techniques, T10683 Mass Spectrometry Techniques (primary); T10836 Metabolomics and Mass Spectrometry Studies, T11124 Protein purification and stability (supporting)
     keywords: ["proteomics", "mass spectrometry-based", "plasma proteome", "proteogenomic", "single-cell proteomics", "affinity proteomics", "Olink", "SomaScan", "data-independent acquisition"]
     tracked_authors:
-      - {name: "Matthias Mann", openalex_id: "", institution: "Max Planck Institute of Biochemistry"}
-      - {name: "Ruedi Aebersold", openalex_id: "", institution: "ETH Zurich"}
-      - {name: "Nikolai Slavov", openalex_id: "", institution: "Northeastern University"}
-      - {name: "Steven A. Carr", openalex_id: "", institution: "Broad Institute"}
-      - {name: "Bernhard Küster", openalex_id: "", institution: "Technical University of Munich"}
-      - {name: "Michael J. MacCoss", openalex_id: "", institution: "University of Washington"}
-      - {name: "Jesper V. Olsen", openalex_id: "", institution: "University of Copenhagen"}
-      - {name: "Claudia Langenberg", openalex_id: "", institution: "Queen Mary University of London"}
+      - {name: "Matthias Mann", openalex_id: "A5090940750", institution: "Max Planck Institute of Biochemistry"}
+      - {name: "Ruedi Aebersold", openalex_id: "", institution: "ETH Zurich"}  # unresolved
+      - {name: "Nikolai Slavov", openalex_id: "A5067445892", institution: "Northeastern University"}
+      - {name: "Steven A. Carr", openalex_id: "", institution: "Broad Institute"}  # not in notes
+      - {name: "Bernhard Küster", openalex_id: "A5058082024", institution: "Technical University of Munich"}
+      - {name: "Michael J. MacCoss", openalex_id: "A5043959168", institution: "University of Washington"}
+      - {name: "Jesper V. Olsen", openalex_id: "A5023019360", institution: "University of Copenhagen"}
+      - {name: "Claudia Langenberg", openalex_id: "", institution: "Queen Mary University of London"}  # not in notes
+      - {name: "Steven Gygi", openalex_id: "A5079793809", institution: "Harvard Medical School"}
+      - {name: "Jürgen Cox", openalex_id: "A5108375431", institution: "Max Planck Institute of Biochemistry"}  # split profile; also A5033409837, A5084242032 (same ORCID)
+      - {name: "Albert Heck", openalex_id: "A5053603496", institution: "Utrecht University"}
+      - {name: "Alexey Nesvizhskii", openalex_id: "A5085497637", institution: "University of Michigan"}
+      - {name: "Anne-Claude Gingras", openalex_id: "A5083905650", institution: "Lunenfeld-Tanenbaum Research Institute / University of Toronto"}
+      - {name: "Joshua Coon", openalex_id: "", institution: "University of Wisconsin"}
+      - {name: "Neil Kelleher", openalex_id: "", institution: "Northwestern University"}
   - id: liquid_biopsy
     name: Liquid biopsy, MRD & early detection
-    openalex_topics: []
+    openalex_topics: [T11287, T10978, T10950]  # T11287 Cancer Genomics and Diagnostics (primary); T10978 Prenatal Screening and Diagnostics (cfDNA methods), T10950 Acute Lymphoblastic Leukemia research (heme MRD)
     keywords: ["cell-free DNA", "circulating tumor DNA", "ctDNA", "minimal residual disease", "molecular residual disease", "multi-cancer early detection", "liquid biopsy", "fragmentomics", "cfDNA methylation"]
     tracked_authors:
-      - {name: "Victor E. Velculescu", openalex_id: "", institution: "Johns Hopkins University"}
-      - {name: "Nitzan Rosenfeld", openalex_id: "", institution: "University of Cambridge"}
-      - {name: "Maximilian Diehn", openalex_id: "", institution: "Stanford University"}
-      - {name: "Ash A. Alizadeh", openalex_id: "", institution: "Stanford University"}
-      - {name: "Charles Swanton", openalex_id: "", institution: "Francis Crick Institute"}
-      - {name: "Daniel De Carvalho", openalex_id: "", institution: "Princess Margaret Cancer Centre"}
-      - {name: "Luis A. Diaz", openalex_id: "", institution: "Memorial Sloan Kettering"}
-      - {name: "Bert Vogelstein", openalex_id: "", institution: "Johns Hopkins University"}
+      - {name: "Victor E. Velculescu", openalex_id: "A5006560755", institution: "Johns Hopkins University"}
+      - {name: "Nitzan Rosenfeld", openalex_id: "A5059136338", institution: "University of Cambridge"}
+      - {name: "Maximilian Diehn", openalex_id: "A5001873561", institution: "Stanford University"}
+      - {name: "Ash A. Alizadeh", openalex_id: "A5007420876", institution: "Stanford University"}
+      - {name: "Charles Swanton", openalex_id: "A5016475369", institution: "Francis Crick Institute"}
+      - {name: "Daniel De Carvalho", openalex_id: "", institution: "Princess Margaret Cancer Centre"}  # not in notes
+      - {name: "Luis A. Diaz", openalex_id: "", institution: "Memorial Sloan Kettering"}  # unresolved
+      - {name: "Bert Vogelstein", openalex_id: "A5072858943", institution: "Johns Hopkins University"}
+      - {name: "Nickolas Papadopoulos", openalex_id: "A5037021577", institution: "Johns Hopkins University"}
+      - {name: "Catherine Alix-Panabières", openalex_id: "A5043582421", institution: "University of Montpellier / CNRS"}
+      - {name: "Jeanne Tie", openalex_id: "A5075700550", institution: "WEHI / Peter MacCallum Cancer Centre"}
+      - {name: "Viktor Adalsteinsson", openalex_id: "A5002786000", institution: "Broad Institute"}
+      - {name: "Dennis Lo", openalex_id: "", institution: "Chinese University of Hong Kong"}  # unresolved; canonical likely "Y. M. Dennis Lo"
+      - {name: "Rebecca Fitzgerald", openalex_id: "", institution: "University of Cambridge"}
   - id: perturbation
     name: Functional genomics & perturbation screens
-    openalex_topics: []
+    openalex_topics: [T10878, T11289, T10222]  # T10878 CRISPR and Genetic Engineering (primary, intersect with keywords); T11289 (single-cell readouts), T10222 (supporting)
     keywords: ["Perturb-seq", "CRISPR screen", "genome-wide screen", "CRISPRi", "CRISPRa", "base editor screen", "pooled screen", "massively parallel reporter"]
     tracked_authors:
-      - {name: "Jonathan S. Weissman", openalex_id: "", institution: "Whitehead Institute / MIT"}
-      - {name: "Feng Zhang", openalex_id: "", institution: "Broad Institute"}
-      - {name: "David R. Liu", openalex_id: "", institution: "Broad Institute"}
-      - {name: "Jennifer A. Doudna", openalex_id: "", institution: "UC Berkeley"}
-      - {name: "John G. Doench", openalex_id: "", institution: "Broad Institute"}
-      - {name: "Thomas M. Norman", openalex_id: "", institution: "Memorial Sloan Kettering"}
-      - {name: "Luke A. Gilbert", openalex_id: "", institution: "Arc Institute"}
+      - {name: "Jonathan S. Weissman", openalex_id: "", institution: "Whitehead Institute / MIT"}  # unresolved
+      - {name: "Feng Zhang", openalex_id: "A5100401298", institution: "Broad Institute"}
+      - {name: "David R. Liu", openalex_id: "A5100739514", institution: "Broad Institute"}  # 361 works — may be a split profile
+      - {name: "Jennifer A. Doudna", openalex_id: "A5067184382", institution: "UC Berkeley"}
+      - {name: "John G. Doench", openalex_id: "A5051881453", institution: "Broad Institute"}
+      - {name: "Thomas M. Norman", openalex_id: "", institution: "Memorial Sloan Kettering"}  # unresolved
+      - {name: "Luke A. Gilbert", openalex_id: "", institution: "Arc Institute"}  # unresolved
+      - {name: "Michael Bassik", openalex_id: "A5022593887", institution: "Stanford University"}
+      - {name: "Neville Sanjana", openalex_id: "A5016855642", institution: "New York Genome Center / NYU"}
+      - {name: "Nir Yosef", openalex_id: "A5026299103", institution: "Weizmann Institute"}  # split profile; also A5077844473
+      - {name: "Mohammad Lotfollahi", openalex_id: "A5077814625", institution: "Wellcome Sanger Institute / University of Cambridge"}
+      - {name: "Jason Moffat", openalex_id: "A5086112491", institution: "University of Toronto"}
+      - {name: "Traver Hart", openalex_id: "A5033882667", institution: "MD Anderson Cancer Center"}
+      - {name: "Jesse Engreitz", openalex_id: "", institution: "Stanford University"}  # unresolved; a malformed "Stanford Jesse Engreitz" stub exists
+      - {name: "Britt Adamson", openalex_id: "", institution: "Princeton University"}
   - id: ai_bio
     name: AI for biology & protein design
-    openalex_topics: []
+    openalex_topics: [T10044, T12254, T10211, T10404]  # T10044 Protein Structure and Dynamics (intersect with keywords), T12254 Machine Learning in Bioinformatics (primary); T10211 Computational Drug Discovery Methods, T10404 Enzyme Catalysis and Immobilization (supporting)
     keywords: ["protein language model", "foundation model", "protein design", "diffusion model", "structure prediction", "AlphaFold", "virtual cell", "genomic language model", "de novo design", "deep learning"]
     tracked_authors:
-      - {name: "David Baker", openalex_id: "", institution: "University of Washington"}
-      - {name: "John Jumper", openalex_id: "", institution: "Google DeepMind"}
-      - {name: "Alexander Rives", openalex_id: "", institution: "EvolutionaryScale"}
-      - {name: "Patrick D. Hsu", openalex_id: "", institution: "Arc Institute"}
-      - {name: "Brian L. Hie", openalex_id: "", institution: "Stanford / Arc Institute"}
-      - {name: "Mohammed AlQuraishi", openalex_id: "", institution: "Columbia University"}
-      - {name: "Regina Barzilay", openalex_id: "", institution: "MIT"}
-      - {name: "Bo Wang", openalex_id: "", institution: "University of Toronto"}
+      - {name: "David Baker", openalex_id: "A5053192926", institution: "University of Washington"}
+      - {name: "John Jumper", openalex_id: "A5059179935", institution: "Google DeepMind"}
+      - {name: "Alexander Rives", openalex_id: "A5029063409", institution: "EvolutionaryScale"}  # profile carries only ~20 works
+      - {name: "Patrick D. Hsu", openalex_id: "A5060049408", institution: "Arc Institute"}
+      - {name: "Brian L. Hie", openalex_id: "A5021962955", institution: "Stanford / Arc Institute"}
+      - {name: "Mohammed AlQuraishi", openalex_id: "A5002987125", institution: "Columbia University"}
+      - {name: "Regina Barzilay", openalex_id: "A5010124873", institution: "MIT"}
+      - {name: "Bo Wang", openalex_id: "", institution: "University of Toronto"}  # not in notes
+      - {name: "Po-Ssu Huang", openalex_id: "A5021369429", institution: "Stanford University"}
+      - {name: "Bruno Correia", openalex_id: "A5040838563", institution: "EPFL"}
+      - {name: "Sergey Ovchinnikov", openalex_id: "A5084204507", institution: "MIT"}
+      - {name: "Bonnie Berger", openalex_id: "A5044078921", institution: "MIT / Broad Institute"}
+      - {name: "Debora Marks", openalex_id: "A5022191527", institution: "Harvard Medical School / Broad Institute"}
+      - {name: "Tommi Jaakkola", openalex_id: "A5048915657", institution: "MIT"}
+      - {name: "Tanja Kortemme", openalex_id: "A5000906927", institution: "UCSF / Chan Zuckerberg Biohub"}
   - id: gene_editing
     name: Gene editing & delivery
-    openalex_topics: []
+    openalex_topics: [T10878, T10613, T10725]  # T10878 CRISPR and Genetic Engineering (primary); T10613 Virus-based gene therapy research, T10725 RNA Interference and Gene Delivery (supporting)
     keywords: ["base editing", "prime editing", "in vivo gene editing", "lipid nanoparticle", "AAV capsid", "epigenome editing", "gene therapy", "CRISPR-Cas"]
     tracked_authors:
-      - {name: "David R. Liu", openalex_id: "", institution: "Broad Institute"}
-      - {name: "Kiran Musunuru", openalex_id: "", institution: "University of Pennsylvania"}
-      - {name: "Omar O. Abudayyeh", openalex_id: "", institution: "Harvard Medical School"}
-      - {name: "Jonathan S. Gootenberg", openalex_id: "", institution: "Harvard Medical School"}
-      - {name: "Daniel G. Anderson", openalex_id: "", institution: "MIT"}
-      - {name: "Samuel H. Sternberg", openalex_id: "", institution: "Columbia University"}
+      - {name: "David R. Liu", openalex_id: "A5100739514", institution: "Broad Institute"}  # 361 works — may be a split profile
+      - {name: "Kiran Musunuru", openalex_id: "A5040568538", institution: "University of Pennsylvania"}
+      - {name: "Omar O. Abudayyeh", openalex_id: "A5033170303", institution: "Harvard Medical School"}
+      - {name: "Jonathan S. Gootenberg", openalex_id: "A5063743060", institution: "Harvard Medical School"}
+      - {name: "Daniel G. Anderson", openalex_id: "", institution: "MIT"}  # not in notes
+      - {name: "Samuel H. Sternberg", openalex_id: "", institution: "Columbia University"}  # not in notes
+      - {name: "Jennifer A. Doudna", openalex_id: "A5067184382", institution: "UC Berkeley / Innovative Genomics Institute"}
+      - {name: "Feng Zhang", openalex_id: "A5100401298", institution: "Broad Institute"}
+      - {name: "J. Keith Joung", openalex_id: "A5005370545", institution: "Massachusetts General Hospital / Harvard"}
+      - {name: "Patrick D. Hsu", openalex_id: "A5060049408", institution: "Arc Institute / UC Berkeley"}
+      - {name: "Fyodor Urnov", openalex_id: "A5030339120", institution: "Innovative Genomics Institute"}
+      - {name: "Daniel E. Bauer", openalex_id: "A5071805086", institution: "Boston Children's Hospital / Broad Institute"}
+      - {name: "Benjamin Kleinstiver", openalex_id: "A5058898175", institution: "Massachusetts General Hospital"}
+      - {name: "Erik Sontheimer", openalex_id: "A5025571012", institution: "UMass Chan Medical School"}
+      - {name: "Alexis Komor", openalex_id: "A5044327001", institution: "UC San Diego"}
   - id: structural_biology
     name: Structural biology & cryo-EM
-    openalex_topics: []
+    openalex_topics: [T10857, T10044]  # T10857 Advanced Electron Microscopy Techniques and Applications (primary; the only topic in subfield 1315); T10044 Protein Structure and Dynamics (supporting)
     keywords: ["cryo-EM", "cryo-electron microscopy", "cryo-electron tomography", "cryo-ET", "single-particle analysis", "subtomogram averaging"]
     tracked_authors:
-      - {name: "Sjors H. W. Scheres", openalex_id: "", institution: "MRC Laboratory of Molecular Biology"}
-      - {name: "Yifan Cheng", openalex_id: "", institution: "UCSF"}
-      - {name: "Bridget Carragher", openalex_id: "", institution: "Chan Zuckerberg Imaging Institute"}
-      - {name: "Wolfgang Baumeister", openalex_id: "", institution: "Max Planck Institute of Biochemistry"}
-      - {name: "Julia Mahamid", openalex_id: "", institution: "EMBL Heidelberg"}
+      - {name: "Sjors H. W. Scheres", openalex_id: "A5061952716", institution: "MRC Laboratory of Molecular Biology"}
+      - {name: "Yifan Cheng", openalex_id: "A5016221669", institution: "UCSF"}
+      - {name: "Bridget Carragher", openalex_id: "A5027958286", institution: "Chan Zuckerberg Imaging Institute"}
+      - {name: "Wolfgang Baumeister", openalex_id: "A5029559203", institution: "Max Planck Institute of Biochemistry"}
+      - {name: "Julia Mahamid", openalex_id: "A5032622493", institution: "EMBL Heidelberg"}
+      - {name: "Wah Chiu", openalex_id: "A5049689333", institution: "Stanford University / SLAC"}
+      - {name: "Joachim Frank", openalex_id: "A5042892654", institution: "Columbia University"}
+      - {name: "Werner Kühlbrandt", openalex_id: "A5003711513", institution: "Max Planck Institute of Biophysics"}
+      - {name: "Eva Nogales", openalex_id: "A5034946559", institution: "UC Berkeley"}
+      - {name: "Tamir Gonen", openalex_id: "A5084200031", institution: "UCLA"}
+      - {name: "Holger Stark", openalex_id: "A5016614839", institution: "Max Planck Institute for Multidisciplinary Sciences"}
+      - {name: "Elizabeth Villa", openalex_id: "A5087861735", institution: "UC San Diego"}
+      - {name: "Edward Egelman", openalex_id: "A5014879094", institution: "University of Virginia"}
+      - {name: "Richard Henderson", openalex_id: "", institution: "MRC Laboratory of Molecular Biology"}  # unresolved: stubs only
   - id: synthetic_biology
     name: Synthetic biology & DNA synthesis
-    openalex_topics: []
+    openalex_topics: [T10932, T12029, T10432, T10521, T12688]  # T10932 Microbial Metabolic Engineering and Bioproduction (primary); T12029 DNA and Biological Computing (DNA data storage), T10432 DNA and Nucleic Acid Chemistry (oligo synthesis), T10521 RNA and protein synthesis mechanisms, T12688 Microbial metabolism and enzyme function (supporting)
     keywords: ["DNA synthesis", "gene synthesis", "DNA data storage", "cell-free expression", "genetic circuit", "synthetic genome", "biofoundry", "enzymatic DNA synthesis"]
     tracked_authors:
-      - {name: "George M. Church", openalex_id: "", institution: "Harvard Medical School"}
-      - {name: "Jef D. Boeke", openalex_id: "", institution: "NYU Langone"}
-      - {name: "Christopher A. Voigt", openalex_id: "", institution: "MIT"}
-      - {name: "Jason Chin", openalex_id: "", institution: "MRC Laboratory of Molecular Biology"}
-      - {name: "Tom Ellis", openalex_id: "", institution: "Imperial College London"}
+      - {name: "George M. Church", openalex_id: "A5103076360", institution: "Harvard Medical School"}  # OpenAlex display name "George McDonald Church" (1,288 works)
+      - {name: "Jef D. Boeke", openalex_id: "A5075536007", institution: "NYU Langone"}
+      - {name: "Christopher A. Voigt", openalex_id: "", institution: "MIT"}  # unresolved
+      - {name: "Jason Chin", openalex_id: "", institution: "MRC Laboratory of Molecular Biology"}  # unresolved
+      - {name: "Tom Ellis", openalex_id: "A5061080095", institution: "Imperial College London"}
+      - {name: "Jay Keasling", openalex_id: "A5000312223", institution: "UC Berkeley / Lawrence Berkeley National Laboratory"}
+      - {name: "Drew Endy", openalex_id: "A5047829117", institution: "Stanford University"}
+      - {name: "Luis Ceze", openalex_id: "A5081914923", institution: "University of Washington"}  # DNA data storage
+      - {name: "Karin Strauss", openalex_id: "A5024493389", institution: "Microsoft Research"}  # DNA data storage
+      - {name: "James J. Collins", openalex_id: "", institution: "MIT / Broad Institute / Wyss Institute"}
+      - {name: "Michael Jewett", openalex_id: "", institution: "Stanford University"}
+      - {name: "Pamela Silver", openalex_id: "", institution: "Harvard Medical School / Wyss Institute"}
+      - {name: "Timothy Lu", openalex_id: "", institution: "MIT"}
+  - id: cell_therapy
+    name: Cell therapy & immune engineering
+    openalex_topics: [T11491, T10031]  # T11491 CAR-T cell therapy research (primary); T10031 T-cell and B-cell Immunology (supporting, broad)
+    keywords: ["CAR-T", "CAR T cell", "cell therapy", "cellular immunotherapy", "immune engineering", "engineered T cell"]
+    tracked_authors:
+      - {name: "Carl June", openalex_id: "A5008558372", institution: "University of Pennsylvania"}
+      - {name: "Michel Sadelain", openalex_id: "A5059625599", institution: "Columbia University"}
+      - {name: "Crystal Mackall", openalex_id: "A5087779758", institution: "Stanford University"}
+      - {name: "Stanley Riddell", openalex_id: "A5087281332", institution: "Fred Hutchinson Cancer Center"}
+      - {name: "Marcela Maus", openalex_id: "A5029763484", institution: "Massachusetts General Hospital"}
+      - {name: "Christopher Klebanoff", openalex_id: "A5074579867", institution: "Memorial Sloan Kettering"}
+      - {name: "Kole Roybal", openalex_id: "A5074263773", institution: "UCSF / Gladstone Institutes"}
+      - {name: "Alexander Marson", openalex_id: "A5070915778", institution: "Gladstone Institutes / UCSF"}
+  - id: mced
+    name: Multi-cancer early detection
+    openalex_topics: [T10556, T11287, T10552, T10124, T10202]  # T10556 Global Cancer Incidence and Screening, T11287 Cancer Genomics and Diagnostics (primary); T10552 Colorectal Cancer Screening, T10124 Prostate Cancer Diagnosis, T10202 Lung Cancer Diagnosis (supporting, broad)
+    keywords: ["multi-cancer early detection", "multi-cancer early detection test", "MCED", "cancer screening", "circulating tumor DNA", "cfDNA methylation"]
+    tracked_authors:
+      - {name: "Nickolas Papadopoulos", openalex_id: "A5037021577", institution: "Johns Hopkins University"}
+      - {name: "Anne-Renee Hartman", openalex_id: "A5073892003", institution: "Adela"}
+      - {name: "Ruth Etzioni", openalex_id: "A5064344218", institution: "Fred Hutchinson Cancer Center"}
+      - {name: "Jacob Berchuck", openalex_id: "A5061307462", institution: "Dana-Farber Cancer Institute"}
+      - {name: "E. Shelley Hwang", openalex_id: "A5016887928", institution: "Duke University"}  # split profile; also A5072004172
+      - {name: "Eric Klein", openalex_id: "", institution: "Cleveland Clinic / GRAIL"}
+      - {name: "Deb Schrag", openalex_id: "", institution: "Memorial Sloan Kettering"}
+      - {name: "Tomasz Beer", openalex_id: "", institution: "Exact Sciences"}

@@ -61,14 +61,15 @@ class Pipeline:
             self.tier_by_journal[j["name"].lower()] = j.get("tier", "")
             for issn in j.get("issn", []) or []:
                 self.tier_by_issn[issn] = j.get("tier", "")
-        self.tracked: Dict[str, Tuple[str, str]] = {}  # normalized name -> (display name, subgroup)
-        self.tracked_ids: Dict[str, Tuple[str, str]] = {}  # openalex id -> (display name, subgroup)
+        # a person may sit in several subgroups, so each key maps to a list of (display name, subgroup)
+        self.tracked: Dict[str, List[Tuple[str, str]]] = {}  # normalized name -> [(display name, subgroup)]
+        self.tracked_ids: Dict[str, List[Tuple[str, str]]] = {}  # openalex id -> [(display name, subgroup)]
         for g in self.subgroups:
             for a in g.get("tracked_authors", []) or []:
                 if a.get("name"):
-                    self.tracked[_norm_name(a["name"])] = (a["name"], g["id"])
+                    self.tracked.setdefault(_norm_name(a["name"]), []).append((a["name"], g["id"]))
                 if a.get("openalex_id"):
-                    self.tracked_ids[a["openalex_id"]] = (a.get("name", a["openalex_id"]), g["id"])
+                    self.tracked_ids.setdefault(str(a["openalex_id"]), []).append((a.get("name", a["openalex_id"]), g["id"]))
         self.counts: Counter = Counter()
         self.errors: List[str] = []
 
@@ -189,10 +190,17 @@ class Pipeline:
             base = {"from_publication_date": since, "to_publication_date": until}
             mail, key = self.settings.contact_email, self.settings.openalex_api_key
             try:
-                topic_ids = [t for g in self.subgroups for t in (g.get("openalex_topics") or [])]
-                if cfg.get("topics", True) and topic_ids:
-                    for chunk in epmc_src.chunked(topic_ids, 30):
-                        flt = dict(base, **{"primary_topic.id": openalex_src.or_join(chunk)})
+                if cfg.get("topics", True):
+                    # one query per subgroup: its topics (primary + supporting) intersected with its keywords,
+                    # because supporting topics are broad (hundreds of thousands of works)
+                    for g in self.subgroups:
+                        topics = [t for t in (g.get("openalex_topics") or []) if t]
+                        kws = [k for k in (g.get("keywords") or []) if k]
+                        if not topics:
+                            continue
+                        flt = dict(base, **{"primary_topic.id": openalex_src.or_join(topics)})
+                        if kws:
+                            flt["title_and_abstract.search"] = openalex_src.or_join(kws[:40])
                         for w in openalex_src.works(self.http, flt, mail, key, maxr):
                             add(openalex_src.to_paper(w), "openalex.topics")
                 if cfg.get("company_authors", True):
@@ -337,12 +345,12 @@ class Pipeline:
         hits: List[Tuple[str, str, str]] = []
         for a in p.authors:
             if a.openalex_id and a.openalex_id in self.tracked_ids:
-                name, grp = self.tracked_ids[a.openalex_id]
-                hits.append((name, grp, "openalex_id"))
+                for name, grp in self.tracked_ids[a.openalex_id]:
+                    hits.append((name, grp, "openalex_id"))
             elif _norm_name(a.name) in self.tracked:
-                name, grp = self.tracked[_norm_name(a.name)]
-                hits.append((name, grp, "name"))
-        return list(merged.values()), hits
+                for name, grp in self.tracked[_norm_name(a.name)]:
+                    hits.append((name, grp, "name"))
+        return list(merged.values()), sorted(set(hits))
 
     def assign_subgroups(self, p: Paper) -> List[str]:
         text = f"{p.title} {p.abstract}".lower()
