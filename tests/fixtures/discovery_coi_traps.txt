@@ -1,0 +1,13 @@
+# competing-interest / funding paragraphs that must yield NO candidate (funders, institutions, known
+# gazetteer companies, generic references); one paragraph per line
+This work was supported by the National Institutes of Health (R01GM000000) and by a grant from the National Science Foundation.
+Funded by the University of Washington Royalty Research Fund and the Department of Biochemistry.
+J.S. is an employee of Illumina, Inc. and holds stock in Illumina. The remaining authors declare no competing interests.
+The authors are employees of the company and hold stock options. The company had no role in the analysis.
+Supported by a grant from the Wellcome Trust and the Medical Research Council. Also funded by Cancer Research UK.
+This research was funded by the National Natural Science Foundation of China (grant 81970000) and the Ministry of Science and Technology.
+S.Z. received support from the Institut National de la Santé et de la Recherche Médicale and the Fondation pour la Recherche Médicale.
+Funding was provided by the Ministry of Science and Technology of Taiwan and the Deutsche Forschungsgemeinschaft (DFG).
+The authors declare that they have no competing interests. The funders had no role in study design, data collection or interpretation.
+This work was supported by the Howard Hughes Medical Institute and the Chan Zuckerberg Initiative. C.D. acknowledges funding by the Klaus Tschira Stiftung gGmbH.
+The study was supported by the European Research Council (ERC grant 000000) and the Swiss National Science Foundation. This research was funded by an NRF Incentive grant for rated researchers.

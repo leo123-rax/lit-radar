@@ -1,0 +1,14 @@
+# competing-interest / funding paragraphs with one or more company names that discovery must find
+# format: expected name(s) separated by " || " <TAB> paragraph
+Proteolyze Therapeutics	C.O.W. is a shareholder of and consultant for Proteolyze Therapeutics, Inc. The other authors declare no competing interests.
+Biodepot	L.H.H. and K.Y.Y. have equity interest in Biodepot LLC. The terms of this arrangement have been reviewed and approved by the university in accordance with its policies.
+IBM Research	MRZ was previously employed by IBM Research, and MMD is currently employed by IBM Research. MRZ and MMD are co-authors of one of the models evaluated in this study.
+Augment Biologics	J.D.H., J.H., D.B., R.D.M., G.C.M., and C.M. are employees of Thermo Fisher Scientific. N.M.R. receives support from Thermo Fisher Scientific under a collaborative research agreement and is a consultant for Augment Biologics.
+Meta	S.A. is currently employed by Meta. The authors declare no other competing interests.
+Helix Spatial Biosciences || Nanoform Diagnostics	A.B. is a co-founder of Helix Spatial Biosciences and serves on the scientific advisory board of Nanoform Diagnostics Ltd.
+Orion Genomics	This work was funded by a grant from Orion Genomics GmbH. The funder had no role in study design.
+Cascade Proteomics	The study was sponsored by Cascade Proteomics, Inc., which provided the reagents at no cost.
+Lactiga US	This work was supported by Lactiga US Inc., the Federal Economic Development Agency for Southern Ontario (FedDev) via funding from Southern Ontario Pharmaceutical and Health Innovation Ecosystem (SOPHIE) Program, the Canadian Foundation for Innovation (CFI), and a Canadian Institutes of Health Research project grant.
+Xanadu Quantum Technologies	The Ph.D. scholarship of T.D. is supported by Xanadu Quantum Technologies Inc. R.G.-P. was supported by the Fonds de recherche du Québec.
+Bluefin Bio || Tidewater Labs	K.L. holds stock in Bluefin Bio and received research funding from Tidewater Labs LLC. The other authors have nothing to disclose.
+Northlight Therapeutics	Sequencing was performed in collaboration with Northlight Therapeutics, whose staff had no role in data analysis.
