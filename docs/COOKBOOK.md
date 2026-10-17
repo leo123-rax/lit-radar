@@ -323,7 +323,21 @@ for row in store.search("Xenium", since="2026-07-19", limit=20, sections=("metho
     print(row["pub_date"], row["journal"], row["title"][:70], "...", row["snippet"][:80])
 ```
 
-Live check: see the end of this file (`__Q10__`).
+Live check, against a store filled by `litradar run --days 7 --sources europepmc` (549 papers, 399 with
+full text, 3,320 instrument/company mentions, 12 minutes): **4 papers** name Xenium in their Methods;
+`litradar entity txg-xenium --since 180d` resolves the same four through the gazetteer.
+```
+- 2026-10-16  Spatial compartmentalization shapes distinct germinal center states during respiratory viral infection
+    Frontiers in immunology  https://europepmc.org/article/PMC/PMC13661466
+    … Serial sections (3–5 μm thick) were prepared for immunofluorescence staining and [Xenium] in situ spatial transcriptomic analyses …
+- 2026-10-11  Spatial Atlas of Small Cell Lung Carcinoma Reveals Intratumoral Tumor-State Heterogeneity and an MMP12+ Macrophage Niche
+    Cancer science  https://europepmc.org/article/PMC/PMC13655396
+    … Spatial visualization was performed using [Xenium] Explorer (v4.0.0). …
+- 2026-10-10  Native, Memory-Bounded Conversion of Mass Spectrometry Imaging Data into the SpatialData Ecosystem
+    Journal of the American Society for Mass Spectrometry  https://europepmc.org/article/PMC/PMC13651614
+    … The same tissue section was also imaged by [Xenium] spatial transcriptomics and stained with H&E …
+```
+`--json` returns the same rows as objects with `id, doi, title, journal, pub_date, url, source, kind, rank, snippet`.
 
 ## 11. Which companies co-occur with MRD
 
