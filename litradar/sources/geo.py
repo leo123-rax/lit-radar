@@ -31,6 +31,14 @@ Endpoints, verified live on 2026-10-17
           ptechtype "high-throughput sequencing" | "in situ oligonucleotide" | "other" | ..., pdat
           "2018/03/02", n_samples 1166851, and a very large `gse` back-reference string listing every
           series on the platform (~200 KB for popular platforms; a 50-id batch is ~1.1 MB, ~0.5 s).
+       The GPL uid = 100000000 + number rule is an observed convention, not a documented contract; when a
+       batch resolves nothing the adapter recovers the real uids with
+       esearch.fcgi db=gds term="(GPL24676[ACCN] OR GPL33484[ACCN]) AND GPL[ETYP]" -> idlist ["100024676", "100033484"]
+       (verified live 2026-10-17) and retries the esummary once.
+    4. esearch.fcgi  db=gds  term="GSE[ETYP] AND 2025/01/01:2025/12/31[PDAT] AND (GPL24676[ACCN] OR GPL24247[ACCN])"
+       retmax=10000 -> count "11139", idlist of 10000 uids; the same term with retstart=10000 returned the
+       remaining 1139 uids with no overlap (verified live 2026-10-17). `series_uids_by_platform` pages this way
+       and unions the uids, so a series on two platforms of one family is counted once.
 
 Platform-title conventions seen live (GEO uses the sequencer vocabulary without a vendor prefix for
 PacBio and ONT): "Illumina NovaSeq X Plus (Anser anser)", "Illumina HiSeq 2500 (Homo sapiens)",
@@ -59,7 +67,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from ..http import Http
 from ..models import ArchiveRecord
@@ -71,9 +79,17 @@ GPL_UID_BASE = 100000000  # GPL24676 -> uid 100024676
 GSE_UID_BASE = 200000000  # GSE351130 -> uid 200351130
 SERIES_PAGE = 200  # GSE DocSums per esummary page (~0.75 MB)
 GPL_BATCH = 50  # GPL DocSums per esummary call (~1.1 MB; NCBI asks for POST above ~200 ids)
+ESEARCH_PAGE = 10000  # esearch retmax ceiling; larger uid sets are paged with retstart
+ACCN_CHUNK = 100  # GPLnnn[ACCN] terms OR-ed per esearch call
+
+# State of the most recent fetch_series() sweep: {"start", "end", "total", "fetched", "complete", "error"}.
+# A caller that reports coverage (the pipeline) appends sweep_error() to its error list when it is non-empty.
+last_sweep: Dict[str, Any] = {}
 
 # trailing "(Homo sapiens)" / "(Escherichia coli; Escherichia phage MS2)" / "(mouse gut metagenome)"
 _TRAILING_PAREN = re.compile(r"\s*\(([^()]*)\)\s*$")
+# "(V4)", "(v2.1)", "(Version 2)": array design versions, never organisms
+_VERSION_LIKE = re.compile(r"^v(er(sion)?)?\s*\d", re.I)
 
 
 # ----------------------------------------------------------------------------- small helpers
@@ -88,7 +104,7 @@ def gpl_accession(gpl: Any) -> str:
     s = str(gpl or "").strip().upper()
     if s.startswith("GPL"):
         s = s[3:]
-    return f"GPL{int(s)}" if s.isdigit() else ""
+    return f"GPL{int(s)}" if s.isascii() and s.isdigit() else ""
 
 
 def gpl_uid(gpl: Any) -> str:
@@ -112,13 +128,26 @@ def _date(pdat: Any) -> str:
     return s[:10] if re.match(r"\d{4}-\d{2}-\d{2}", s) else ""
 
 
+def _is_design_detail(inner: str) -> bool:
+    """Parenthetical that is an array design note, not an organism: '(V4)', '(2.0)', '(Feature Number version)'."""
+    low = inner.lower()
+    if _VERSION_LIKE.match(inner) or re.fullmatch(r"[\d.]+", inner):
+        return True
+    return any(w in low for w in ("version", "array", "feature", "custom"))
+
+
 def model_from_title(title: str, taxon: str = "") -> str:
     """Platform title -> instrument model string.
 
     "Illumina NovaSeq 6000 (Homo sapiens)"                 -> "Illumina NovaSeq 6000"
     "Element AVITI (Escherichia coli; Escherichia phage MS2)" -> "Element AVITI"
+    "Oxford Nanopore MinION (Escherichia coli K-12)"       -> "Oxford Nanopore MinION"  (strain names carry digits)
+    "NanoString CosMx SMI (Human)"                         -> "NanoString CosMx SMI"
     "Xenium In Situ Analyzer: Danio rerio"                 -> "Xenium In Situ Analyzer"
     "Agilent-021169 ... (V4) (Feature Number version)"      -> unchanged (array design detail, kept)
+
+    A trailing parenthetical equal to the GPL `taxon` is always dropped. Otherwise it is dropped when it
+    is not a design note (`_is_design_detail`) and is either several words or one alphabetic word.
     """
     t = re.sub(r"\s+", " ", str(title or "")).strip()
     if not t:
@@ -132,11 +161,7 @@ def model_from_title(title: str, taxon: str = "") -> str:
     if m:
         inner = m.group(1).strip()
         words = inner.split()
-        # "(Homo sapiens)", "(mouse gut metagenome)", "(human)": no digits, not a design "version" note
-        looks_like_organism = bool(words) and not any(ch.isdigit() for ch in inner) and "version" not in inner.lower() and (
-            len(words) >= 2 or (inner.isalpha() and inner.islower())
-        )
-        if looks_like_organism:
+        if words and not _is_design_detail(inner) and (len(words) >= 2 or inner.isalpha()):
             return t[: m.start()].rstrip(" :")
     return t
 
@@ -163,19 +188,58 @@ def _params(api_key: str, **kw: Any) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------------------- esearch
+def _esearchresult(data: Any) -> Optional[Dict[str, Any]]:
+    """The `esearchresult` dict of an esearch JSON body, or None when the call failed / payload is malformed."""
+    if not isinstance(data, dict):
+        return None
+    r = data.get("esearchresult")
+    return r if isinstance(r, dict) else None
+
+
+def _int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _esearch_history(http: Http, term: str, api_key: str = "") -> Optional[Tuple[int, str, str]]:
+    """-> (count, WebEnv, query_key), or None when the esearch call failed or came back malformed."""
+    r = _esearchresult(http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=term, usehistory="y", retmax=0)))
+    if r is None:
+        return None
+    return _int(r.get("count")), str(r.get("webenv") or ""), str(r.get("querykey") or "")
+
+
 def esearch_history(http: Http, term: str, api_key: str = "") -> Tuple[int, str, str]:
     """-> (count, WebEnv, query_key); (0, '', '') when the call fails or the payload is malformed."""
-    data = http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=term, usehistory="y", retmax=0))
-    if not isinstance(data, dict):
-        return 0, "", ""
-    r = data.get("esearchresult")
-    if not isinstance(r, dict):
-        return 0, "", ""
-    try:
-        n = int(r.get("count") or 0)
-    except (TypeError, ValueError):
-        n = 0
-    return n, str(r.get("webenv") or ""), str(r.get("querykey") or "")
+    return _esearch_history(http, term, api_key) or (0, "", "")
+
+
+def esearch_uids(http: Http, term: str, api_key: str = "", page: int = ESEARCH_PAGE, max_uids: int = 1000000) -> Tuple[int, Set[str]]:
+    """Every uid matching `term` -> (server count, set of uids), paged with retstart/retmax (verified live for >10,000 hits).
+
+    Stops at the server count, on an empty or malformed page, when a page adds no new uids, or at `max_uids`.
+    """
+    uids: Set[str] = set()
+    total = 0
+    retstart = 0
+    page = max(1, int(page))
+    while True:
+        r = _esearchresult(http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=term, retstart=retstart, retmax=page)))
+        if r is None:
+            break
+        if retstart == 0:
+            total = _int(r.get("count"))
+        ids = r.get("idlist")
+        if not isinstance(ids, list) or not ids:
+            break
+        before = len(uids)
+        uids.update(str(u) for u in ids)
+        retstart += len(ids)
+        if len(uids) == before or retstart >= total or len(uids) >= max_uids:
+            break
+    return total, uids
 
 
 def count(http: Http, start: str, end: str, api_key: str = "", extra_term: str = "") -> int:
@@ -183,13 +247,8 @@ def count(http: Http, start: str, end: str, api_key: str = "", extra_term: str =
 
     extra_term examples: '"high-throughput sequencing"[PTYP]' (sequencing only), 'GPL24676[ACCN]'.
     """
-    data = http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=_term(start, end, extra_term), retmax=0))
-    if not isinstance(data, dict) or not isinstance(data.get("esearchresult"), dict):
-        return 0
-    try:
-        return int(data["esearchresult"].get("count") or 0)
-    except (TypeError, ValueError):
-        return 0
+    r = _esearchresult(http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=_term(start, end, extra_term), retmax=0)))
+    return _int(r.get("count")) if r is not None else 0
 
 
 def search_platforms(http: Http, title_terms: Sequence[str], api_key: str = "", retmax: int = 5000) -> List[str]:
@@ -201,12 +260,10 @@ def search_platforms(http: Http, title_terms: Sequence[str], api_key: str = "", 
     if not terms:
         return []
     q = " OR ".join(f'"{t}"[TITL]' if " " in t else f"{t}[TITL]" for t in terms)
-    data = http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=f"GPL[ETYP] AND ({q})", retmax=retmax))
-    if not isinstance(data, dict) or not isinstance(data.get("esearchresult"), dict):
-        return []
-    ids = data["esearchresult"].get("idlist") or []
+    r = _esearchresult(http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=f"GPL[ETYP] AND ({q})", retmax=retmax)))
+    ids = (r or {}).get("idlist") or []
     out: List[str] = []
-    for uid in ids:
+    for uid in ids if isinstance(ids, list) else []:
         try:
             n = int(uid) - GPL_UID_BASE
         except (TypeError, ValueError):
@@ -248,31 +305,57 @@ def platform_info(
     for i in range(0, len(todo), batch):
         chunk = todo[i : i + batch]
         data = http.get_json(f"{EUTILS}/esummary.fcgi", params=_params(api_key, id=",".join(gpl_uid(a) for a in chunk)))
-        uids, result = _result(data)
-        if not uids:
-            log.warning("GEO: platform lookup failed for %d GPL ids (%s...)", len(chunk), chunk[0])
+        if _absorb_gpl_page(data, out, cache):
             continue
-        for uid in uids:
-            rec = result.get(uid)
-            if not isinstance(rec, dict) or rec.get("error"):
+        # Nothing resolved: the uid = GPL_UID_BASE + number convention may have changed. Recover the real
+        # uids by accession (esearch ACCN, verified live) and retry the esummary once.
+        real = _gpl_uids_by_accession(http, chunk, api_key)
+        if real:
+            data = http.get_json(f"{EUTILS}/esummary.fcgi", params=_params(api_key, id=",".join(real)))
+            if _absorb_gpl_page(data, out, cache):
+                log.warning("GEO: GPL uids recovered by accession for %d ids (%s...); the uid convention may have changed", len(chunk), chunk[0])
                 continue
-            acc = gpl_accession(rec.get("accession") or rec.get("gpl"))
-            if not acc:
-                continue
-            title = str(rec.get("title") or "").strip()
-            taxon = str(rec.get("taxon") or "").strip()
-            info = {
-                "accession": acc,
-                "title": title,
-                "taxon": taxon,
-                "technology": str(rec.get("ptechtype") or "").strip(),
-                "instrument_model": model_from_title(title, taxon),
-                "released": _date(rec.get("pdat")),
-            }
-            out[acc] = info
-            if cache is not None:
-                cache[acc] = info
+        log.error("GEO: platform lookup failed for %d GPL ids (%s...); their records carry no instrument_model", len(chunk), chunk[0])
     return out
+
+
+def _absorb_gpl_page(data: Any, out: Dict[str, Dict[str, str]], cache: Optional[Dict[str, Dict[str, str]]]) -> int:
+    """Parse one GPL esummary body into `out` (and `cache`); returns how many platforms were resolved."""
+    uids, result = _result(data)
+    n = 0
+    for uid in uids:
+        rec = result.get(uid)
+        if not isinstance(rec, dict) or rec.get("error"):
+            continue
+        acc = gpl_accession(rec.get("accession") or rec.get("gpl"))
+        if not acc:
+            continue
+        title = str(rec.get("title") or "").strip()
+        taxon = str(rec.get("taxon") or "").strip()
+        info = {
+            "accession": acc,
+            "title": title,
+            "taxon": taxon,
+            "technology": str(rec.get("ptechtype") or "").strip(),
+            "instrument_model": model_from_title(title, taxon),
+            "released": _date(rec.get("pdat")),
+        }
+        out[acc] = info
+        if cache is not None:
+            cache[acc] = info
+        n += 1
+    return n
+
+
+def _gpl_uids_by_accession(http: Http, accessions: Sequence[str], api_key: str = "") -> List[str]:
+    """esearch '(GPL24676[ACCN] OR ...) AND GPL[ETYP]' -> the server's uids for those platforms ([] on failure)."""
+    accs = [a for a in accessions if a]
+    if not accs:
+        return []
+    term = "(" + " OR ".join(f"{a}[ACCN]" for a in accs) + ") AND GPL[ETYP]"
+    r = _esearchresult(http.get_json(f"{EUTILS}/esearch.fcgi", params=_params(api_key, term=term, retmax=len(accs))))
+    ids = (r or {}).get("idlist")
+    return [str(u) for u in ids] if isinstance(ids, list) else []
 
 
 def platform_titles(http: Http, gpl_ids: Iterable[Any], api_key: str = "", batch: int = GPL_BATCH, cache: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, str]:
@@ -320,16 +403,33 @@ def fetch_series(
     """Yield one dict per GEO Series released in [start, end] (see `_series_from_docsum` for keys).
 
     Uses esearch history + paged esummary. Stops at the esearch count, at an empty page, or at `max_records`.
+    The module-level `last_sweep` records total vs fetched; `sweep_error()` is non-empty when the window was
+    only partially swept (failed esearch, lost history, or a page that never came back), so a caller can
+    report partial coverage instead of silently storing a truncated week.
     """
-    total, webenv, qk = esearch_history(http, _term(start, end, extra_term), api_key)
-    if not total or not webenv or not qk:
-        log.warning("GEO: no series or history failed for %s..%s", start, end)
+    last_sweep.clear()
+    last_sweep.update({"start": start, "end": end, "total": 0, "fetched": 0, "complete": False, "error": ""})
+    hist = _esearch_history(http, _term(start, end, extra_term), api_key)
+    if hist is None:
+        last_sweep["error"] = f"geo: esearch failed for {start}..{end}"
+        log.error("GEO: esearch failed for %s..%s", start, end)
+        return
+    total, webenv, qk = hist
+    last_sweep["total"] = total
+    if not total:
+        last_sweep["complete"] = True
+        log.info("GEO: no series released %s..%s", start, end)
+        return
+    if not webenv or not qk:
+        last_sweep["error"] = f"geo: esearch found {total} series but returned no history for {start}..{end}"
+        log.error("GEO: esearch found %d series but returned no history for %s..%s", total, start, end)
         return
     todo = min(total, max_records)
     if todo < total:
         log.warning("GEO: sweeping %d of %d series (max_records cap)", todo, total)
     log.info("GEO: %d series released %s..%s", total, start, end)
     retstart = 0
+    fetched = 0
     batch = max(1, int(batch))
     while retstart < todo:
         params = _params(api_key, WebEnv=webenv, query_key=qk, retstart=retstart, retmax=min(batch, todo - retstart))
@@ -338,6 +438,8 @@ def fetch_series(
         if not uids:
             log.warning("GEO: esummary returned no records at retstart=%d", retstart)
             break
+        fetched += len(uids)
+        last_sweep["fetched"] = fetched
         for uid in uids:
             rec = result.get(uid)
             if not isinstance(rec, dict) or rec.get("error"):
@@ -346,6 +448,16 @@ def fetch_series(
             if s:
                 yield s
         retstart += len(uids)
+    if fetched < todo:
+        last_sweep["error"] = f"geo: partial sweep {fetched}/{todo} series for {start}..{end}"
+        log.error("GEO: partial sweep %d/%d series for %s..%s", fetched, todo, start, end)
+    else:
+        last_sweep["complete"] = True
+
+
+def sweep_error() -> str:
+    """'' when the most recent fetch_series()/fetch() sweep was complete, else one line for an error log."""
+    return str(last_sweep.get("error") or "")
 
 
 def fetch(
@@ -401,25 +513,50 @@ def fetch(
 
 
 # ----------------------------------------------------------------------------- summaries
-def series_count_by_platform(http: Http, gpl_ids: Iterable[Any], start: str, end: str, api_key: str = "", chunk: int = 100) -> int:
-    """Series released in [start, end] that ran on ANY of `gpl_ids` (esearch with GPLnnn[ACCN] OR ...).
+def series_uids_by_platform(
+    http: Http, gpl_ids: Iterable[Any], start: str, end: str, api_key: str = "", chunk: int = ACCN_CHUNK, extra_term: str = ""
+) -> Set[str]:
+    """uids of the Series released in [start, end] that ran on ANY of `gpl_ids` (esearch GPLnnn[ACCN] OR ...).
 
     `GSE[ETYP] AND GPL24676[ACCN] AND <PDAT range>` restricts to series on that platform (see
-    docs/sources/geo.md for the live check), so a vendor's whole platform family (from
-    `search_platforms`) gives a count per period without sweeping DocSums. Long id lists are OR-ed in
-    chunks and summed (a series on two platforms of the same family may be counted twice across chunks).
+    docs/sources/geo.md for the live check). Long id lists are OR-ed in chunks of `chunk` accessions; each
+    chunk is paged with `esearch_uids` and the uids are unioned, so a series on two platforms of the same
+    family is counted once. GSE uid = 200000000 + series number ("200351130" -> GSE351130).
     """
     accs: List[str] = []
     for g in gpl_ids:
         acc = gpl_accession(g)
         if acc and acc not in accs:
             accs.append(acc)
-    total = 0
+    uids: Set[str] = set()
     chunk = max(1, int(chunk))
     for i in range(0, len(accs), chunk):
-        ors = " OR ".join(f"{a}[ACCN]" for a in accs[i : i + chunk])
-        total += count(http, start, end, api_key=api_key, extra_term=f"({ors})")
-    return total
+        ors = "(" + " OR ".join(f"{a}[ACCN]" for a in accs[i : i + chunk]) + ")"
+        term = _term(start, end, f"{ors} AND {extra_term}" if extra_term else ors)
+        uids |= esearch_uids(http, term, api_key=api_key)[1]
+    return uids
+
+
+def series_count_by_platform(
+    http: Http, gpl_ids: Iterable[Any], start: str, end: str, api_key: str = "", chunk: int = ACCN_CHUNK, extra_term: str = ""
+) -> int:
+    """Number of DISTINCT Series released in [start, end] on any of `gpl_ids` (see `series_uids_by_platform`).
+
+    A vendor's whole platform family (from `search_platforms`) therefore gives one de-duplicated count per
+    period with a few esearch calls and no DocSum sweep.
+    """
+    return len(series_uids_by_platform(http, gpl_ids, start, end, api_key=api_key, chunk=chunk, extra_term=extra_term))
+
+
+def series_counts_by_window(
+    http: Http, gpl_ids: Iterable[Any], windows: Sequence[Tuple[str, str]], api_key: str = "", extra_term: str = ""
+) -> List[Dict[str, Any]]:
+    """[{'start', 'end', 'series'}, ...]: `series_count_by_platform` for each (start, end) window, e.g. one per year."""
+    accs = [a for a in (gpl_accession(g) for g in gpl_ids) if a]
+    return [
+        {"start": s, "end": e, "series": series_count_by_platform(http, accs, s, e, api_key=api_key, extra_term=extra_term)}
+        for s, e in windows
+    ]
 
 
 def summarize_window(http: Http, start: str, end: str, api_key: str = "", top: int = 10, max_records: int = 20000) -> Dict[str, Any]:

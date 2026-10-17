@@ -50,6 +50,7 @@ def test_term_and_id_helpers():
     assert geo._term("2026-10-10", "2026-10-17", '"high-throughput sequencing"[PTYP]').endswith('[PDAT] AND "high-throughput sequencing"[PTYP]')
     assert geo.gpl_accession("24676") == geo.gpl_accession(24676) == geo.gpl_accession(" gpl24676 ") == "GPL24676"
     assert geo.gpl_accession("") == geo.gpl_accession("GPL") == geo.gpl_accession("abc") == ""
+    assert geo.gpl_accession("\u00b2") == geo.gpl_accession("GPL\u0663\u0664") == ""  # non-ASCII digits pass str.isdigit but not int()
     assert geo.gpl_uid("GPL24676") == "100024676" and geo.gpl_uid("9020") == "100009020"
     assert geo._split_gpls("21290;24676") == ["GPL21290", "GPL24676"] and geo._split_gpls("24247") == ["GPL24247"]
     assert geo._split_gpls("") == [] and geo._split_gpls("x;;24247;24247") == ["GPL24247"]
@@ -64,7 +65,12 @@ def test_model_from_title_strips_organism_only():
     assert geo.model_from_title("PacBio RS (mouse gut metagenome)", "mouse gut metagenome") == "PacBio RS"
     assert geo.model_from_title("Revio (Escherichia coli)", "") == "Revio"
     assert geo.model_from_title("NanoString CosMx SMI (human)", "Homo sapiens") == "NanoString CosMx SMI"  # seen live, GPL33484
-    assert geo.model_from_title("Some Array (V4)", "Homo sapiens") == "Some Array (V4)"  # digits -> design detail, kept
+    assert geo.model_from_title("NanoString CosMx SMI (Human)", "") == "NanoString CosMx SMI"  # capitalised single word
+    assert geo.model_from_title("Oxford Nanopore MinION (Escherichia coli K-12)", "") == "Oxford Nanopore MinION"  # strain with digits
+    assert geo.model_from_title("Illumina NovaSeq 6000 (Severe acute respiratory syndrome coronavirus 2)", "") == "Illumina NovaSeq 6000"
+    assert geo.model_from_title("Some Array (V4)", "Homo sapiens") == "Some Array (V4)"  # version note -> design detail, kept
+    assert geo.model_from_title("Some Array (v2.1)", "") == "Some Array (v2.1)" and geo.model_from_title("Some Array (2.0)", "") == "Some Array (2.0)"
+    assert geo.model_from_title("Affymetrix Something (HG-U133A)", "Homo sapiens") == "Affymetrix Something (HG-U133A)"  # one non-alphabetic token, kept
     # array design details are not organisms and are kept
     agilent = "Agilent-021169 Arabidopsis 4 Oligo Microarray (V4) (Feature Number version)"
     assert geo.model_from_title(agilent, "Arabidopsis thaliana") == agilent
@@ -182,6 +188,8 @@ def test_pagination_stops_at_count_and_on_empty_page():
     http = FakeHttp([_esearch(10), p1, _page([]), extra])
     assert [s["accession"] for s in geo.fetch_series(http, "2026-10-10", "2026-10-17", batch=2)] == ["GSE1", "GSE2"]
     assert len(http.calls) == 3 and http.payloads == [extra]
+    assert geo.sweep_error() == "geo: partial sweep 2/10 series for 2026-10-10..2026-10-17"
+    assert geo.last_sweep == {"start": "2026-10-10", "end": "2026-10-17", "total": 10, "fetched": 2, "complete": False, "error": geo.sweep_error()}
     # max_records caps the sweep
     http = FakeHttp([_esearch(3), p1, p2])
     assert [s["accession"] for s in geo.fetch_series(http, "2026-10-10", "2026-10-17", batch=2, max_records=2)] == ["GSE1", "GSE2"]
@@ -204,7 +212,104 @@ def test_search_platforms_and_series_count_by_platform():
     assert geo.search_platforms(http, ["Revio", "Sequel II", ""]) == ["GPL37398", "GPL36612"]
     assert http.calls[0][1]["term"] == 'GPL[ETYP] AND (Revio[TITL] OR "Sequel II"[TITL])'
     assert geo.search_platforms(FakeHttp([]), []) == [] and geo.search_platforms(FakeHttp([None]), ["x"]) == []
-    http = FakeHttp([_esearch(4), _esearch(2)])
-    assert geo.series_count_by_platform(http, ["GPL1", "1", "GPL2", "GPL3"], "2026-01-01", "2026-10-17", chunk=2) == 6
+
+
+def _ids(count, idlist):
+    return {"esearchresult": {"count": str(count), "retmax": "10000", "retstart": "0", "idlist": [str(i) for i in idlist]}}
+
+
+def test_series_count_by_platform_dedupes_across_chunks_and_pages():
+    # chunk 1 (GPL1, GPL2) -> series 200000001..3; chunk 2 (GPL3) -> 200000003 again + 200000004: counted once
+    http = FakeHttp([_ids(3, [200000001, 200000002, 200000003]), _ids(2, [200000003, 200000004])])
+    assert geo.series_count_by_platform(http, ["GPL1", "1", "GPL2", "GPL3"], "2026-01-01", "2026-10-17", chunk=2) == 4
     assert http.calls[0][1]["term"] == "GSE[ETYP] AND 2026/01/01:2026/10/17[PDAT] AND (GPL1[ACCN] OR GPL2[ACCN])"
+    assert http.calls[0][1]["retmax"] == geo.ESEARCH_PAGE and http.calls[0][1]["retstart"] == 0
     assert http.calls[1][1]["term"].endswith("AND (GPL3[ACCN])")
+    assert geo.series_uids_by_platform(FakeHttp([_ids(1, [5])]), ["GPL9"], "2026-01-01", "2026-10-17", extra_term='"high-throughput sequencing"[PTYP]') == {"5"}
+    # a chunk with more hits than one esearch page is paged with retstart (count 5, page 2)
+    http = FakeHttp([_ids(5, [1, 2]), _ids(5, [3, 4]), _ids(5, [5])])
+    assert geo.esearch_uids(http, "x", page=2) == (5, {"1", "2", "3", "4", "5"})
+    assert [c[1]["retstart"] for c in http.calls] == [0, 2, 4]
+    # paging stops on a page that adds nothing new, on an empty page, and on a malformed page
+    http = FakeHttp([_ids(5, [1, 2]), _ids(5, [1, 2]), _ids(5, [3])])
+    assert geo.esearch_uids(http, "x", page=2) == (5, {"1", "2"}) and len(http.calls) == 2
+    assert geo.esearch_uids(FakeHttp([_ids(5, [1, 2]), _ids(5, [])]), "x", page=2) == (5, {"1", "2"})
+    assert geo.esearch_uids(FakeHttp([_ids(5, [1, 2]), None]), "x", page=2) == (5, {"1", "2"})
+    assert geo.esearch_uids(FakeHttp([{"esearchresult": {"count": "2", "idlist": "oops"}}]), "x") == (2, set())
+    assert geo.esearch_uids(FakeHttp([None]), "x") == (0, set())
+    # no accessions -> no calls; windows helper labels each period
+    assert geo.series_count_by_platform(FakeHttp([]), ["junk", ""], "2026-01-01", "2026-10-17") == 0
+    http = FakeHttp([_ids(2, [1, 2]), _ids(1, [3])])
+    out = geo.series_counts_by_window(http, ["GPL1"], [("2024-01-01", "2024-12-31"), ("2025-01-01", "2025-12-31")])
+    assert out == [{"start": "2024-01-01", "end": "2024-12-31", "series": 2}, {"start": "2025-01-01", "end": "2025-12-31", "series": 1}]
+    assert "2024/01/01:2024/12/31[PDAT]" in http.calls[0][1]["term"] and "2025/01/01:2025/12/31[PDAT]" in http.calls[1][1]["term"]
+
+
+# ----------------------------------------------------------------------------- GPL uid fallback
+def test_platform_info_recovers_uids_by_accession_when_convention_fails():
+    all_error = {"result": {"uids": ["100024676", "100033484"],
+                            "100024676": {"uid": "100024676", "error": "cannot get document summary"},
+                            "100033484": {"uid": "100033484", "error": "cannot get document summary"}}}
+    accn = {"esearchresult": {"count": "2", "idlist": ["987", "988"]}}
+    good = _page([_gpl("987", "GPL24676", "Illumina NovaSeq 6000 (Homo sapiens)", "Homo sapiens"),
+                  _gpl("988", "GPL33484", "NanoString CosMx SMI (human)", "Homo sapiens", tech="other")])
+    http = FakeHttp([all_error, accn, good])
+    info = geo.platform_info(http, ["GPL24676", "GPL33484"])
+    assert info["GPL24676"]["instrument_model"] == "Illumina NovaSeq 6000" and info["GPL33484"]["technology"] == "other"
+    assert len(http.calls) == 3
+    assert http.calls[0][1]["id"] == "100024676,100033484"
+    assert http.calls[1][0].endswith("/esearch.fcgi") and http.calls[1][1]["term"] == "(GPL24676[ACCN] OR GPL33484[ACCN]) AND GPL[ETYP]" and http.calls[1][1]["retmax"] == 2
+    assert http.calls[2][1]["id"] == "987,988"
+    # fallback also empty / malformed: no exception, nothing resolved, exactly one retry
+    assert geo.platform_info(FakeHttp([None, None]), ["GPL1"]) == {}
+    assert geo.platform_info(FakeHttp([all_error, {"esearchresult": {"idlist": []}}]), ["GPL24676"]) == {}
+    http = FakeHttp([all_error, accn, None])
+    assert geo.platform_info(http, ["GPL24676"]) == {} and len(http.calls) == 3
+    # a chunk with one good record and one error does not trigger the fallback
+    mixed = _page([_gpl("100024676", "GPL24676", "Illumina NovaSeq 6000 (Homo sapiens)", "Homo sapiens")])
+    mixed["result"]["uids"].append("100000001")
+    mixed["result"]["100000001"] = {"uid": "100000001", "error": "cannot get document summary"}
+    http = FakeHttp([mixed])
+    assert list(geo.platform_info(http, ["GPL24676", "GPL1"])) == ["GPL24676"] and len(http.calls) == 1
+
+
+# ----------------------------------------------------------------------------- sweep coverage
+def test_partial_sweep_is_reported_and_complete_sweep_is_clean():
+    p1 = _page([_gse("200000001", "GSE1", "1"), _gse("200000002", "GSE2", "1")])
+    gpl1 = _page([_gpl("100000001", "GPL1", "Revio (Escherichia coli)", "Escherichia coli")])
+    # second page never comes back (retries exhausted -> None): records from page 1 are kept, the gap is reported
+    http = FakeHttp([_esearch(4), p1, None, gpl1])
+    recs = list(geo.fetch(http, "2026-10-10", "2026-10-17", max_records=4))
+    assert [r.accession for r in recs] == ["GSE1/GPL1", "GSE2/GPL1"]
+    assert geo.sweep_error() == "geo: partial sweep 2/4 series for 2026-10-10..2026-10-17"
+    # esearch itself failed vs. a genuinely empty window
+    assert list(geo.fetch(FakeHttp([None]), "2026-10-10", "2026-10-17")) == []
+    assert geo.sweep_error() == "geo: esearch failed for 2026-10-10..2026-10-17"
+    assert list(geo.fetch(FakeHttp([_esearch(0)]), "2026-10-10", "2026-10-17")) == []
+    assert geo.sweep_error() == "" and geo.last_sweep["complete"] is True and geo.last_sweep["total"] == 0
+    assert list(geo.fetch(FakeHttp([_esearch(7, webenv="")]), "2026-10-10", "2026-10-17")) == []
+    assert geo.sweep_error() == "geo: esearch found 7 series but returned no history for 2026-10-10..2026-10-17"
+    # complete sweep (count 2, one page) -> no error; the max_records cap is deliberate and not an error
+    http = FakeHttp([_esearch(2), p1, gpl1])
+    assert len(list(geo.fetch(http, "2026-10-10", "2026-10-17"))) == 2
+    assert geo.sweep_error() == "" and geo.last_sweep == {"start": "2026-10-10", "end": "2026-10-17", "total": 2, "fetched": 2, "complete": True, "error": ""}
+    http = FakeHttp([_esearch(5), p1, gpl1])
+    assert len(list(geo.fetch(http, "2026-10-10", "2026-10-17", max_records=2))) == 2 and geo.sweep_error() == ""
+
+
+# ----------------------------------------------------------------------------- summarize_window
+def test_summarize_window_counts_titles_models_and_technologies():
+    page = _page([
+        _gse("200000001", "GSE1", "24676"),
+        _gse("200000002", "GSE2", "24676;33484", taxon="Homo sapiens"),
+        _gse("200000003", "GSE3", "99"),  # platform the server does not know -> unresolved
+    ])
+    gpls = _page([_gpl("100024676", "GPL24676", "Illumina NovaSeq 6000 (Homo sapiens)", "Homo sapiens"),
+                  _gpl("100033484", "GPL33484", "NanoString CosMx SMI (human)", "Homo sapiens", tech="other")])
+    http = FakeHttp([_esearch(3), page, gpls, _esearch(3)])
+    out = geo.summarize_window(http, "2026-10-10", "2026-10-17", top=2)
+    assert out["records"] == 4 and out["series"] == 3 and out["platforms_resolved"] == 2
+    assert out["top_platform_titles"] == [("Illumina NovaSeq 6000 (Homo sapiens)", 2), ("NanoString CosMx SMI (human)", 1)]
+    assert out["top_instrument_models"] == [("Illumina NovaSeq 6000", 2), ("NanoString CosMx SMI", 1)]
+    assert out["technology_types"] == [("high-throughput sequencing", 2), ("other", 1), ("(unresolved)", 1)]
+    assert len(http.calls) == 4 and http.calls[3][1]["retmax"] == 0
