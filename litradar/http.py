@@ -52,7 +52,10 @@ class Http:
         if ncbi_api_key:
             self.min_interval["eutils.ncbi.nlm.nih.gov"] = 0.11
         self._last_call: Dict[str, float] = {}
-        self.stats = {"requests": 0, "cache_hits": 0, "retries": 0, "failures": 0}
+        self._consecutive_429: Dict[str, int] = {}
+        self.blocked_hosts: set = set()  # hosts that answered 429 twice in a row: skipped for the rest of the run
+        self.max_backoff = 30.0
+        self.stats = {"requests": 0, "cache_hits": 0, "retries": 0, "failures": 0, "blocked_skips": 0}
 
     # -- pacing ---------------------------------------------------------------------------
     def _pace(self, url: str) -> None:
@@ -91,6 +94,10 @@ class Http:
             resp._content = cpath.read_bytes()
             resp.url = url
             return resp
+        host = urlsplit(url).netloc
+        if host in self.blocked_hosts:
+            self.stats["blocked_skips"] += 1
+            return None
         backoff = 1.0
         for attempt in range(self.max_retries + 1):
             self._pace(url)
@@ -101,6 +108,7 @@ class Http:
                 log.warning("GET %s failed (%s); attempt %d", url, exc, attempt + 1)
                 resp = None
             if resp is not None and resp.status_code in ok_statuses:
+                self._consecutive_429[host] = 0
                 if cpath:
                     cpath.parent.mkdir(parents=True, exist_ok=True)
                     cpath.write_bytes(resp.content)
@@ -109,14 +117,22 @@ class Http:
                 log.info("GET %s -> %s (not retrying)", resp.url, resp.status_code)
                 self.stats["failures"] += 1
                 return resp
+            if resp is not None and resp.status_code == 429:
+                # a host that rate-limits us twice running is treated as closed for this run
+                self._consecutive_429[host] = self._consecutive_429.get(host, 0) + 1
+                if self._consecutive_429[host] >= 2:
+                    log.warning("%s answered 429 twice in a row; skipping this host for the rest of the run", host)
+                    self.blocked_hosts.add(host)
+                    self.stats["failures"] += 1
+                    return resp
             if resp is not None:
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after and retry_after.isdigit():
-                    backoff = max(backoff, float(retry_after))
+                    backoff = max(backoff, min(float(retry_after), self.max_backoff))
                 log.warning("GET %s -> %s; retrying in %.1fs", resp.url, resp.status_code, backoff)
             self.stats["retries"] += 1
             time.sleep(backoff)
-            backoff = min(backoff * 2, 60.0)
+            backoff = min(backoff * 2, self.max_backoff)
         self.stats["failures"] += 1
         return None
 

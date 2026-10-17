@@ -69,3 +69,38 @@ def test_json_roundtrip_of_sections(tmp_path):
     row = st.get_paper("doi:10.1000/test3")
     assert json.loads(row["sections_json"])["methods"].startswith("Sequenced")
     assert "body" not in json.loads(row["sections_json"])  # body lives only in the FTS table
+
+
+def test_http_circuit_breaker(monkeypatch):
+    from litradar.http import Http
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.headers, self.content, self.url = code, {"Retry-After": "120"}, b"", "u"
+
+    http = Http(max_retries=1)
+    http.max_backoff = 0.0
+    monkeypatch.setattr(http.session, "get", lambda *a, **k: R(429))
+    monkeypatch.setattr("litradar.http.time.sleep", lambda s: None)
+    assert http.get("https://blocked.example/a") is not None  # second 429 returns the response and trips the breaker
+    assert "blocked.example" in http.blocked_hosts
+    assert http.get("https://blocked.example/b") is None and http.stats["blocked_skips"] == 1
+    monkeypatch.setattr(http.session, "get", lambda *a, **k: R(200))
+    assert http.get("https://other.example/c").status_code == 200
+
+
+def test_rematch_roundtrip(tmp_path, monkeypatch):
+    from litradar.config import Settings
+    from litradar.pipeline import Pipeline
+
+    settings = Settings.from_env()
+    settings.db_path = tmp_path / "r.sqlite"
+    pipe = Pipeline(settings, http=object())  # no network needed for rematch
+    p = _paper(7, sections={"methods": "Sequenced on a Revio system (PacBio).", "body": "body"})
+    pipe.store.upsert_paper(p)
+    pipe.store.commit()
+    rep = pipe.rematch()
+    assert rep["counts"]["rematched"] == 1
+    ids = {m["entity_id"] for m in pipe.store.mentions_for(p.id)}
+    assert {"pacb-revio", "txg-xenium", "10x-genomics"} <= ids
+    assert pipe.store.get_score(p.id)["final"] > 0

@@ -2,6 +2,7 @@
 
   litradar run      [--days 7 | --since YYYY-MM-DD --until YYYY-MM-DD] [--llm] [--no-fulltext] [--sources a,b] [--email] [--slack]
   litradar digest   [--since --until] [--out DIR]           re-render from the database without fetching
+  litradar rematch  [--since 90d]                             re-annotate stored papers after editing the gazetteers
   litradar search   "query" [--since 90d] [--in methods,coi] [--limit 50]
   litradar entity   <entity_id> [--since 90d]                 papers that mention one gazetteer entry
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
@@ -78,6 +79,14 @@ def cmd_digest(args) -> int:
     (out_dir / f"{until}.md").write_text(out["markdown"], encoding="utf-8")
     (out_dir / "latest.md").write_text(out["markdown"], encoding="utf-8")
     print(out["markdown"] if args.print else f"digest written to {out_dir / (until + '.md')}")
+    return 0
+
+
+def cmd_rematch(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    pipe = Pipeline(settings)
+    report = pipe.rematch(since=_parse_since(args.since))
+    print(json.dumps(report, indent=1))
     return 0
 
 
@@ -189,6 +198,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--out")
     p.add_argument("--print", action="store_true")
     p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("rematch", help="re-run gazetteer matching and scoring over stored papers (after editing config)")
+    p.add_argument("--since", help="YYYY-MM-DD or Nd; default: everything")
+    p.set_defaults(func=cmd_rematch)
 
     p = sub.add_parser("search", help="full-text search of stored papers")
     p.add_argument("query")

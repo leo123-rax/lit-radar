@@ -35,7 +35,10 @@ sources:
       - hematology
       - infectious diseases
       - health informatics
-    fulltext: true          # download JATS XML to read Methods / funding / competing interests
+    # Full-text JATS XML: bioRxiv's web host rate-limits scripted clients (HTTP 429, Cloudflare 1015).
+    # The client gives up on the host after two 429s, so leaving this on costs two requests. The official
+    # bulk route is the requester-pays S3 bucket (see docs/SOURCES.md); Europe PMC carries some preprints.
+    fulltext: true
     fulltext_max: 600       # cap per run (each is one request; cached on disk afterwards)
 
   europepmc:

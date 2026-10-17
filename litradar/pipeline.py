@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from .config import Settings
 from .extract.gazetteer import Gazetteer
 from .http import Http
-from .models import ArchiveRecord, Mention, NewsItem, Paper
+from .models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from .rank import heuristics
 from .sources import arxiv as arxiv_src
 from .sources import biorxiv as biorxiv_src
@@ -477,6 +477,50 @@ class Pipeline:
                 self.store.save_score(item["id"], item["_h"], res, final, item["_reasons"] + ("; llm scored" if res else "; llm unscored"))
                 self.counts["llm.scored" if res else "llm.unscored"] += 1
             self.store.commit()
+
+    # ------------------------------------------------------------------ rematch
+    def paper_from_row(self, row: Dict[str, Any]) -> Paper:
+        import json
+
+        authors = [Author(**{k: v for k, v in a.items() if k in Author.__dataclass_fields__}) for a in json.loads(row.get("authors_json") or "[]")]
+        sections = json.loads(row.get("sections_json") or "{}")
+        body = self.store.conn.execute("SELECT body FROM papers_fts WHERE id=?", (row["id"],)).fetchone()
+        if body and body[0]:
+            sections["body"] = body[0]
+        return Paper(
+            id=row["id"], source=row.get("source") or "", kind=row.get("kind") or "article", title=row.get("title") or "",
+            doi=row.get("doi"), abstract=row.get("abstract") or "", journal=row.get("journal") or "", pub_date=row.get("pub_date") or "",
+            url=row.get("url") or "", license=row.get("license") or "", category=row.get("category") or "",
+            published_doi=row.get("published_doi"), authors=authors, affiliations=json.loads(row.get("affiliations_json") or "[]"),
+            sections=sections, fulltext_available=bool(row.get("fulltext_available")), cited_by_count=int(row.get("cited_by_count") or 0),
+            topics=json.loads(row.get("topics_json") or "[]"), extra=json.loads(row.get("extra_json") or "{}"),
+        )
+
+    def rematch(self, since: Optional[str] = None) -> Dict[str, Any]:
+        """Re-run gazetteer matching, tracked-author detection and heuristic scoring over stored papers."""
+        sql = "SELECT * FROM papers"
+        params: List[Any] = []
+        if since:
+            sql += " WHERE pub_date >= ? OR substr(first_seen,1,10) >= ?"
+            params = [since, since]
+        cur = self.store.conn.execute(sql, params)
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        papers: Dict[str, Paper] = {}
+        for row in rows:
+            p = self.paper_from_row(row)
+            mentions, hits = self.extract(p)
+            self.store.replace_mentions(p.id, mentions)
+            self.store.conn.execute("DELETE FROM tracked_author_hits WHERE paper_id=?", (p.id,))
+            for name, grp, how in hits:
+                self.store.add_tracked_author_hit(p.id, name, grp, how)
+            self.counts["mentions"] += len(mentions)
+            self.counts["tracked_hits"] += len(hits)
+            papers[p.id] = p
+        self.store.commit()
+        self.rank(papers, use_llm=False)
+        self.counts["rematched"] = len(papers)
+        return {"since": since, "counts": dict(self.counts)}
 
     # ------------------------------------------------------------------ run
     def run(self, since: str, until: str, use_llm: bool = False, fulltext: bool = True, only: Optional[Sequence[str]] = None) -> Dict[str, Any]:
