@@ -14,6 +14,12 @@ from litradar.store import Store
 SINCE, UNTIL = "2026-10-10", "2026-10-17"
 
 
+
+def _alias_count(settings, company_id):
+    entries = yaml.safe_load((settings.config_dir / "companies.yaml").read_text())["entries"]
+    e = next(x for x in entries if x["id"] == company_id)
+    return len(e.get("aliases") or [])
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch):
     shutil.copytree(DEFAULT_CONFIG_DIR, tmp_path / "config")
@@ -81,7 +87,7 @@ def test_coverage_report_sections(store, settings):
     w = r["watched"]
     cz = {c["id"]: c for c in w["companies"]["zero"]}
     assert "10x-genomics" not in cz
-    assert cz["illumina"]["news_items"] == 1 and cz["illumina"]["trailing_13w_avg"] == round(1 / 13, 2) and cz["illumina"]["aliases"] == 2
+    assert cz["illumina"]["news_items"] == 1 and cz["illumina"]["trailing_13w_avg"] == round(1 / 13, 2) and cz["illumina"]["aliases"] == _alias_count(settings, "illumina")
     assert w["companies"]["total"] == sum(1 for e in yaml.safe_load((settings.config_dir / "companies.yaml").read_text())["entries"] if e.get("watch_news"))
     pz = {p["id"] for p in w["platforms"]["zero"]}
     assert "txg-xenium" not in pz and "pacb-revio" not in pz and "ilmn-novaseq-x" in pz
@@ -118,7 +124,7 @@ def test_markdown_rendering(store, settings):
         assert heading in md
     assert "| biorxiv | 1 | 25% | 1 | 100% | 100 |" in md
     assert "- **europepmc**: HTTP 500 boom" in md
-    assert "| Illumina | ILMN | 1 | 0.08 | 2 |" in md
+    assert f"| Illumina | ILMN | 1 | 0.08 | {_alias_count(settings, 'illumina')} |" in md
 
 
 def test_empty_database_and_cli_json(settings, store, capsys):

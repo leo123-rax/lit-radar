@@ -127,7 +127,9 @@ class Gazetteer:
             for alias in e.aliases:
                 ambiguous = _is_ambiguous(alias) or alias in e.case_sensitive_aliases
                 case_sensitive = ambiguous or alias in e.case_sensitive_aliases
-                needs_context = e.context_required or (ambiguous and alias != e.name) or alias in e.case_sensitive_aliases
+                # case-sensitive aliases need context, except the entry's own canonical name: a capitalised brand
+                # name (Xenium, Revio) is unambiguous on its own, while the entry can still opt in via context_required
+                needs_context = e.context_required or (ambiguous and alias != e.name) or (alias in e.case_sensitive_aliases and alias != e.name)
                 # the canonical name of a context_required entry still needs context
                 if e.context_required:
                     needs_context = True

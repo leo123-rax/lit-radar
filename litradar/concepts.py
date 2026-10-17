@@ -435,7 +435,13 @@ def load_exclusions(config_dir: Path) -> Exclusions:
                 if not key:
                     continue
                 ex.exact.add(key)
-                ambiguous = _is_ambiguous(alias) or alias in e.case_sensitive_aliases or e.context_required
+                compact = alias.replace(' ', '')
+                brand_like = len(compact) >= 5 and not alias.isupper() and (
+                    (alias == e.name and not e.context_required)
+                    or (' ' in alias.strip() and any(ch.isupper() for ch in alias))
+                    or (any(ch.isupper() for ch in alias[1:]) and ' ' not in alias and not e.context_required)
+                )
+                ambiguous = (_is_ambiguous(alias) or alias in e.case_sensitive_aliases or e.context_required) and not brand_like
                 compact = key.replace(" ", "")
                 if not ambiguous and len(compact) >= 4 and key not in STOP_WORDS and key not in GENERIC_WORDS:
                     ex.contained.add(key)
