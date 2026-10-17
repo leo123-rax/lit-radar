@@ -31,3 +31,8 @@ venv/
 # local agent worktrees
 .claude/
 site/
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+data/*
+!data/.gitkeep
