@@ -1,0 +1,120 @@
+# Live mode: extends the corpus every day from the last recorded run forward (no digest; the
+# weekly job renders that). The SQLite database travels between runs as the asset
+# `radar.sqlite.zst` on a rolling GitHub Release tagged `db-latest`: downloaded at the start,
+# uploaded back (--clobber) at the end. The job goes red when `litradar status` says the data is
+# stale or more than two sources failed, so a red run means the corpus needs attention.
+# Schedule: 06:20 UTC daily (off the hour; GitHub thins out :00 slots). See docs/live.md.
+name: daily-update
+on:
+  schedule:
+    - cron: "20 6 * * *"
+  workflow_dispatch:
+    inputs:
+      overlap_days:
+        description: "re-fetch this many days before the last run's end"
+        default: "2"
+      max_days:
+        description: "cap on the window length"
+        default: "14"
+      since:
+        description: "optional window start YYYY-MM-DD (repair/backfill; overrides the overlap)"
+        default: ""
+      sources:
+        description: "optional comma-separated subset (biorxiv,europepmc,openalex,crossref,arxiv,rss,sra,ena)"
+        default: ""
+permissions:
+  contents: write        # upload the database asset to the db-latest release
+concurrency:
+  group: lit-radar-db    # shared with the weekly digest job: the two must never touch the database at once
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      LITRADAR_CONTACT_EMAIL: ${{ secrets.LITRADAR_CONTACT_EMAIL }}
+      NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+      OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+      SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LITRADAR_LLM_MODEL: ${{ vars.LITRADAR_LLM_MODEL }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+      DIGEST_TO: ${{ secrets.DIGEST_TO }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      LITRADAR_DB: data/radar.sqlite
+      GH_TOKEN: ${{ github.token }}
+      DB_RELEASE_TAG: db-latest
+      DB_ASSET: radar.sqlite.zst
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955   # v4.3.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[llm]"
+      - name: Ensure zstd is available
+        run: command -v zstd >/dev/null || (sudo apt-get update -q && sudo apt-get install -y -q zstd)
+      - name: Download the database snapshot (db-latest release asset)
+        id: restore
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          if ! gh release view "$DB_RELEASE_TAG" >/dev/null 2>&1; then
+            echo "no $DB_RELEASE_TAG release yet: creating it; this run starts from an empty database"
+            gh release create "$DB_RELEASE_TAG" --title "Database snapshot (rolling)" \
+              --notes "Rolling SQLite snapshot used by the daily and weekly workflows. Replaced on every run; not a software release." \
+              --prerelease
+            echo "restored=empty" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "$DB_RELEASE_TAG" --json assets --jq '.assets[].name' | grep -qx "$DB_ASSET"; then
+            # the asset exists: a failed download must fail the job, or we would overwrite a good snapshot with a 7-day one
+            gh release download "$DB_RELEASE_TAG" --pattern "$DB_ASSET" --dir data --clobber
+            zstd -d -f "data/$DB_ASSET" -o data/radar.sqlite
+            rm -f "data/$DB_ASSET"
+            ls -l data/radar.sqlite
+            echo "restored=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "release exists but holds no $DB_ASSET yet: starting from an empty database"
+            echo "restored=empty" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Update the corpus
+        id: update
+        run: |
+          set -euo pipefail
+          FLAGS="--overlap-days ${{ github.event.inputs.overlap_days || '2' }} --max-days ${{ github.event.inputs.max_days || '14' }}"
+          if [ -n "${{ github.event.inputs.since }}" ]; then FLAGS="$FLAGS --since ${{ github.event.inputs.since }}"; fi
+          if [ -n "${{ github.event.inputs.sources }}" ]; then FLAGS="$FLAGS --sources ${{ github.event.inputs.sources }}"; fi
+          python -m litradar update $FLAGS
+      - name: Upload the database snapshot back to the release
+        # also after a failed update: SQLite stays consistent and upserts are idempotent, so partial
+        # progress is worth keeping; but never after a failed restore (that would clobber the good copy)
+        if: always() && steps.restore.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if [ ! -f data/radar.sqlite ]; then echo "no database to upload"; exit 0; fi
+          python - <<'EOF'
+          import sqlite3
+          c = sqlite3.connect("data/radar.sqlite")
+          c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+          print(c.execute("PRAGMA integrity_check").fetchone()[0])
+          c.close()
+          EOF
+          zstd -T0 -19 -f data/radar.sqlite -o "data/$DB_ASSET"
+          ls -l "data/$DB_ASSET"
+          gh release upload "$DB_RELEASE_TAG" "data/$DB_ASSET" --clobber
+      - name: Keep the run summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
+        with:
+          name: last_update
+          path: digests/_work/last_update.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Freshness check (red run = stale data or too many failing sources)
+        if: always() && steps.restore.outcome == 'success'
+        run: python -m litradar status
