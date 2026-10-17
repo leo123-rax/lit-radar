@@ -22,6 +22,7 @@
   litradar trends   [--until YYYY-MM-DD] [--weeks 13] [--out DIR | --print | --json]
                                                               what changed: this week vs last week vs the trailing baseline
   litradar export   [--parquet DIR | --csv DIR] [--duckdb FILE] [--tables a,b] [--db PATH]  export tables for analytics
+  litradar tag      [--since 365d] [--translate] [--check]    tag papers with language + country codes; optionally translate non-English titles with Claude; --check only reports
 """
 from __future__ import annotations
 
@@ -37,6 +38,7 @@ from typing import List, Optional
 
 from . import __version__, backfill, browser, entities, toolkit, trends
 from . import export as export_mod
+from . import __version__, i18n
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -483,6 +485,51 @@ def cmd_export(args) -> int:
             print(rep.message, file=sys.stderr)
     print(json.dumps([r.to_dict() for r in reports], indent=1))
     return 1 if failed else 0
+def cmd_tag(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    since, until = _parse_since(args.since), args.until
+    if args.check:
+        # read-only: what a dashboard would see, plus how many rows lost their tags to a re-ingest
+        report = i18n.histograms(store, since=since, until=until)
+        if args.json:
+            print(json.dumps(report, indent=1, ensure_ascii=False))
+        else:
+            print(f"{report['tagged']} of {report['papers']} papers in window are tagged")
+            print("languages: " + ", ".join(f"{k} {v}" for k, v in report["languages"].items()))
+            top = list(report["primary_countries"].items())[:30]
+            print("primary countries: " + ", ".join(f"{k} {v}" for k, v in top) + (" …" if len(report["primary_countries"]) > 30 else ""))
+        if report["untagged"]:
+            print(f"WARNING: {report['untagged']} papers in window are untagged (new or re-ingested since the last tag); run `litradar tag`", file=sys.stderr)
+        return 0
+    report = i18n.tag_store(store, since=since, until=until)
+    if args.translate:
+        report["translation"] = i18n.translate_titles(
+            store, since=since, until=until, model=settings.llm_model, api_key=settings.anthropic_api_key, max_items=args.max_translate
+        )
+    if args.json:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+        return 0
+    print(f"tagged {report['tagged']} papers ({report['with_country']} with at least one country)")
+    print("languages: " + ", ".join(f"{k} {v}" for k, v in report["languages"].items()))
+    top = list(report["countries"].items())[:30]
+    print("countries: " + ", ".join(f"{k} {v}" for k, v in top) + (" …" if len(report["countries"]) > 30 else ""))
+    if args.translate:
+        t = report["translation"]
+        line = f"translation: {t['status']}"
+        if t["status"] == "skipped":
+            line += f" ({t.get('reason')})"
+        else:
+            line += (
+                f" model={t['model']} candidates={t['candidates']} submitted={t['submitted']} translated={t['translated']}"
+                f" refused_or_invalid={t['refused_or_invalid']} truncated={t['truncated']} errored={t['errored']}"
+            )
+            if t["status"] == "error":
+                line += f" error={t.get('error')}"
+            elif t["status"] == "incomplete":
+                line += f" processing_status={t.get('processing_status')} waited_seconds={t.get('waited_seconds')}"
+        print(line)
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -641,6 +688,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--db", help="database to export (default: the configured LITRADAR_DB / data/radar.sqlite); opened read-only")
     p.add_argument("--chunk-size", type=int, default=20000, help="rows per batch")
     p.set_defaults(func=cmd_export)
+    p = sub.add_parser("tag", help="write language ('lang') and country codes ('countries') into papers.extra_json for dashboards and trends")
+    p.add_argument("--since", help="YYYY-MM-DD or Nd (e.g. 365d); default: everything")
+    p.add_argument("--until", help="YYYY-MM-DD; default: open-ended")
+    p.add_argument("--translate", action="store_true", help="translate non-English titles/abstracts into English with Claude via one Message Batches request (needs ANTHROPIC_API_KEY; model from LITRADAR_LLM_MODEL)")
+    p.add_argument("--max-translate", type=int, default=1000, help="cap on papers sent for translation per run")
+    p.add_argument("--check", action="store_true", help="read-only: histograms of already-tagged papers and a warning if any row in the window is untagged (tags are lost on re-ingest)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_tag)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
