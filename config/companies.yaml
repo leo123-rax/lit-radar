@@ -28,7 +28,7 @@ entries:
 - {id: revvity, name: Revvity, ticker: RVTY, type: tools, watch_news: true, domains: [revvity.com, perkinelmer.com, biolegend.com], aliases: ["PerkinElmer", "Perkin Elmer", "BioLegend", "Horizon Discovery", "Nexcelom", "Oxford Immunotec", "Revvity Signals"]}
 - {id: bio-techne, name: Bio-Techne, ticker: TECH, type: tools, watch_news: true, domains: [bio-techne.com, rndsystems.com, acdbio.com, lunaphore.com], aliases: ["R&D Systems", "ProteinSimple", "Advanced Cell Diagnostics", "ACD Bio", "RNAscope", "Lunaphore", "Tocris", "Novus Biologicals", "Asuragen", "Exosome Diagnostics"]}
 - {id: standard-biotools, name: Standard BioTools, ticker: LAB, type: tools, watch_news: true, domains: [standardbio.com, fluidigm.com, somalogic.com], aliases: ["Fluidigm", "SomaLogic", "Somalogic", "Standard BioTools Inc"]}
-- {id: quanterix, name: Quanterix, ticker: QTRX, type: tools, watch_news: true, domains: [quanterix.com, akoyabio.com], aliases: ["Akoya Biosciences", "Akoya", "Quanterix Corporation", "Emission"]}
+- {id: quanterix, name: Quanterix, ticker: QTRX, type: tools, watch_news: true, domains: [quanterix.com, akoyabio.com], aliases: ["Akoya Biosciences", "Akoya", "Quanterix Corporation"]}
 - {id: seer, name: Seer, ticker: SEER, type: tools, watch_news: true, domains: [seer.bio], aliases: ["Seer Inc", "Seer, Inc.", "Seer Bio"], case_sensitive_aliases: ["Seer"], context_terms: ["Proteograph", "Redwood City", "proteomics", "nanoparticle", "Inc"]}
 - {id: nautilus, name: Nautilus Biotechnology, ticker: NAUT, type: tools, watch_news: true, domains: [nautilus.bio], aliases: ["Nautilus Bio"]}
 - {id: quantum-si, name: Quantum-Si, ticker: QSI, type: tools, watch_news: true, domains: [quantum-si.com], aliases: ["Quantum Si", "QuantumSi"]}
@@ -94,7 +94,7 @@ entries:
 - {id: natera, name: Natera, ticker: NTRA, type: diagnostics, watch_news: true, domains: [natera.com], aliases: ["Signatera", "Natera Inc", "Prospera", "Panorama NIPT"]}
 - {id: exact-sciences, name: Exact Sciences, ticker: EXAS, type: diagnostics, watch_news: true, domains: [exactsciences.com], aliases: ["Cologuard", "Oncotype DX", "Oncodetect", "Cancerguard", "Exact Sciences Corporation"]}
 - {id: tempus, name: Tempus AI, ticker: TEM, type: diagnostics, watch_news: true, domains: [tempus.com], aliases: ["Tempus Labs", "Tempus", "xT assay", "Tempus xT", "Tempus xF"], case_sensitive_aliases: ["Tempus"], context_terms: ["Labs", "AI", "Chicago", "xT", "sequencing", "Inc"]}
-- {id: grail, name: GRAIL, ticker: GRAL, type: diagnostics, watch_news: true, domains: [grail.com, grailbio.com], aliases: ["Grail", "Galleri", "GRAIL Inc", "GRAIL Bio"]}
+- {id: grail, name: GRAIL, ticker: GRAL, type: diagnostics, watch_news: true, domains: [grail.com, grailbio.com], aliases: ["Grail", "Galleri", "GRAIL Inc", "GRAIL Bio", "GRAIL, Inc."], case_sensitive_aliases: ["GRAIL", "Grail"], context_terms: ["Galleri", "cancer", "GRAL", "Illumina", "detection", "Menlo Park", "Inc"], news_query: '("Galleri" OR GRAL OR "multi-cancer")'}
 - {id: caris, name: Caris Life Sciences, ticker: CAI, type: diagnostics, watch_news: true, domains: [carisls.com], aliases: ["Caris", "Caris MI Profile"]}
 - {id: myriad, name: Myriad Genetics, ticker: MYGN, type: diagnostics, watch_news: true, domains: [myriad.com], aliases: ["Myriad", "MyRisk", "Prolaris", "Precise MRD"]}
 - {id: veracyte, name: Veracyte, ticker: VCYT, type: diagnostics, watch_news: true, domains: [veracyte.com], aliases: ["Decipher Prostate", "Afirma", "Prosigna", "C2i Genomics"]}
@@ -139,7 +139,7 @@ entries:
 - {id: bioptimus, name: Bioptimus, ticker: private, type: ai_bio, watch_news: true, domains: [bioptimus.com], aliases: ["H-optimus", "H-optimus-0", "H-optimus-1"]}
 - {id: noetik, name: Noetik, ticker: private, type: ai_bio, watch_news: false, domains: [noetik.ai], aliases: []}
 - {id: nvidia, name: NVIDIA, ticker: NVDA, type: ai_bio, watch_news: false, domains: [nvidia.com], aliases: ["Nvidia", "Parabricks", "BioNeMo", "Clara Parabricks"]}
-- {id: microsoft-research, name: Microsoft, ticker: MSFT, type: ai_bio, watch_news: false, domains: [microsoft.com], aliases: ["Microsoft Research", "BioEmu", "EvoDiff", "Microsoft Research AI for Science"]}
+- {id: microsoft-research, name: Microsoft Research, ticker: MSFT, type: ai_bio, watch_news: false, domains: [microsoft.com], aliases: ["BioEmu", "EvoDiff", "Microsoft Research AI for Science", "Microsoft Health Futures"], notes: "bare Microsoft omitted: Excel/Office mentions"}
 - {id: openai, name: OpenAI, ticker: private, type: ai_bio, watch_news: false, domains: [openai.com], aliases: ["GPT-4b micro"]}
 - {id: anthropic-co, name: Anthropic, ticker: private, type: ai_bio, watch_news: false, domains: [anthropic.com], aliases: []}
 - {id: lilly-tune, name: Eli Lilly, ticker: LLY, type: pharma, watch_news: false, domains: [lilly.com], aliases: ["Lilly", "Eli Lilly and Company", "Loxo Oncology", "Lilly TuneLab"]}
