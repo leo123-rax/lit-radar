@@ -50,13 +50,16 @@ counts the drops), so a query for "GRAIL" cannot store "the holy grail of cookin
 
 ### Live observations (2026-10-17, from one egress IP)
 
-Across three sessions spaced minutes apart (8 requests in all, 6–7 s between requests within a session,
-honest User-Agent), the DOC API answered **429 on 6 of 8 requests, including the first request of each
-session**; the two 200s were `{}` (0 articles) for `"10x Genomics"` + context with `timespan=7d`, and the
-syntax rejection for a deliberately un-parenthesised OR test. Through the project's own client
-(`gdelt.company_news` for three companies) the result was 429, a 5 s back-off, 429 again, host blocked for
-the run, 0 articles stored. The research notes for this layer saw the same pattern earlier the same day
-and read it as a per-IP penalty state that outlasts a burst by more than ten minutes. The adapter is therefore built to degrade: a
+15 requests over about 90 minutes, honest User-Agent, never two within 5 s, including one series spaced
+65 s apart: **12 answered HTTP 429** ("Please limit requests to one every 5 seconds ...") and each 429 took
+7–9 s to arrive; the three 200s were 6 articles for `"Thermo Fisher" sourcelang:english` (3 of 6 titles
+named the company; domains 247wallst.com, ipwatchdog.com, securityfocus.com ...), `{}` (0 articles) for
+`"10x Genomics"` + context, and the syntax rejection for a deliberately un-parenthesised OR test. Through
+the project's own client (`gdelt.company_news` for Illumina, 10x Genomics, Thermo Fisher Scientific, two
+runs) the result both times was 429, a 5 s back-off, 429 again, host blocked for the run, **0 articles
+stored**. The 65 s series rules out a simple per-request interval from this IP; the slow 429s look like
+server-side load shedding or a penalty state. The research notes for this layer saw the same pattern
+earlier the same day. The adapter is therefore built to degrade: a
 rate-limited run stores nothing from GDELT, says so in the digest, and the other layers still run. Re-probe
 from a CI runner or another network before relying on GDELT volume; the numbers above are what this
 machine saw, not a measurement of the API's normal behaviour.
