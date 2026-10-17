@@ -352,4 +352,4 @@ def test_make_http_builds_a_plain_client_by_default():
     from litradar.config import Settings
 
     h = toolkit.make_http(Settings(contact_email="a@b.c"))
-    assert isinstance(h, Http) and "mailto:a@b.c" in h.session.headers["User-Agent"]
+    assert isinstance(h, Http) and "a@b.c" in h.session.headers["User-Agent"]  # SEC-style "<tool> <email>" UA
