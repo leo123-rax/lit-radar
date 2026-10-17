@@ -154,20 +154,59 @@ class Http:
         resp.encoding = resp.encoding or "utf-8"
         return resp.text
 
-    def post_json(self, url: str, json_body: Any, headers: Optional[Dict[str, str]] = None) -> Optional[Any]:
-        self._pace(url)
-        self.stats["requests"] += 1
-        try:
-            resp = self.session.post(url, json=json_body, headers=headers, timeout=self.timeout)
-        except requests.RequestException as exc:
-            log.warning("POST %s failed (%s)", url, exc)
-            self.stats["failures"] += 1
+    def post_json(
+        self,
+        url: str,
+        json_body: Any,
+        headers: Optional[Dict[str, str]] = None,
+        ok_statuses: tuple = (200,),
+    ) -> Optional[Any]:
+        """POST a JSON body with pacing and retries; returns the parsed JSON response (never raises).
+
+        Same policy as get(): transient trouble (network error, 429, 5xx) is retried up to max_retries
+        with exponential backoff capped at max_backoff and honouring Retry-After; 400/401/403/404/410 are
+        terminal (a 400 here is a real validation error from the API, not a reason to retry); a host that
+        answers 429 twice in a row is skipped for the rest of the run. Returns None on any failure or
+        when the body is not JSON, so callers treat None as "no data" exactly as with get_json().
+        """
+        host = urlsplit(url).netloc
+        if host in self.blocked_hosts:
+            self.stats["blocked_skips"] += 1
             return None
-        if resp.status_code != 200:
-            log.warning("POST %s -> %s", url, resp.status_code)
-            self.stats["failures"] += 1
-            return None
-        try:
-            return resp.json()
-        except ValueError:
-            return None
+        backoff = 1.0
+        for attempt in range(self.max_retries + 1):
+            self._pace(url)
+            self.stats["requests"] += 1
+            try:
+                resp = self.session.post(url, json=json_body, headers=headers, timeout=self.timeout)
+            except requests.RequestException as exc:
+                log.warning("POST %s failed (%s); attempt %d", url, exc, attempt + 1)
+                resp = None
+            if resp is not None and resp.status_code in ok_statuses:
+                self._consecutive_429[host] = 0
+                try:
+                    return resp.json()
+                except ValueError:
+                    log.warning("non-JSON response from POST %s", url)
+                    return None
+            if resp is not None and resp.status_code in (400, 401, 403, 404, 410):
+                log.info("POST %s -> %s (not retrying): %s", url, resp.status_code, (resp.text or "")[:200])
+                self.stats["failures"] += 1
+                return None
+            if resp is not None and resp.status_code == 429:
+                self._consecutive_429[host] = self._consecutive_429.get(host, 0) + 1
+                if self._consecutive_429[host] >= 2:
+                    log.warning("%s answered 429 twice in a row; skipping this host for the rest of the run", host)
+                    self.blocked_hosts.add(host)
+                    self.stats["failures"] += 1
+                    return None
+            if resp is not None:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    backoff = max(backoff, min(float(retry_after), self.max_backoff))
+                log.warning("POST %s -> %s; retrying in %.1fs", url, resp.status_code, backoff)
+            self.stats["retries"] += 1
+            time.sleep(backoff)
+            backoff = min(backoff * 2, self.max_backoff)
+        self.stats["failures"] += 1
+        return None

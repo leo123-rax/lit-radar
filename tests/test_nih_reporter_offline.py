@@ -130,6 +130,7 @@ def test_malformed_rows_are_skipped():
 
 
 # -- pagination ------------------------------------------------------------------------------
+# These first tests use criteria without an award_notice_date window, so paging is the plain offset walk.
 def test_pagination_stops_at_total_without_probing_past_the_end():
     page1 = _page([_row(1, "A"), _row(2, "B")], total=3, offset=0, limit=2)
     page2 = _page([_row(3, "C")], total=3, offset=2, limit=2)
@@ -152,9 +153,10 @@ def test_pagination_respects_max_records_and_dedupes_across_pages():
     page1 = _page([_row(1, "A"), _row(2, "B")], total=5)
     page2 = _page([_row(2, "B again"), _row(3, "C")], total=5)
     http = FakePostHttp([page1, page2, _page([_row(4, "D")], total=5)])
-    rows = list(nr.search(http, {"activity_codes": ["S10"]}, limit=2, max_records=4))
+    rows = list(nr.search(http, {"activity_codes": ["S10"]}, limit=2, max_records=3))
     assert [r["appl_id"] for r in rows] == [1, 2, 3]  # duplicate appl_id 2 dropped
-    assert [b["offset"] for _, b in http.calls] == [0, 2]  # fetched 4 rows = max_records, so no third page
+    assert [b["offset"] for _, b in http.calls] == [0, 2]  # 3 unique rows = max_records, so no third page
+    assert [b["limit"] for _, b in http.calls] == [2, 1]  # the last page asks only for what is still allowed
     assert len(http.payloads) == 1
 
 
@@ -201,6 +203,11 @@ def test_keyword_awards_refuses_an_unbounded_query():
     http = FakePostHttp([])
     with pytest.raises(ValueError):
         list(nr.keyword_awards(http, "2026-01-01", "2026-10-17", []))
+    # blank organisations / codes / terms are cleaned *before* the guard, so they do not count as a filter
+    with pytest.raises(ValueError):
+        list(nr.keyword_awards(http, "2026-01-01", "2026-10-17", [], org_names=[" "]))
+    with pytest.raises(ValueError):
+        list(nr.keyword_awards(http, "2026-01-01", "2026-10-17", ["  ", '""'], activity_codes=["", None]))
     assert http.calls == []
 
 
@@ -235,3 +242,118 @@ def test_text_search_helper_edge_cases():
 
 def test_host_pacing_is_registered():
     assert DEFAULT_MIN_INTERVAL["api.reporter.nih.gov"] >= 1.0
+
+
+# -- keyset paging by award notice date ----------------------------------------------------
+# Live observation (2026-10-17): with a text search the API reports sorted_by_relevance=true but still returns
+# rows in award_notice_date order; the order *within* one date differs between requests, so rows sharing the
+# date at a page boundary can slip between pages. The adapter therefore re-issues the next request from the
+# last date seen (offset 0) and de-duplicates, instead of trusting offsets.
+WINDOW = {"award_notice_date": {"from_date": "2026-01-01", "to_date": "2026-01-31"}, "activity_codes": ["S10"]}
+
+
+def test_keyset_paging_advances_from_the_last_date_seen():
+    page1 = _page([_row(1, "A", award_notice_date="2026-01-03T00:00:00"), _row(2, "B", award_notice_date="2026-01-05T00:00:00")], total=4)
+    # the API re-sends the boundary-date row (2) and the rest of the narrowed window
+    page2 = _page([_row(2, "B", award_notice_date="2026-01-05T00:00:00"), _row(3, "C", award_notice_date="2026-01-06T00:00:00")], total=3)
+    page3 = _page([_row(3, "C again", award_notice_date="2026-01-06T00:00:00"), _row(4, "D", award_notice_date="2026-01-09T00:00:00")], total=2)
+    http = FakePostHttp([page1, page2, page3])
+    rows = list(nr.search(http, WINDOW, limit=2))
+    assert [r["appl_id"] for r in rows] == [1, 2, 3, 4]
+    bodies = [b for _, b in http.calls]
+    assert [b["offset"] for b in bodies] == [0, 0, 0]  # never pages by offset
+    assert [b["criteria"]["award_notice_date"]["from_date"] for b in bodies] == ["2026-01-01", "2026-01-05", "2026-01-06"]
+    assert all(b["criteria"]["award_notice_date"]["to_date"] == "2026-01-31" for b in bodies)
+    assert all(b["criteria"]["activity_codes"] == ["S10"] for b in bodies)  # other criteria untouched
+    assert http.payloads == []
+
+
+def test_keyset_paging_descending_moves_the_to_date():
+    page1 = _page([_row(9, "Z", award_notice_date="2026-01-30T00:00:00"), _row(8, "Y", award_notice_date="2026-01-20T00:00:00")], total=3)
+    page2 = _page([_row(8, "Y", award_notice_date="2026-01-20T00:00:00"), _row(7, "X", award_notice_date="2026-01-02T00:00:00")], total=2)
+    http = FakePostHttp([page1, page2])
+    rows = list(nr.search(http, WINDOW, limit=2, sort_order="desc"))
+    assert [r["appl_id"] for r in rows] == [9, 8, 7]
+    assert http.calls[1][1]["criteria"]["award_notice_date"] == {"from_date": "2026-01-01", "to_date": "2026-01-20"}
+    assert http.calls[1][1]["offset"] == 0
+
+
+def test_keyset_paging_falls_back_to_offsets_when_a_whole_page_shares_one_date(caplog):
+    same = "2026-01-07T00:00:00"
+    # three notices on 01-07 with pages of two: the window narrows to 01-07 first, then the page starting at the
+    # window edge is entirely on that date, so the adapter has to walk by offset inside the day
+    page1 = _page([_row(1, "A", award_notice_date=same), _row(2, "B", award_notice_date=same)], total=4)
+    page2 = _page([_row(2, "B", award_notice_date=same), _row(3, "C", award_notice_date=same)], total=3)  # window 01-07.. holds 3
+    page3 = _page([_row(4, "D", award_notice_date="2026-01-08T00:00:00")], total=3)
+    http = FakePostHttp([page1, page2, page3])
+    with caplog.at_level("WARNING", logger="litradar.sources.nih_reporter"):
+        rows = list(nr.search(http, WINDOW, limit=2))
+    assert [r["appl_id"] for r in rows] == [1, 2, 3, 4]
+    bodies = [b for _, b in http.calls]
+    assert [(b["offset"], b["criteria"]["award_notice_date"]["from_date"]) for b in bodies] == [(0, "2026-01-01"), (0, "2026-01-07"), (2, "2026-01-07")]
+    assert any("more than 2 notices dated 2026-01-07" in r.message and "paging by offset" in r.message for r in caplog.records)
+    assert http.payloads == []
+
+
+def test_keyset_paging_falls_back_to_offsets_when_a_page_is_not_in_date_order():
+    page1 = _page([_row(1, "A", award_notice_date="2026-01-09T00:00:00"), _row(2, "B", award_notice_date="2026-01-03T00:00:00")], total=3)
+    page2 = _page([_row(3, "C", award_notice_date=None)], total=3)
+    http = FakePostHttp([page1, page2])
+    rows = list(nr.search(http, WINDOW, limit=2))
+    assert [r["appl_id"] for r in rows] == [1, 2, 3]
+    assert [b["offset"] for _, b in http.calls] == [0, 2]
+    assert http.calls[1][1]["criteria"]["award_notice_date"]["from_date"] == "2026-01-01"
+
+
+def test_keyset_paging_not_used_without_a_date_window_or_with_another_sort_field():
+    pages = [_page([_row(1, "A"), _row(2, "B", award_notice_date="2026-01-09T00:00:00")], total=3), _page([_row(3, "C")], total=3)]
+    http = FakePostHttp(list(pages))
+    list(nr.search(http, {"activity_codes": ["S10"]}, limit=2))
+    assert [b["offset"] for _, b in http.calls] == [0, 2]
+    http = FakePostHttp(list(pages))
+    list(nr.search(http, WINDOW, limit=2, sort_field="project_start_date"))
+    assert [b["offset"] for _, b in http.calls] == [0, 2]
+    assert http.calls[1][1]["criteria"] == WINDOW
+
+
+def test_keyset_paging_respects_max_records():
+    page1 = _page([_row(1, "A", award_notice_date="2026-01-03T00:00:00"), _row(2, "B", award_notice_date="2026-01-05T00:00:00")], total=10)
+    page2 = _page([_row(2, "B", award_notice_date="2026-01-05T00:00:00"), _row(3, "C", award_notice_date="2026-01-06T00:00:00")], total=8)
+    http = FakePostHttp([page1, page2, _page([_row(4, "D")], total=7)])
+    rows = list(nr.search(http, WINDOW, limit=2, max_records=3))
+    assert [r["appl_id"] for r in rows] == [1, 2, 3]
+    assert len(http.calls) == 2 and len(http.payloads) == 1
+
+
+def test_incomplete_pull_is_logged(caplog):
+    http = FakePostHttp([_page([_row(1, "A", award_notice_date="2026-01-03T00:00:00")], total=5), _page([], total=4)])
+    with caplog.at_level("WARNING", logger="litradar.sources.nih_reporter"):
+        rows = list(nr.search(http, WINDOW, limit=1))
+    assert len(rows) == 1
+    assert any("pulled 1 unique rows of 5" in r.message for r in caplog.records)
+
+
+# -- error channel ---------------------------------------------------------------------------
+def test_api_failure_is_reported_through_the_errors_list_and_keeps_earlier_rows(caplog):
+    page1 = _page([_row(1, "A", award_notice_date="2026-01-03T00:00:00"), _row(2, "B", award_notice_date="2026-01-05T00:00:00")], total=5)
+    http = FakePostHttp([page1, None])  # second page: post_json gave up (network / 5xx after retries)
+    errors = []
+    with caplog.at_level("ERROR", logger="litradar.sources.nih_reporter"):
+        items = list(nr.s10_awards(http, "2026-01-01", "2026-01-31", errors=errors))
+    assert [i.id for i in items] == ["nih-reporter:1", "nih-reporter:2"]
+    assert len(errors) == 1 and errors[0].startswith("NIH RePORTER: no usable response")
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+    # without a list nothing is raised and nothing is lost either
+    http = FakePostHttp([page1, None])
+    assert len(list(nr.s10_awards(http, "2026-01-01", "2026-01-31"))) == 2
+
+
+def test_errors_list_is_threaded_through_every_entry_point():
+    for call in (
+        lambda h, e: nr.keyword_awards(h, "2026-01-01", "2026-01-31", ["Revio"], errors=e),
+        lambda h, e: nr.sbir_awards(h, "2026-01-01", "2026-01-31", org_names=["Example"], errors=e),
+        lambda h, e: nr.s10_awards(h, "2026-01-01", "2026-01-31", terms=["Revio"], errors=e),
+    ):
+        errors = []
+        assert list(call(FakePostHttp([{"message": "Internal error"}]), errors)) == []
+        assert len(errors) == 1

@@ -1,8 +1,10 @@
 # NIH RePORTER (funded projects): shared-instrumentation awards, SBIR/STTR, keyword hits
 
 Adapter: `litradar/sources/nih_reporter.py`. Yields `NewsItem(feed="nih-reporter", ...)`.
-Official documentation: https://api.reporter.nih.gov/ (Swagger UI; field list, paging rules, etiquette).
-Data dictionary: https://api.reporter.nih.gov/documents/Data%20Elements%20for%20RePORTER%20Project%20API%20v2.pdf
+Official documentation: https://api.reporter.nih.gov/ (field list, paging rules, etiquette).
+Machine-readable spec: https://api.reporter.nih.gov/swagger/v2/swagger.json (OpenAPI 3.0.1).
+Data dictionary: https://api.reporter.nih.gov/documents/Data%20Elements%20for%20RePORTER%20Project%20API_V2.pdf
+(the `API_V2.pdf` spelling; the `API v2.pdf` variant linked from older notes returns HTTP 404).
 
 Tested live on 2026-10-17 from a residential IP with the project's `lit-radar/0.1` User-Agent.
 No key, no registration.
@@ -64,6 +66,19 @@ Without `include_fields` the full record is ~8 KB per project (45 keys, includin
 `phr_text`, `terms`, `pref_terms`, `principal_investigators`, `program_officers`, `spending_categories`,
 `geo_lat_lon`); the adapter asks for 17 fields.
 
+### Key spelling: snake_case, and misspellings fail silently
+
+The Swagger spec spells the request schema camelCase (`criteria.awardNoticeDate{fromDate,toDate}`,
+`activityCodes`, `advancedTextSearch{searchText,operator,searchField}`, `orgNames`, `orgNamesExactMatch`,
+`includeFields`, `sortField`, `sortOrder`) and describes `limit` as "System imposed limit is 50" (that
+is the default; 500 is the verified maximum). **The live API does not accept the camelCase spelling:**
+a camelCase body for the S10 window above returned `total: 2983350` (every project in RePORTER),
+`sort_field: null` and the full 45-key records, with HTTP 200 and no error, while the same filter in
+snake_case returned `total: 5` with exactly the requested keys (both calls 2026-10-17). Unknown keys are
+dropped silently, so a misspelt criterion means "everything", not an error. The adapter builds every
+request body itself with the snake_case names from the documentation page; do not copy names from the
+Swagger schema into a hand-written body. `criteria.use_relevance` (in the spec) had no observable effect.
+
 ### Paging and limits (each verified with a live call)
 
 | Request | Response |
@@ -77,9 +92,31 @@ Without `include_fields` the full record is ~8 KB per project (45 keys, includin
 | dates with a time component | accepted |
 | no criteria match | HTTP 200, `total: 0` |
 
-So the adapter pages `offset += len(results)` and stops when `offset >= meta.total`, on an empty page,
-at `max_records`, or at the 14,999 offset cap (narrow the date window for bigger pulls). It never
-raises on API trouble; a missing page ends the iteration with a warning.
+The adapter stops when `offset + len(results) >= meta.total`, on an empty page, at `max_records`
+(unique rows), or at the 14,999 offset cap (narrow the date window for bigger pulls). It never raises on
+API trouble: a missing or malformed page ends the iteration, the message is logged at ERROR and appended
+to the `errors` list when the caller passes one (the pipeline passes `self.errors`), and rows already
+yielded are kept. `Http.post_json` retries transient failures (network error, 429, 5xx) with backoff and
+`Retry-After`, treats 400/401/403/404 as terminal, and skips the host for the run after two consecutive
+429s, exactly like `Http.get`.
+
+### Paging by date, not by offset (completeness)
+
+With any text search `meta.sorted_by_relevance` is `true` even when `sort_field` is given. Live check
+(2026-10-17, "flow cytometry" since 2026-04-01, 705 rows): the rows nevertheless arrived in
+`award_notice_date` order on both pages (page 1 2026-04-01..2026-08-11, page 2 2026-08-11..2026-09-21),
+union 705 of 705, no duplicates. But re-requesting page 1 returned the **same set in a different order**:
+the order *within* one notice date is not stable between requests, so rows sharing the date at a page
+boundary (2026-08-11 above) can in principle be repeated or dropped by a plain offset walk.
+
+`search()` therefore pages by date ("keyset" paging) whenever the criteria carry an `award_notice_date`
+window and the sort is by `award_notice_date`: after a full page it re-issues the request with
+`from_date` = the last date seen (or `to_date`, descending), `offset: 0`, and skips rows already yielded
+(`appl_id`). Completeness no longer depends on tie order; the cost is the same number of requests plus
+a few re-sent boundary rows. It falls back to offset paging, with a warning, only when a whole page
+shares one date (more than 500 notices on a single day) or a page is not in date order. An incomplete
+pull (fewer unique rows than the first page's `meta.total`) is logged as a warning. Live: S10 since
+2023-01-01 = 578 of 578 in two requests; "flow cytometry" since 2026-04-01 = 705 of 705 in two.
 
 ### Rate limit
 
@@ -100,7 +137,7 @@ request; the whole S10 history since 2023 (578 awards) is two.
   "Promethion" metabolic cages, `"Vega"` returns unrelated items. Keyword hits are candidates;
   run the instrument gazetteer (with its context rules) over title + summary downstream.
 * With any text search the response says `sorted_by_relevance: true` even when `sort_field` is given;
-  the adapter de-duplicates on `appl_id` across pages in case ties reorder.
+  rows still arrive in date order, and the adapter pages by date (see above) so ties cannot cost rows.
 
 ### Organisation filter
 
@@ -129,8 +166,9 @@ nr.sbir_awards(http, start, end, org_names=["Example Instruments"], exact_org_na
 nr.count(http, {"award_notice_date": nr.date_range(start, end), "activity_codes": ["S10"]})
 ```
 
-`keyword_awards` raises `ValueError` when given no terms, no activity codes and no organisations,
-because that query would be "every NIH award in the window".
+`keyword_awards` raises `ValueError` when given no terms, no activity codes and no organisations
+*after cleaning* (blank strings do not count), because that query would be "every NIH award in the
+window". Every entry point accepts `errors=<list>`; API failures are appended there instead of raised.
 
 ### NewsItem mapping
 
@@ -172,6 +210,14 @@ Other calls in the same session:
 * SBIR/STTR, last 30 days: 198 awards in total; 0 with "GENOMICS" in the organisation name.
 * `limit > 500`, `offset > 14,999`, `offset ≥ total`, malformed body: the four HTTP 400 shapes above.
 
+Re-check after review (same day, through the adapter's own code path, 8 requests, 0 failures, 0
+retries, 8.3 s): `s10_awards` 2026-07-19..2026-10-17 again 57 items = `count()` 57 (Jul 10 / Aug 28 /
+Sep 19, published 2026-07-21..2026-09-18, $34,385,926, median $249,966); S10 since 2023-01-01 578 of 578
+via keyset paging; `keyword_awards(["flow cytometry"])` since 2026-04-01 705 of 705; camelCase body
+ignored as described above; `keyword_awards(http, s, e, [], org_names=["  "])` raises before any request.
+The project's gazetteer matcher over the same 57 items: 10 titles name an instrument (the ten listed
+above, same vendor tally); 23 of 57 do once the abstract in the summary is included.
+
 ## Caveats
 
 * `award_notice_date` is when the notice was issued; `project_start_date` can be weeks later, and
@@ -184,4 +230,9 @@ Other calls in the same session:
   months after the notice (not measured here).
 * Only NIH-funded US institutions appear. Instruments bought with NSF MRI, institutional or
   non-US money are invisible here (NSF has a separate awards API).
+* A misspelt criteria key is silently dropped and the query becomes "all projects" (see key spelling
+  above); `search()` logs a warning when it pulls fewer unique rows than `meta.total`, but it cannot
+  detect a filter that was never applied, so keep request bodies inside the adapter.
+* More than 500 notices on one day inside one query cannot be paged completely (the API offers no stable
+  tiebreaker); the adapter warns and walks that day by offset. S10 and SBIR volumes are far below this.
 * `/v2/publications/search` (the sibling endpoint) links PMIDs to project numbers and is not used yet.
