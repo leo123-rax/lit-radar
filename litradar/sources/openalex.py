@@ -7,6 +7,7 @@ coverage by ISSN. Abstracts come as an inverted index and are rebuilt here.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from ..http import Http
@@ -20,6 +21,7 @@ SELECT = ",".join(
         "abstract_inverted_index", "topics", "primary_topic", "cited_by_count", "open_access", "grants", "biblio",
     ]
 )
+MAX_RATE_LIMIT_WAIT = 60.0  # seconds; a plain HTTP 429 (per-second rate limit) is retried once after this at most
 
 
 def reconstruct_abstract(inv: Optional[Dict[str, List[int]]]) -> str:
@@ -34,40 +36,95 @@ def reconstruct_abstract(inv: Optional[Dict[str, List[int]]]) -> str:
 
 
 class OpenAlexBudgetExhausted(RuntimeError):
-    """OpenAlex refused the request: the free per-IP budget is used up and no API key was given."""
+    """OpenAlex refused the request for budget reasons: the free per-IP budget is used up (no API key), the key's
+    own budget is gone, or the answer was HTTP 403. A plain per-second rate limit (HTTP 429 without "budget" in the
+    message) is NOT this error; the pager waits and retries that once."""
 
 
-def works(http: Http, filters: Dict[str, str], mailto: str = "", api_key: str = "", max_records: int = 10000, select: str = SELECT) -> Iterator[Dict[str, Any]]:
+def _sleep(seconds: float) -> None:  # module-level so tests can replace it
+    time.sleep(seconds)
+
+
+def retry_after_seconds(resp: Any, data: Any, default: float = 5.0) -> float:
+    """Seconds to wait after a plain 429: the body's `retryAfter` (OpenAlex) or the Retry-After header, capped."""
+    val: Any = data.get("retryAfter") if isinstance(data, dict) else None
+    if val is None:
+        val = (getattr(resp, "headers", None) or {}).get("Retry-After")
+    try:
+        secs = float(val)
+    except (TypeError, ValueError):
+        secs = default
+    return max(0.0, min(secs, MAX_RATE_LIMIT_WAIT))
+
+
+def works(
+    http: Http,
+    filters: Dict[str, str],
+    mailto: str = "",
+    api_key: str = "",
+    max_records: int = 10000,
+    select: str = SELECT,
+    extra_params: Optional[Dict[str, Any]] = None,
+    state: Optional[Dict[str, Any]] = None,
+) -> Iterator[Dict[str, Any]]:
     """Page through /works. Since 2026 OpenAlex meters anonymous traffic per IP; a free key
-    (https://help.openalex.org/api/authentication/) is sent as a Bearer token when configured."""
+    (https://help.openalex.org/api/authentication/) is sent as a Bearer token when configured.
+
+    `extra_params` are merged into the query string, e.g. ``{"search.title_and_abstract": '"a" OR "b"'}`` (the
+    documented scoped-search parameter; see https://help.openalex.org/api/searching/).
+
+    `state`, when a dict is passed, reports how paging ended so callers can tell a finished query from an
+    interrupted one: ``state["complete"]`` is True only when the API returned its last page; ``state["capped"]``
+    is True when `max_records` stopped the pager with a cursor still open; ``state["error"]`` names any other
+    early stop (transport failure, non-JSON body, HTTP error, a rate limit that persisted after one retry).
+    Budget exhaustion raises OpenAlexBudgetExhausted; a plain HTTP 429 is retried once after `retryAfter` seconds.
+    """
+    if state is None:
+        state = {}
     cursor = "*"
     n = 0
     flt = ",".join(f"{k}:{v}" for k, v in filters.items())
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    retried_429 = False
     while n < max_records:
         params: Dict[str, Any] = {"filter": flt, "per-page": 200, "cursor": cursor, "select": select}
         if mailto:
             params["mailto"] = mailto
+        params.update(extra_params or {})
         resp = http.get(WORKS, params=params, headers=headers, ok_statuses=(200, 403, 429))
         if resp is None:
+            state["error"] = "transport failure"
             break
         try:
             data = resp.json()
         except ValueError:
+            state["error"] = f"non-JSON body (HTTP {resp.status_code})"
             break
-        if resp.status_code != 200 or (isinstance(data, dict) and data.get("error")):
-            msg = (data or {}).get("message", "") if isinstance(data, dict) else ""
-            if "budget" in msg.lower() or resp.status_code in (403, 429):
-                raise OpenAlexBudgetExhausted(msg[:200] or f"HTTP {resp.status_code}")
+        if resp.status_code != 200 or not isinstance(data, dict) or data.get("error"):
+            msg = str(data.get("message") or "") if isinstance(data, dict) else ""
+            if "budget" in msg.lower() or resp.status_code == 403:
+                raise OpenAlexBudgetExhausted(msg[:300] or f"HTTP {resp.status_code}")
+            if resp.status_code == 429 and not retried_429:
+                retried_429 = True
+                wait = retry_after_seconds(resp, data)
+                log.warning("OpenAlex rate limit (HTTP 429: %s); waiting %.0fs and retrying the page once", msg[:80] or "no message", wait)
+                _sleep(wait)
+                continue
+            err = msg[:120] or (str(data.get("error"))[:120] if isinstance(data, dict) and data.get("error") else "")
+            state["error"] = f"HTTP {resp.status_code}" + (f": {err}" if err else "")
             break
+        retried_429 = False
         results = data.get("results") or []
         yield from results
         n += len(results)
         cursor = (data.get("meta") or {}).get("next_cursor")
         if not results or not cursor:
+            state["complete"] = True
             break
+    else:
+        state["capped"] = True
 
 
 def to_paper(w: Dict[str, Any]) -> Paper:
