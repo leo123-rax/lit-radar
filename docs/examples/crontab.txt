@@ -1,0 +1,2 @@
+# Linux / macOS cron example: Mondays 07:30, e-mail the digest, keep a log.
+30 7 * * 1  cd /PATH/TO/lit-radar && .venv/bin/python -m litradar run --days 7 --email >> digests/_work/cron.log 2>&1
