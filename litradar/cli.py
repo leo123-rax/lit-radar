@@ -284,6 +284,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="plan only: report how many requests a run would make")
     p.set_defaults(func=cmd_timeseries)
 
+    # Plugin commands: any module in litradar/commands/ exposing register(subparsers) is added here,
+    # so new features never need to edit this file.
+    import importlib
+    import pkgutil
+
+    try:
+        from . import commands as _commands_pkg
+
+        for mod in pkgutil.iter_modules(_commands_pkg.__path__):
+            try:
+                m = importlib.import_module(f"litradar.commands.{mod.name}")
+                if hasattr(m, "register"):
+                    m.register(sub)
+            except Exception as exc:  # noqa: BLE001 - a broken plugin must not kill the CLI
+                logging.getLogger(__name__).warning("command module %s failed to load: %s", mod.name, exc)
+    except ImportError:
+        pass
+
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
