@@ -8,6 +8,8 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
+  litradar backfill --from YYYY-MM --to YYYY-MM [--subgroup id ...] [--country CC ...] [--max-per-month N]
+                    [--dry-run] | --snapshot-dir DIR | --status   fill the corpus from OpenAlex (resumable)
 """
 from __future__ import annotations
 
@@ -20,10 +22,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__
+from . import __version__, backfill
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
+from .http import Http
 from .pipeline import Pipeline, window
 from .store import Store
 
@@ -172,6 +175,57 @@ def cmd_check_config(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_backfill(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    all_groups = (settings.yaml("subgroups") or {}).get("subgroups", []) or []
+    store = Store(settings.db_path)
+    backfill.ensure_schema(store)
+    try:
+        if args.status:
+            rows = backfill.progress_summary(store)
+            if args.json:
+                print(json.dumps(rows, indent=1, default=str))
+            elif not rows:
+                print("no backfill progress recorded yet")
+            else:
+                for r in rows:
+                    print(f"{r['subgroup']:28} {r['country'] or 'all':6} units={r['units']:<6} fetched={r['fetched'] or 0:<8} {r['first_month']}..{r['last_month']}  last {r['last_done']}")
+            return 0
+        groups = backfill.select_subgroups(all_groups, args.subgroup)
+        countries = args.country or ()
+        if args.snapshot_dir:
+            report = backfill.run_snapshot(
+                store, Path(args.snapshot_dir), groups, countries=countries,
+                from_month=args.from_month or "", to_month=args.to_month or "",
+            )
+        else:
+            if not (args.from_month and args.to_month):
+                print("backfill: --from and --to (YYYY-MM) are required unless --snapshot-dir or --status is given", file=sys.stderr)
+                return 2
+            if args.dry_run:
+                units = backfill.plan(groups, args.from_month, args.to_month, countries)
+                pending = [u for u in units if not backfill.progress_done(store, *u)]
+                print(f"{len(units)} unit(s) of (subgroup, month, country); {len(pending)} pending, {len(units) - len(pending)} already done")
+                for sg, month, country in pending[:60]:
+                    print(f"  {sg:28} {month}  {country or 'all'}")
+                if len(pending) > 60:
+                    print(f"  … {len(pending) - 60} more")
+                return 0
+            http = Http(contact_email=settings.contact_email, cache_dir=settings.cache_dir)
+            report = backfill.run_api(
+                store, http, groups, args.from_month, args.to_month, countries=countries,
+                max_per_month=args.max_per_month, mailto=settings.contact_email, api_key=settings.openalex_api_key,
+            )
+    except backfill.BackfillError as exc:
+        print(f"backfill: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    print(json.dumps(report, indent=1, default=str))
+    print(report.get("message", ""))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="litradar", description="Weekly science-literature radar")
     ap.add_argument("--config-dir", default=None, help="directory with radar.yaml etc. (default: ./config)")
@@ -228,6 +282,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("check-config", help="validate config files")
     p.set_defaults(func=cmd_check_config)
+
+    p = sub.add_parser("backfill", help="fill the corpus from OpenAlex month by month, or from a snapshot directory (resumable)")
+    p.add_argument("--from", dest="from_month", help="first month, YYYY-MM")
+    p.add_argument("--to", dest="to_month", help="last month, YYYY-MM (inclusive)")
+    p.add_argument("--subgroup", action="append", help="subgroup id from config/subgroups.yaml; repeatable; default: all")
+    p.add_argument("--country", action="append", help="ISO 3166-1 alpha-2 code of author institutions (e.g. CN); repeatable; default: no restriction")
+    p.add_argument("--max-per-month", type=int, default=2000, help="cap per (subgroup, month, country) unit; default 2000")
+    p.add_argument("--snapshot-dir", help="read OpenAlex snapshot works files (JSONL / .gz) from this directory instead of the API")
+    p.add_argument("--dry-run", action="store_true", help="list the pending (subgroup, month, country) units and exit")
+    p.add_argument("--status", action="store_true", help="show recorded backfill progress and exit")
+    p.add_argument("--json", action="store_true", help="with --status: print JSON")
+    p.set_defaults(func=cmd_backfill)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
