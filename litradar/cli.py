@@ -7,6 +7,7 @@
   litradar entity   <entity_id> [--since 90d]                 papers that mention one gazetteer entry
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
+  litradar dashboard --out site/ [--weeks 52]                 build the static trends site from the database
   litradar check-config                                       validate YAML files and report duplicates
   litradar timeseries [--entity id ...] [--vendor name ...] [--from YYYY-MM --to YYYY-MM] [--sources sra,ena,epmc] [--out DIR]
                                                               monthly experiment / paper counts per instrument model
@@ -20,6 +21,7 @@ import argparse
 import json
 import logging
 import re
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -142,6 +144,28 @@ def cmd_stats(args) -> int:
     print(json.dumps(store.counts(), indent=1))
     for r in store.conn.execute("SELECT started, finished, since, until, counts_json FROM runs ORDER BY id DESC LIMIT 5"):
         print(r[0], "->", r[1], f"window {r[2]}..{r[3]}")
+    return 0
+
+
+def cmd_dashboard(args) -> int:
+    from . import dashboard
+
+    settings = Settings.from_env(config_dir=args.config_dir)
+    db_path = Path(args.db) if args.db else settings.db_path
+    out_dir = Path(args.out or "site")
+    try:
+        report = dashboard.build(db_path, out_dir, weeks=args.weeks, max_papers=args.max_papers)
+    except (sqlite3.Error, FileNotFoundError) as exc:
+        # a locked, corrupt or missing store must not publish an all-zero site
+        print(f"dashboard: cannot read {db_path}: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report, indent=1, default=str))
+    else:
+        print(json.dumps({k: v for k, v in report.items() if k != "files"}, indent=1, default=str))
+        print(f"site written to {out_dir} ({report['bytes'] / 1024:.0f} KiB in {len(report['files'])} files)")
+    for message in report.get("skipped_queries", []):
+        print(f"warning: optional data missing, section left empty: {message}", file=sys.stderr)
     return 0
 
 
@@ -310,6 +334,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 logging.getLogger(__name__).warning("command module %s failed to load: %s", mod.name, exc)
     except ImportError:
         pass
+    p = sub.add_parser("dashboard", help="build a static trends site from the database (publishable to GitHub Pages)")
+    p.add_argument("--out", default="site", help="output directory (default: site/)")
+    p.add_argument("--weeks", type=int, default=52, help="how many weeks of history to chart (default: 52)")
+    p.add_argument("--db", help="database file to read (default: the configured store); opened read-only")
+    p.add_argument("--max-papers", type=int, default=4000, dest="max_papers",
+                   help="cap on the client-side search index (default: 4000 most recent papers in the window)")
+    p.add_argument("--json", action="store_true", help="print the full file manifest as JSON")
+    p.set_defaults(func=cmd_dashboard)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")

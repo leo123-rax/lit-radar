@@ -1,0 +1,83 @@
+# Publishes the static trends dashboard to GitHub Pages.
+#
+# Runs after the weekly digest finishes (workflow_run) so the site is rebuilt from the database the
+# digest just updated, and on demand (workflow_dispatch). The database is restored from the same
+# Actions cache the digest workflow writes; nothing here fetches from any API.
+#
+# One-time setup: Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+# See docs/dashboard.md.
+name: pages
+on:
+  workflow_run:
+    workflows: ["weekly-digest"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      weeks:
+        description: "weeks of history to chart"
+        default: "52"
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    # on a workflow_run trigger, only publish when the digest itself succeeded
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      found: ${{ steps.db.outputs.found }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e .
+      - name: Restore the database written by the weekly digest
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/radar.sqlite
+            .cache
+          key: radar-db-pages-${{ github.run_id }}
+          restore-keys: radar-db-
+      - name: Is there a database to publish?
+        id: db
+        run: |
+          if [ -f data/radar.sqlite ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            ls -l data/radar.sqlite
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No cached database yet - run the weekly-digest workflow once, then re-run this one."
+          fi
+      - name: Build the static site
+        if: steps.db.outputs.found == 'true'
+        # the dispatch input goes through an environment variable, never straight into the shell line
+        env:
+          WEEKS: ${{ github.event.inputs.weeks || '52' }}
+        run: python -m litradar dashboard --db data/radar.sqlite --out site --weeks "$WEEKS"
+      - name: Configure Pages
+        if: steps.db.outputs.found == 'true'
+        uses: actions/configure-pages@v6
+      - name: Upload the site as a Pages artifact
+        if: steps.db.outputs.found == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
