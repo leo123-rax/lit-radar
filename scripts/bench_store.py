@@ -2,7 +2,7 @@
 """Benchmark the SQLite + FTS5 store with synthetic data.
 
     python3 scripts/bench_store.py --n 50000                       # the real Store API, as the pipeline uses it
-    python3 scripts/bench_store.py --n 50000 --load-mode proposed  # same SQL, with the FTS fixes proposed in docs/SCALE.md
+    python3 scripts/bench_store.py --n 50000 --load-mode proposed  # the shipped upsert with only its FTS statements rewritten (docs/SCALE.md 3.1)
     python3 scripts/bench_store.py --n 200000 --json bench.json --keep --db /tmp/bench.sqlite
 
 What it measures, on a temporary database (deleted afterwards unless --keep):
@@ -12,6 +12,9 @@ What it measures, on a temporary database (deleted afterwards unless --keep):
   grows with table size (the FTS delete-by-id in `Store.upsert_paper`) shows up as a falling curve.
 * re-upsert (update path) throughput on a random sample of stored papers.
 * a micro-benchmark of the FTS row lookup by UNINDEXED id versus by rowid (the proposed fix).
+* a micro-benchmark of Chinese (CJK) search: the shipped `porter unicode61` table against a trigram FTS table
+  and a pre-segmented shadow column (docs/SCALE.md 3.4). Synthetic Chinese titles are written the way real
+  ones are, without spaces, so unicode61 keeps each title as a single token.
 * latency of every query the digest and the CLI run: papers_in_window, top_papers, instrument_counts,
   company_counts, new_entities, archive_*_counts, entity_papers, search (several shapes), news_in_window.
   Each query is timed in three states: as stored, after ANALYZE, after the proposed indexes (re-analysed).
@@ -21,10 +24,16 @@ What it measures, on a temporary database (deleted afterwards unless --keep):
 
 Everything is deterministic for a given --seed. No network. Python 3.9+, standard library plus the
 repository's own packages.
+
+Run time: the shipped load path costs O(N) per insert (see docs/SCALE.md 3.1), so a store-mode run grows
+with N^2: 22 min at N=50k on an idle laptop, roughly 6 h at the default N=200k. The script prints that estimate
+before loading; `--load-mode proposed` runs 200k in a couple of minutes.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import inspect
 import json
 import os
 import random
@@ -108,7 +117,8 @@ class Synth:
         pid = f"doi:10.9999/synth.{i}"
         pub_date = "" if self.rng.random() < 0.05 else self._date()
         cjk = self.rng.random() < self.cjk_share
-        title = (" ".join(self.rng.choice(CJK_WORDS) for _ in range(6)) if cjk else self._text(12)).rstrip(".")
+        # real Chinese titles carry no spaces between words: unicode61 then keeps the whole title as one token
+        title = ("".join(self.rng.choice(CJK_WORDS) for _ in range(6)) if cjk else self._text(12)).rstrip(".")
         inst_n = self.rng.choices([0, 1, 2, 3, 4], weights=[35, 30, 20, 10, 5])[0]
         comp_n = self.rng.choices([0, 1, 2], weights=[55, 30, 15])[0]
         sections: Dict[str, str] = {"methods": self._text(120), "funding": self._text(15), "coi": self._text(20)}
@@ -134,7 +144,7 @@ class Synth:
             mentions.append(Mention(pid, "company", f"co-{k:03d}", f"Company {k}", "", f"TK{k % 40}", "", sec, 1, "… synthetic snippet …"))
         affs = [f"Institute {self.rng.randint(0, 999)}, City {self.rng.randint(0, 99)}" for _ in range(self.rng.randint(1, 4))]
         if cjk:
-            affs.append("某大学 生命科学学院")
+            affs.append("某大学生命科学学院")
         p = Paper(
             id=pid, source=self.rng.choice(["biorxiv", "europepmc", "crossref", "openalex", "arxiv", "rss:feed"]),
             title=title, doi=f"10.9999/synth.{i}", abstract=self._text(150), journal=f"Journal {self.rng.randint(0, 80)}",
@@ -201,63 +211,80 @@ def explain(conn: sqlite3.Connection, sql: str, params: Sequence) -> List[str]:
 
 
 # ---------------------------------------------------------------------------------- proposed upsert
-def proposed_upsert(store: Store, p: Paper) -> bool:
-    """`Store.upsert_paper` with two query changes proposed in docs/SCALE.md:
+class ProposedFtsConnection:
+    """Proxy around the store's sqlite3 connection for `--load-mode proposed`.
 
-    1. the FTS row is keyed by the papers.rowid, so the delete on update is a rowid lookup
-       instead of a full scan of the FTS content table (`id` is an UNINDEXED FTS column);
-    2. the delete is skipped entirely when the paper is new.
-    The relational INSERT ... ON CONFLICT is identical to the store's.
+    `Store.upsert_paper` runs unchanged (its relational INSERT ... ON CONFLICT and its Python-side merge
+    of existing rows are the shipped code, not a copy); only its two FTS statements are rewritten into
+    the form proposed in docs/SCALE.md 3.1, keyed by the papers.rowid instead of the UNINDEXED id column:
+
+        DELETE FROM papers_fts WHERE rowid = (SELECT rowid FROM papers WHERE id = ?)   -- no-op for a new paper
+        INSERT INTO papers_fts (rowid, id, ...) SELECT rowid, ?, ... FROM papers WHERE id = ?
+
+    Every other call passes through, so both load modes produce identical relational tables.
     """
-    conn = store.conn
-    row = conn.execute("SELECT rowid FROM papers WHERE id=?", (p.id,)).fetchone()
-    existing = row is not None
-    sections = dict(p.sections)
-    body = sections.pop("body", "")
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    authors_json = json.dumps([a.__dict__ for a in p.authors], ensure_ascii=False)
-    conn.execute(
-        """INSERT INTO papers (id, doi, source, kind, title, abstract, journal, pub_date, url, license,
-             category, published_doi, authors_json, affiliations_json, sections_json, topics_json,
-             fulltext_available, cited_by_count, extra_json, first_seen, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET abstract=excluded.abstract, sections_json=excluded.sections_json,
-             authors_json=excluded.authors_json, affiliations_json=excluded.affiliations_json, updated_at=excluded.updated_at""",
-        (p.id, p.doi, p.source, p.kind, p.title, p.abstract, p.journal, p.pub_date, p.url, p.license, p.category, p.published_doi,
-         authors_json, json.dumps(p.affiliations, ensure_ascii=False), json.dumps(sections, ensure_ascii=False),
-         json.dumps(p.topics), int(p.fulltext_available), int(p.cited_by_count), json.dumps(p.extra), now, now),
-    )
-    if existing:
-        conn.execute("DELETE FROM papers_fts WHERE rowid=?", (row[0],))
-        rowid = row[0]
-    else:
-        rowid = conn.execute("SELECT rowid FROM papers WHERE id=?", (p.id,)).fetchone()[0]
-    conn.execute(
-        "INSERT INTO papers_fts (rowid, id, title, abstract, methods, funding, coi, affiliations, body) VALUES (?,?,?,?,?,?,?,?,?)",
-        (rowid, p.id, p.title, p.abstract, sections.get("methods", ""), sections.get("funding", ""), sections.get("coi", ""),
-         "\n".join(p.affiliations), body),
-    )
-    return not existing
+
+    SHIPPED_DELETE = "DELETE FROM papers_fts WHERE id=?"
+    SHIPPED_INSERT = "INSERT INTO papers_fts (id, title, abstract, methods, funding, coi, affiliations, body) VALUES (?,?,?,?,?,?,?,?)"
+    PROPOSED_DELETE = "DELETE FROM papers_fts WHERE rowid = (SELECT rowid FROM papers WHERE id=?)"
+    PROPOSED_INSERT = ("INSERT INTO papers_fts (rowid, id, title, abstract, methods, funding, coi, affiliations, body) "
+                       "SELECT rowid, ?,?,?,?,?,?,?,? FROM papers WHERE id=?")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: Sequence = ()):
+        if sql == self.SHIPPED_DELETE:
+            return self._conn.execute(self.PROPOSED_DELETE, params)
+        if sql == self.SHIPPED_INSERT:
+            return self._conn.execute(self.PROPOSED_INSERT, tuple(params) + (params[0],))
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    @classmethod
+    def check_store_source(cls) -> None:
+        """Fail loudly if store.py no longer contains the two statements this proxy rewrites."""
+        src = inspect.getsource(Store.upsert_paper)
+        for stmt in (cls.SHIPPED_DELETE, cls.SHIPPED_INSERT):
+            if stmt not in src:
+                raise SystemExit(f"Store.upsert_paper no longer contains {stmt!r}; update ProposedFtsConnection")
+
+
+@contextlib.contextmanager
+def load_mode(store: Store, mode: str):
+    """Swap the store's connection for the proxy while mode == 'proposed'; restore it afterwards so the
+    query phases run against the plain connection."""
+    if mode != "proposed":
+        yield
+        return
+    real = store.conn
+    store.conn = ProposedFtsConnection(real)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        store.conn = real
 
 
 # ---------------------------------------------------------------------------------- phases
 def load(store: Store, synth: Synth, n: int, batch: int, mode: str, checkpoint: int = 10000) -> Dict[str, Any]:
-    upsert = store.upsert_paper if mode == "store" else (lambda p: proposed_upsert(store, p))
     t0 = _now_ms()
     last_t, last_i = t0, 0
     curve: List[Dict[str, Any]] = []
-    for i in range(1, n + 1):
-        p, mentions, score = synth.paper(i)
-        upsert(p)
-        store.replace_mentions(p.id, mentions)
-        store.save_score(p.id, score, None, score, "synthetic")
-        if i % batch == 0:
-            store.commit()
-        if i % checkpoint == 0 or i == n:
-            now = _now_ms()
-            curve.append({"through": i, "papers_per_s": round((i - last_i) / max((now - last_t) / 1000.0, 1e-9), 1)})
-            last_t, last_i = now, i
-    store.commit()
+    with load_mode(store, mode):
+        for i in range(1, n + 1):
+            p, mentions, score = synth.paper(i)
+            store.upsert_paper(p)
+            store.replace_mentions(p.id, mentions)
+            store.save_score(p.id, score, None, score, "synthetic")
+            if i % batch == 0:
+                store.commit()
+            if i % checkpoint == 0 or i == n:
+                now = _now_ms()
+                curve.append({"through": i, "papers_per_s": round((i - last_i) / max((now - last_t) / 1000.0, 1e-9), 1)})
+                last_t, last_i = now, i
+        store.commit()
     total_s = (_now_ms() - t0) / 1000.0
     # the store stamps first_seen with the load time; a real corpus accumulates over years, so backdate it
     # to the publication date plus 0-6 days (papers without a date keep "seen now", like undated feeds)
@@ -272,14 +299,14 @@ def load(store: Store, synth: Synth, n: int, batch: int, mode: str, checkpoint: 
 def reupsert(store: Store, synth: Synth, n: int, sample: int, mode: str) -> Dict[str, Any]:
     rng = random.Random(1234)
     ids = rng.sample(range(1, n + 1), min(sample, n))
-    upsert = store.upsert_paper if mode == "store" else (lambda p: proposed_upsert(store, p))
     t0 = _now_ms()
-    for i in ids:
-        p, mentions, _ = synth.paper(i)
-        p.abstract = p.abstract + " Updated."
-        upsert(p)
-        store.replace_mentions(p.id, mentions)
-    store.commit()
+    with load_mode(store, mode):
+        for i in ids:
+            p, mentions, _ = synth.paper(i)  # a fresh draw for the same id: the update path with changed content
+            p.abstract = p.abstract + " Updated."
+            store.upsert_paper(p)
+            store.replace_mentions(p.id, mentions)
+        store.commit()
     s = (_now_ms() - t0) / 1000.0
     return {"mode": mode, "papers": len(ids), "seconds": round(s, 2), "papers_per_s": round(len(ids) / max(s, 1e-9), 1)}
 
@@ -296,6 +323,82 @@ def fts_lookup_micro(conn: sqlite3.Connection, n: int, probes: int = 20) -> Dict
         "plan_by_id": explain(conn, "SELECT rowid FROM papers_fts WHERE id=?", (ids[0],)),
         "plan_by_rowid": explain(conn, "SELECT rowid FROM papers_fts WHERE rowid=?", (1,)),
     }
+
+
+def segment_cjk(text: str, vocab: Sequence[str]) -> str:
+    """Greedy longest-match segmentation against a fixed vocabulary, returned space-separated so unicode61
+    indexes one token per word. A stand-in for a real segmenter (jieba, pkuseg, ...) in the micro-benchmark."""
+    words = sorted(vocab, key=len, reverse=True)
+    out: List[str] = []
+    i = 0
+    while i < len(text):
+        for w in words:
+            if text.startswith(w, i):
+                out.append(w)
+                i += len(w)
+                break
+        else:
+            out.append(text[i])
+            i += 1
+    return " ".join(out)
+
+
+def cjk_search_micro(store: Store, repeat: int) -> Dict[str, Any]:
+    """Chinese search on the shipped table versus the two options in docs/SCALE.md 3.4.
+
+    * `papers_fts` (porter unicode61): every CJK code point is a token character, so an unspaced title is one
+      token and a substring query finds nothing.
+    * a trigram FTS table over the CJK papers' title + affiliations: finds substrings of >= 3 characters; FTS5
+      documents that queries shorter than 3 unicode characters match no rows (https://www.sqlite.org/fts5.html).
+    * a unicode61 table over a pre-segmented (space-separated) copy of the title: finds whole words of any
+      length, including 2-character terms, but only words the segmenter knows.
+    `LIKE '%..%'` on papers.title is included as the no-index baseline. The helper tables are dropped afterwards.
+    """
+    conn = store.conn
+    rows = conn.execute(
+        "SELECT rowid, id, title, affiliations_json FROM papers WHERE unicode(substr(title,1,1)) BETWEEN 19968 AND 40959"
+    ).fetchall()  # U+4E00..U+9FFF: CJK Unified Ideographs
+    out: Dict[str, Any] = {"cjk_papers": len(rows)}
+    if not rows:
+        return out
+    sample = rows[0][2]
+    words = segment_cjk(sample, CJK_WORDS).split()
+    three = next((w for w in words if len(w) == 3), sample[:3])
+    two = next((w for w in words if len(w) == 2), sample[:2])
+    out["queries"] = {"three_char": three, "two_char": two, "sample_title": sample}
+    out["unicode61_three_char"] = timed(lambda: store.search(three), repeat)
+    out["unicode61_two_char"] = timed(lambda: store.search(two), repeat)
+    out["like_scan_three_char"] = timed(lambda: conn.execute("SELECT id FROM papers WHERE title LIKE ?", (f"%{three}%",)).fetchall(), repeat)
+    conn.execute("DROP TABLE IF EXISTS bench_fts_cjk")
+    conn.execute("DROP TABLE IF EXISTS bench_fts_cjk_seg")
+    try:
+        t = _now_ms()
+        conn.execute("CREATE VIRTUAL TABLE bench_fts_cjk USING fts5(id UNINDEXED, title, affiliations, tokenize = 'trigram')")
+        conn.executemany("INSERT INTO bench_fts_cjk (rowid, id, title, affiliations) VALUES (?,?,?,?)", rows)
+        store.commit()
+        out["trigram_available"] = True
+        out["trigram_build_seconds"] = round((_now_ms() - t) / 1000.0, 3)
+        out["trigram_three_char"] = timed(lambda: conn.execute("SELECT id FROM bench_fts_cjk WHERE bench_fts_cjk MATCH ?", (three,)).fetchall(), repeat)
+        out["trigram_two_char"] = timed(lambda: conn.execute("SELECT id FROM bench_fts_cjk WHERE bench_fts_cjk MATCH ?", (two,)).fetchall(), repeat)
+        try:
+            out["trigram_bytes"] = conn.execute("SELECT SUM(pgsize) FROM dbstat WHERE name LIKE 'bench_fts_cjk_%'").fetchone()[0]
+        except sqlite3.OperationalError:
+            out["trigram_bytes"] = None
+    except sqlite3.OperationalError as exc:  # SQLite < 3.34 has no trigram tokenizer
+        out["trigram_available"] = False
+        out["trigram_error"] = str(exc)
+    t = _now_ms()
+    conn.execute("CREATE VIRTUAL TABLE bench_fts_cjk_seg USING fts5(id UNINDEXED, title, tokenize = 'unicode61')")
+    conn.executemany("INSERT INTO bench_fts_cjk_seg (rowid, id, title) VALUES (?,?,?)",
+                     [(r[0], r[1], segment_cjk(r[2], CJK_WORDS)) for r in rows])
+    store.commit()
+    out["segmented_build_seconds"] = round((_now_ms() - t) / 1000.0, 3)
+    out["segmented_two_char"] = timed(lambda: conn.execute("SELECT id FROM bench_fts_cjk_seg WHERE bench_fts_cjk_seg MATCH ?", (two,)).fetchall(), repeat)
+    out["segmented_three_char"] = timed(lambda: conn.execute("SELECT id FROM bench_fts_cjk_seg WHERE bench_fts_cjk_seg MATCH ?", (three,)).fetchall(), repeat)
+    conn.execute("DROP TABLE IF EXISTS bench_fts_cjk")
+    conn.execute("DROP TABLE IF EXISTS bench_fts_cjk_seg")
+    store.commit()
+    return out
 
 
 WINDOW_SQL = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND substr(p.first_seen,1,10) >= ?))"
@@ -443,6 +546,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         tmpdir = tempfile.mkdtemp(prefix="litradar-bench-")
         db_path = Path(tmpdir) / "bench.sqlite"
     synth = Synth(args.seed, years=args.years, fulltext_share=args.fulltext_share, body_words=args.body_words)
+    ProposedFtsConnection.check_store_source()
     store = Store(db_path)
     report: Dict[str, Any] = {
         "params": vars(args), "sqlite_version": sqlite3.sqlite_version, "python": sys.version.split()[0], "db": str(db_path),
@@ -450,6 +554,11 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     print(f"[bench] sqlite {sqlite3.sqlite_version}; db {db_path}; N={args.n} papers, {args.archive_n} archive records, {args.news_n} news", flush=True)
 
     # 1. load
+    if args.load_mode == "store" and args.n > 50000:
+        est_min = args.n * args.n / 50000 ** 2 * 22
+        print(f"[bench] note: the shipped upsert cost grows linearly with the corpus (FTS delete by UNINDEXED id), "
+              f"so load time grows with N^2: expect roughly {est_min:.0f} min for N={args.n} (22 min measured at 50k); "
+              f"use --load-mode proposed for a fast run", flush=True)
     report["load"] = load(store, synth, args.n, args.batch, args.load_mode)
     print(f"[bench] load ({args.load_mode}): {report['load']['papers_per_s']} papers/s over {report['load']['seconds']} s; curve {[c['papers_per_s'] for c in report['load']['curve']]}", flush=True)
     t = _now_ms()
@@ -503,6 +612,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         report["queries_after_indexes"] = query_suite(store, synth, args.repeat)
         print("[bench] queries (+ANALYZE +indexes):", {k: v["median_ms"] for k, v in report["queries_after_indexes"].items()}, flush=True)
 
+    # 4. Chinese search: shipped tokenizer vs trigram vs pre-segmented (helper tables are dropped again)
+    report["cjk_search"] = cjk_search_micro(store, args.repeat)
+    cj = report["cjk_search"]
+    if cj.get("cjk_papers"):
+        print(f"[bench] CJK search ({cj['cjk_papers']} Chinese titles): unicode61 {cj['unicode61_three_char']['rows']} hits for "
+              f"{cj['queries']['three_char']!r}; trigram {cj.get('trigram_three_char', {}).get('rows')} hits, "
+              f"{cj.get('trigram_two_char', {}).get('rows')} for the 2-char {cj['queries']['two_char']!r}; "
+              f"segmented+unicode61 {cj['segmented_two_char']['rows']} hits for the 2-char term", flush=True)
+
     store.close()
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
@@ -526,7 +644,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--news-n", type=int, default=None, help="synthetic news items (default: --n / 20)")
     ap.add_argument("--batch", type=int, default=1000, help="papers per commit")
     ap.add_argument("--load-mode", choices=["store", "proposed"], default="store",
-                    help="store = Store.upsert_paper as shipped; proposed = rowid-keyed FTS rows and no delete for new papers")
+                    help="store = Store.upsert_paper as shipped; proposed = the same upsert with its FTS rows keyed by rowid (docs/SCALE.md 3.1)")
     ap.add_argument("--update-sample", type=int, default=1000, help="papers to re-upsert for the update-path timing")
     ap.add_argument("--repeat", type=int, default=5, help="repetitions per query")
     ap.add_argument("--years", type=int, default=3, help="spread of publication dates")

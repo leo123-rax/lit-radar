@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import re
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -194,7 +195,9 @@ def cmd_export(args) -> int:
             except export_mod.OptionalDependencyMissing as exc:
                 print(f"--duckdb skipped: {exc}", file=sys.stderr)
                 failed = True
-    except (FileNotFoundError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        # OSError covers a missing database, an output path that is a file, an unwritable destination;
+        # sqlite3.Error covers "file is not a database" and locked/corrupt files
         print(f"export failed: {exc}", file=sys.stderr)
         return 1
     for rep in reports:

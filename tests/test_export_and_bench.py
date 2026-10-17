@@ -2,6 +2,7 @@
 and a smoke test of scripts/bench_store.py at a tiny N."""
 import csv
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -154,6 +155,40 @@ def test_export_bare_copy_of_wal_database(seeded_db, tmp_path):
     assert rep.tables[0].rows == 5
 
 
+def test_export_wal_database_in_unwritable_directory_raises_the_sqlite_error(seeded_db, tmp_path):
+    # a WAL database WITH a -wal file whose directory cannot take the -shm file: mode=ro fails for a real
+    # reason, and open_readonly must surface that sqlite3 error, not fall back to immutable=1
+    import shutil
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("directory permissions do not restrict root")
+    d = tmp_path / "ro-dir"
+    d.mkdir()
+    db = d / "live.sqlite"
+    shutil.copy(seeded_db, db)
+    (d / "live.sqlite-wal").write_bytes(b"")
+    d.chmod(0o555)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            export.open_readonly(db)
+    finally:
+        d.chmod(0o755)
+
+
+def test_chinese_title_is_one_unicode61_token(seeded_db):
+    """Documents the limitation behind docs/SCALE.md 3.4: the shipped FTS table uses `porter unicode61`,
+    which treats every CJK code point as a token character, so an unspaced Chinese title is indexed as a
+    single token. A substring query finds nothing; only the whole run (or a space-separated word) matches."""
+    st = Store(seeded_db)
+    try:
+        assert st.search("转录组") == []  # 3-character substring of CJK_TITLE: no hit
+        assert st.search("肿瘤") == []  # 2-character substring: no hit
+        assert [r["id"] for r in st.search(CJK_TITLE)] == ["doi:10.1000/exp2"]  # the whole title is the token
+        assert [r["id"] for r in st.search("生命科学学院")] == ["doi:10.1000/exp2"]  # space-separated affiliation word
+    finally:
+        st.close()
+
+
 # ---------------------------------------------------------------------------- optional dependencies
 def test_parquet_request_falls_back_to_csv_without_pyarrow(seeded_db, tmp_path, monkeypatch):
     monkeypatch.setattr(export, "_import_pyarrow", lambda: None)
@@ -209,6 +244,15 @@ def test_cli_export_csv(seeded_db, tmp_path, capsys):
     assert cli.main(["export", "--csv", str(out), "--db", str(tmp_path / "nope.sqlite")]) == 1
 
 
+def test_cli_export_bad_inputs_exit_1_with_message(seeded_db, tmp_path, capsys):
+    text_file = tmp_path / "notes.txt"
+    text_file.write_text("this is not a database\n", encoding="utf-8")
+    assert cli.main(["export", "--csv", str(tmp_path / "out"), "--db", str(text_file)]) == 1  # sqlite3.DatabaseError
+    assert "export failed" in capsys.readouterr().err
+    assert cli.main(["export", "--csv", str(text_file), "--db", str(seeded_db)]) == 1  # output dir is an existing file
+    assert "export failed" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------- benchmark script smoke test
 def test_bench_script_small_n(tmp_path):
     out = tmp_path / "bench.json"
@@ -221,5 +265,29 @@ def test_bench_script_small_n(tmp_path):
     assert rep["reupsert"]["papers"] == 10 and rep["counts"]["papers"] == 80  # updates do not add rows
     for phase in ("queries_before", "queries_after_indexes", "queries_after_analyze"):
         assert "instrument_counts_7d" in rep[phase] and rep[phase]["search_rare_word"]["rows"] == 0
+        assert rep[phase]["search_cjk_unicode61"]["rows"] == 0  # unspaced synthetic Chinese titles: one token each
     assert rep["fts_lookup"]["plan_by_id"] and "SCAN" in rep["fts_lookup"]["plan_by_id"][0]
+    assert rep["equivalence"] == {"instrument_counts": True, "company_counts": True, "new_entities": True}
+    cjk = rep["cjk_search"]
+    assert cjk["cjk_papers"] > 0 and cjk["unicode61_three_char"]["rows"] == 0 and cjk["unicode61_two_char"]["rows"] == 0
+    assert cjk["like_scan_three_char"]["rows"] > 0 and cjk["segmented_two_char"]["rows"] > 0
+    if cjk["trigram_available"]:  # SQLite >= 3.34
+        assert cjk["trigram_three_char"]["rows"] == cjk["like_scan_three_char"]["rows"] and cjk["trigram_two_char"]["rows"] == 0
     assert not Path(rep["db"]).exists()  # temp database removed
+
+
+def test_bench_proposed_mode_matches_store_mode(tmp_path):
+    # --load-mode proposed runs the shipped upsert through a proxy that rewrites only the FTS statements,
+    # so both modes must end with identical relational tables (same counts, same Chinese-title count)
+    reports = {}
+    for mode in ("store", "proposed"):
+        out = tmp_path / f"{mode}.json"
+        cmd = [sys.executable, str(ROOT / "scripts" / "bench_store.py"), "--n", "60", "--archive-n", "20", "--news-n", "5",
+               "--repeat", "1", "--update-sample", "15", "--skip-after", "--load-mode", mode, "--json", str(out)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, proc.stderr
+        reports[mode] = json.loads(out.read_text(encoding="utf-8"))
+    a, b = reports["store"], reports["proposed"]
+    assert a["counts"] == b["counts"] and a["cjk_search"]["cjk_papers"] == b["cjk_search"]["cjk_papers"] > 0
+    assert a["load"]["mode"] == "store" and b["load"]["mode"] == "proposed"
+    assert "SCAN" in a["fts_lookup"]["plan_by_id"][0] and "SCAN" in b["fts_lookup"]["plan_by_id"][0]  # the id column stays UNINDEXED in both

@@ -19,7 +19,11 @@ Reference behaviour checked against the official documentation:
 * DuckDB SQLite extension: `ATTACH 'file.sqlite' AS src (TYPE sqlite, READ_ONLY)`; the extension
   autoloads on first use. Declared SQLite types map INT->BIGINT, TEXT->VARCHAR, REAL->DOUBLE; a value
   that does not match its declared type raises a "Mismatch Type Error" (we fall back to a row copy).
-  https://duckdb.org/docs/current/core_extensions/sqlite.html
+  https://duckdb.org/docs/current/core_extensions/sqlite.html (TYPE sqlite, type mapping)
+  https://duckdb.org/docs/current/sql/statements/attach.html (READ_ONLY is a general ATTACH option:
+  "Attach the database in read-only mode"). DuckDB's attach is an ordinary SQLite reader, so it may
+  create -wal/-shm side files next to the source (observed with DuckDB 1.4.5 on a read-only copy); the
+  file contents are never modified. Only the Python mode=ro / immutable=1 path leaves no side files.
 * SQLite read-only URI: `file:path?mode=ro` (https://www.sqlite.org/uri.html). A `BEGIN` before the
   first SELECT pins one WAL snapshot for every table, so the export is consistent even while the
   weekly job is writing. A bare copy of a WAL database (no -wal/-shm files) cannot be opened with
@@ -112,13 +116,16 @@ def open_readonly(db_path: Path) -> sqlite3.Connection:
     try:
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")  # the open is lazy; force it
         return conn
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         conn.close()
+        err = exc
     # A WAL-mode database whose -wal/-shm side files do not exist (a bare copy, a restored snapshot)
     # cannot be opened with mode=ro, which refuses to create them. Nobody has such a file open, so it
     # is safe to treat it as immutable (no locking, no shared memory); see https://www.sqlite.org/uri.html
+    # When a -wal file exists the failure is something else (an unwritable directory for the -shm file,
+    # a lock): re-raise the real SQLite error instead of pretending the file is immutable.
     if Path(str(db_path) + "-wal").exists():
-        raise
+        raise err
     log.info("opening %s as immutable (WAL database without side files)", db_path)
     return sqlite3.connect(uri + "&immutable=1", uri=True)
 

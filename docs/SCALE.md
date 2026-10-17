@@ -39,10 +39,13 @@ within months at global scope. That, not query speed, is the first wall (section
 ## 2. Benchmark: what the current design costs
 
 `scripts/bench_store.py` builds a temporary database with N synthetic papers (abstract ~150 words,
-Methods ~120 words, 30% with a 400-word body, 10% with Chinese titles and affiliations), 0-4
-instrument and 0-2 company mentions per paper with a heavy-tailed popularity, a score per paper,
-N archive records and N/20 news items spread over three years, then times the shipped
-`Store` API and every query the digest and CLI run.
+Methods ~120 words, 30% with a 400-word body, 10% with Chinese titles and affiliations written
+without spaces, as real ones are), 0-4 instrument and 0-2 company mentions per paper with a
+heavy-tailed popularity, a score per paper, N archive records and N/20 news items spread over
+three years, then times the shipped `Store` API and every query the digest and CLI run, and
+finishes with a Chinese-search micro-benchmark (2.3). A store-mode run costs O(N²) because of the
+finding in 2.1 (22 min at 50 K measured, *estimate* ~6 h at the default 200 K; the script prints
+the estimate before loading); `--load-mode proposed` is the fast path.
 
 ```bash
 python3 scripts/bench_store.py --n 50000                        # shipped Store.upsert_paper
@@ -50,62 +53,70 @@ python3 scripts/bench_store.py --n 50000 --load-mode proposed   # with the FTS f
 python3 scripts/bench_store.py --n 200000 --json bench.json --keep --db /tmp/bench.sqlite
 ```
 
-### 2.1 Write path (N = 50,000, measured)
+### 2.1 Write path (N = 50,000, measured; two sequential runs on an idle laptop)
 
 | metric | shipped `Store.upsert_paper` | proposed upsert (section 3.1) |
 |---|---|---|
-| load throughput, papers/s, first 10 K → last 10 K | **166 → 19** (falls with N) | 7,586 → 6,725 (flat) |
-| load throughput, whole run | 32 papers/s (1,569 s for 50 K) | 7,222 papers/s (6.9 s for 50 K) |
-| re-upsert 1,000 existing papers (update path) | 18.3 papers/s | 3,282 papers/s |
-| FTS row lookup by `id` (UNINDEXED column), per lookup | **77 ms** at 50 K rows (3.5 ms at 3 K rows: linear) | 0.013 ms by rowid |
-| archive records (`upsert_archive_records`, INSERT OR IGNORE) | 170,000 records/s | same |
-| database size after load | 624 MB (12.5 KB per synthetic paper) | same |
+| load throughput, papers/s, first 10 K → last 10 K | **218 → 21** (falls with N) | 7,192 → 5,885 (near-flat) |
+| load throughput, whole run | 38 papers/s (1,321 s for 50 K) | 6,478 papers/s (7.7 s for 50 K) |
+| re-upsert 1,000 existing papers (update path) | 19.8 papers/s | 3,080 papers/s |
+| FTS row lookup by `id` (UNINDEXED column), per lookup | **64 ms** at 50 K rows (3.0 ms at 3 K rows: linear) | 0.011 ms by rowid |
+| archive records (`upsert_archive_records`, INSERT OR IGNORE) | 180,914 records/s | same |
+| database size after load | 624 MB in total; 11.7 KB per synthetic paper in `papers` + FTS + their indexes | same |
 
 **The finding.** `Store.upsert_paper` runs `DELETE FROM papers_fts WHERE id=?` on every paper, new
 or not. `id` is an `UNINDEXED` FTS5 column, so that statement is a full scan of the FTS content
 table (`EXPLAIN QUERY PLAN` → `SCAN papers_fts VIRTUAL TABLE INDEX 0:`), and its cost grows
-linearly with the corpus: 3.5 ms at 3 K papers, 76 ms at 50 K, and (*estimate*) ~1.5 s at
+linearly with the corpus: 3.0 ms at 3 K papers, 64 ms at 50 K, and (*estimate*) ~1.5 s at
 1 M papers. A weekly run of 5 K papers against a 1 M-paper corpus would spend about two hours in
 that one statement. This is the single change that matters for the write path.
 
 ### 2.2 Read path (N = 50,000 papers, 60 K instrument mentions, three-year spread; median ms)
 
+Provenance: this table is the **shipped-store run** (`--load-mode store`, the same run as the left
+column of 2.1), with the proposed-mode run made immediately afterwards on an otherwise idle
+machine. The two runs hold identical relational tables (same seed; only the FTS rowids of the
+1,000 re-upserted papers differ), and their as-stored read-path medians agree to within
+11% (1% median), which is the noise band for this table. An earlier
+version of this note used two overlapping runs, one of them with an older script that measured
+"+indexes" *before* ANALYZE; that made `idx_mentions_kind_paper` look like a 2x regression of
+`instrument_counts`, which was the missing statistics, not the index.
+
 "As stored" is the schema in this change (it already contains `idx_mentions_entity_id`, see
 below); "+ANALYZE" adds only planner statistics; "+indexes" adds the remaining candidate indexes
 (`idx_mentions_kind_paper`, `idx_archive_public_model`) and re-runs ANALYZE. `PROPOSED_*` rows
 are the query rewrites in section 3.2, run on the same data and checked to return the same
-entities and counts as the shipped queries. Medians of 5 runs; a second benchmark process was
-loading data on the same machine during this run, so treat differences under ~10% as noise.
+entities and counts as the shipped queries. Medians of 5 runs, milliseconds.
 
 | query | rows | as stored | +ANALYZE | +indexes |
 |---|---:|---:|---:|---:|
-| papers_in_window, 7-day window | 2797 | 34.77 | 33.88 | 34.99 |
-| papers_in_window, 365-day window | 18231 | 228.92 | 233.46 | 230.68 |
-| top_papers, 7 days | 25 | 34.87 | 34.96 | 33.62 |
-| instrument_counts, 7 days | 60 | 387.37 | 197.74 | 200.77 |
-| instrument_counts, 30 days | 60 | 391.27 | 197.99 | 202.31 |
-| instrument_counts, 365 days | 60 | 386.67 | 255.79 | 258.7 |
-| PROPOSED instrument_counts, 7 days (3.2) | 60 | 13.18 | 12.48 | 12.0 |
-| PROPOSED instrument_counts, 365 days (3.2) | 60 | 89.56 | 88.98 | 85.28 |
-| company_counts, 7 days | 60 | 210.41 | 111.03 | 112.88 |
-| company_counts, 365 days | 60 | 216.55 | 169.17 | 152.13 |
-| PROPOSED company_counts, 7 days (3.2) | 60 | 10.49 | 10.77 | 9.98 |
-| new_entities (instrument), 7 days | 0 | 223.39 | 219.3 | 214.5 |
-| PROPOSED new_entities, 7 days (3.2) | 0 | 8.99 | 10.34 | 9.1 |
-| archive_instrument_counts, 7 days | 33 | 0.25 | 0.24 | 0.36 |
-| archive_instrument_counts, 365 days (16 K rows) | 58 | 11.38 | 10.57 | 10.94 |
-| archive_strategy_counts, 7 days | 10 | 0.12 | 0.16 | 0.17 |
-| entity_papers, most popular entity | 100 | 8.99 | 9.57 | 9.19 |
-| entity_papers, rare entity | 21 | 0.08 | 0.08 | 0.08 |
-| entity_papers, popular entity, since 90d | 100 | 7.36 | 8.05 | 7.13 |
-| search, word in most documents | 50 | 238.85 | 247.45 | 245.24 |
-| search, same word, --since 90d | 50 | 236.53 | 217.52 | 239.43 |
-| search, word in no document | 0 | 0.05 | 0.05 | 0.05 |
-| search, phrase "single cell" | 50 | 37.73 | 39.03 | 37.71 |
-| search, --in methods | 50 | 188.2 | 195.42 | 192.77 |
-| search, Chinese substring (unicode61: 0 hits) | 50 | 10.64 | 10.66 | 10.38 |
-| news_in_window, 7 days | 200 | 1.23 | 1.2 | 1.24 |
-| counts (6 COUNT(*)) | 6 | 0.14 | 0.15 | 0.14 |
+| papers_in_window, 7-day window | 2749 | 28.29 | 28.5 | 28.79 |
+| papers_in_window, 365-day window | 18160 | 192.95 | 189.85 | 192.44 |
+| top_papers, 7 days | 25 | 28.87 | 28.57 | 29.53 |
+| instrument_counts, 7 days | 60 | 288.24 | 149.28 | 152.58 |
+| instrument_counts, 30 days | 60 | 282.73 | 148.54 | 158.32 |
+| instrument_counts, 365 days | 60 | 287.08 | 189.67 | 201.15 |
+| PROPOSED instrument_counts, 7 days (3.2) | 60 | 9.78 | 10.16 | 9.79 |
+| PROPOSED instrument_counts, 365 days (3.2) | 60 | 67.56 | 69.87 | 71.64 |
+| company_counts, 7 days | 60 | 150.97 | 84.27 | 87.47 |
+| company_counts, 365 days | 60 | 155.17 | 120.44 | 124.83 |
+| PROPOSED company_counts, 7 days (3.2) | 60 | 7.84 | 7.91 | 7.74 |
+| new_entities (instrument), 7 days | 0 | 160.21 | 162.28 | 171.8 |
+| PROPOSED new_entities, 7 days (3.2) | 0 | 6.8 | 6.8 | 7.03 |
+| archive_instrument_counts, 7 days | 33 | 0.24 | 0.23 | 0.24 |
+| archive_instrument_counts, 365 days (16 K rows) | 58 | 10.07 | 10.01 | 10.09 |
+| archive_strategy_counts, 7 days | 10 | 0.12 | 0.13 | 0.12 |
+| entity_papers, most popular entity | 100 | 7.26 | 7.06 | 7.43 |
+| entity_papers, rare entity | 21 | 0.07 | 0.06 | 0.07 |
+| entity_papers, popular entity, since 90d | 100 | 5.46 | 5.38 | 5.68 |
+| search, word in most documents | 50 | 204.37 | 204.13 | 209.85 |
+| search, same word, --since 90d | 50 | 191.36 | 192.78 | 197.0 |
+| search, word in no document | 0 | 0.04 | 0.04 | 0.04 |
+| search, phrase "single cell" | 50 | 32.81 | 33.34 | 33.72 |
+| search, --in methods | 50 | 160.62 | 164.52 | 166.7 |
+| search, Chinese 3-character substring (unicode61, see 2.3) | 0 | 0.04 | 0.04 | 0.04 |
+| news_in_window, 7 days | 200 | 1.04 | 1.04 | 1.07 |
+| counts (6 COUNT(*)) | 6 | 0.11 | 0.13 | 0.12 |
 
 Reading the table:
 
@@ -127,36 +138,54 @@ Reading the table:
   index is now in the schema (additive `CREATE INDEX IF NOT EXISTS`, 2.7 MB at 50 K papers,
   0.07 s to build on an existing database).
 * **FTS search is proportional to the number of matching documents**, because bm25 ranking has
-  to score every hit before `LIMIT`: a word present in most documents costs ~240 ms at 50 K
-  papers, a rare word 0.05 ms, a phrase 36 ms. The `--since` filter does not help because it is
+  to score every hit before `LIMIT`: a word present in most documents costs 204 ms at 50 K
+  papers, a word in no document 0.04 ms, a phrase 33 ms. The `--since` filter does not help because it is
   applied after the FTS scan. Section 3.3 has the fix (a date token column inside the FTS table).
-* **Archive queries are cheap** (index range scan + GROUP BY): 0.26 ms for a 7-day window at this
-  density; the 365-day window (16 K rows, ~11 ms) is the closer proxy for one real week (123 K rows,
+* **Archive queries are cheap** (index range scan + GROUP BY): 0.24 ms for a 7-day window at this
+  density; the 365-day window (16 K rows, 10 ms) is the closer proxy for one real week (123 K rows,
   *estimate* ~90 ms).
 * The 7-day window holds 2,797 rows, not ~320, because the 5% of synthetic papers without a
   publication date count as "first seen this week", exactly as undated feed items do in the real
   store; `papers_in_window` cost is row materialisation (every column, JSON included) at ~13 µs
   per row.
-* The other two candidate indexes did not pay for themselves: `idx_mentions_kind_paper` only
-  matters when ANALYZE has not run (the primary key already serves the papers-first plan), and
-  `idx_archive_public_model` turns the archive scan into a covering scan with no measurable gain.
-  Neither is added.
+* The other two candidate indexes did not pay for themselves: with statistics present the planner
+  does pick `idx_mentions_kind_paper (kind=? AND paper_id=?)` for the mention lookup once it exists,
+  but the time of `instrument_counts` / `company_counts` is unchanged (149 vs 153 ms; compare the
+  +ANALYZE and +indexes columns) because the primary key already served the same papers-first
+  plan; `idx_archive_public_model` turns the archive scan into a covering scan with no measurable
+  gain. Neither is added.
 
 ### 2.3 Unicode and Chinese text
 
-The FTS table uses `tokenize = 'porter unicode61'`. unicode61 splits on spaces and punctuation, so
-a Chinese title becomes one token per run of characters and `litradar search 转录组` finds
-nothing (measured: 0 hits against a stored Chinese title; the bench's `search_cjk_unicode61` row
-is this case). SQLite's `trigram` tokenizer (3.34+) indexes every 3-character window and finds
-the substring. Proposal (section 3.4): a second FTS table with the trigram tokenizer for
-title + abstract, roughly 3x the index size of those two columns.
+The FTS table uses `tokenize = 'porter unicode61'`. unicode61 treats every character in the
+Unicode letter and number categories as a token character and splits only on spaces and
+punctuation (https://www.sqlite.org/fts5.html, 4.3.1). Chinese is written without spaces between
+words, so a whole title such as 空间转录组学方法在肿瘤研究中的应用 is indexed as **one token**, and
+`litradar search 转录组` finds nothing: FTS5 matches whole tokens, not substrings. The bench's
+`search_cjk_unicode61` row above is this case (0 rows), and
+`tests/test_export_and_bench.py::test_chinese_title_is_one_unicode61_token` pins it offline.
+
+The bench then measures the two ways out proposed in 3.4 on the same database (`cjk_search` in the
+JSON report; N = 50 K, 4,894 Chinese titles, the 3-character term 基因组 and the
+2-character term 图谱 both taken from a stored title):
+
+| approach | 3-character term | 2-character term | cost |
+|---|---|---|---|
+| shipped `papers_fts` (porter unicode61) | **0 hits, 0.03 ms** | 0 hits, 0.03 ms | — |
+| `LIKE '%term%'` on `papers.title` (no index) | 1412 hits, 26.89 ms | works | full scan of papers per query |
+| trigram FTS table over the CJK papers' title + affiliations (3.4) | 1412 hits, 1.17 ms | **0 hits, 0.0 ms** (FTS5: under 3 characters matches nothing) | 2.7 MB, built in 0.023 s |
+| pre-segmented shadow column (space-separated words, unicode61) | 1412 hits, 1.06 ms | 1349 hits, 1.02 ms | needs a segmenter; built in 0.025 s; finds only words the segmenter knows |
+
+The real database has no Chinese titles yet (its sources are English-language indexes; checked
+on the 2026-10-17 snapshot), so the table is synthetic. The tokenizer behaviour is a property of
+SQLite, verified on 3.51.0 with the test above.
 
 ## 3. Changes inside SQLite (proposals, measured where possible)
 
 Only one item below is applied in this change (the index in 3.5); the rest are proposals that
 touch `litradar/store.py` queries and belong in a dedicated change with a migration.
 
-### 3.1 Key the FTS row by rowid; skip the delete for new papers
+### 3.1 Key the FTS row by rowid
 
 `papers` is a rowid table, so every paper has a stable integer rowid as long as the table is never
 `VACUUM`ed into new rowids (it is not; and `INTEGER PRIMARY KEY` would make it explicit). Write the
@@ -164,12 +193,12 @@ FTS row with that rowid and delete by it:
 
 ```sql
 -- in upsert_paper, after the INSERT ... ON CONFLICT on papers:
-DELETE FROM papers_fts WHERE rowid = (SELECT rowid FROM papers WHERE id = ?);   -- only when the paper existed
+DELETE FROM papers_fts WHERE rowid = (SELECT rowid FROM papers WHERE id = ?);   -- a rowid lookup; no-op for a new paper
 INSERT INTO papers_fts (rowid, id, title, abstract, methods, funding, coi, affiliations, body)
   SELECT rowid, ?, ?, ?, ?, ?, ?, ?, ? FROM papers WHERE id = ?;
 ```
 
-Measured: lookup by rowid 0.013 ms vs 77 ms by `id` at 50 K papers; load throughput flat at
+Measured: lookup by rowid 0.011 ms vs 64 ms by `id` at 50 K papers; load throughput flat at
 ~7 K papers/s instead of falling with N. One-time migration for existing databases:
 `INSERT INTO papers_fts(papers_fts) VALUES('rebuild')` is not enough because the rowids are
 unrelated; rebuild the table from `papers` + the old FTS body column with
@@ -244,16 +273,35 @@ Add an FTS column `when_` holding tokens like `y2026 y2026m10 y2026w42` and quer
 `litradar search "Xenium" --since 90d` scores only the window's hits instead of every Xenium
 paper ever stored. Costs one short column per row; requires a rebuild to backfill.
 
-### 3.4 A trigram FTS table for Chinese, Japanese and Korean text
+### 3.4 Chinese, Japanese and Korean text: a trigram table plus segmentation
 
 ```sql
 CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts_cjk USING fts5(id UNINDEXED, title, abstract, affiliations, tokenize = 'trigram');
 ```
 
 populated alongside `papers_fts` for papers whose text contains CJK code points (or for all
-papers, at ~3x the index size of those columns). `search()` then tries `papers_fts` first and
-falls back to the trigram table when the query contains CJK characters. SQLite 3.34+ (Python 3.9
-wheels on GitHub's ubuntu runners ship 3.37+; this machine has 3.51).
+papers, at several times the size of the text it covers, see below). `search()` then routes a query that
+contains CJK characters to the trigram table. SQLite 3.34+ is required (Python 3.9 wheels on
+GitHub's ubuntu runners ship 3.37+; this machine has 3.51); the bench records
+`trigram_available` and skips the measurement on older builds. Two limits, both measured in 2.3:
+
+* **Trigram matches only queries of 3 or more unicode characters.** FTS5: "Substrings consisting
+  of fewer than 3 unicode characters do not match any rows when used with a full-text query"
+  (https://www.sqlite.org/fts5.html, 4.3.4). Many Chinese terms are two characters (测序
+  sequencing, 肿瘤 tumour, 免疫 immune, 空间 spatial) and return nothing from a trigram table.
+  Options, in order of effort: pad the query with context the user already has (空间转录 instead
+  of 空间); or add a **pre-segmented shadow column**: run a dictionary segmenter over
+  title/abstract at write time (jieba-style, or the gazetteer's own Chinese aliases as the
+  dictionary), store the words space-separated, and index that column with unicode61, which then
+  matches words of any length but only the words the segmenter knows (the bench's `segmented_*`
+  rows use a greedy longest-match over its vocabulary). FTS5 has no word-segmenting tokenizer of
+  its own: its four built-in tokenizers are unicode61, ascii, porter and trigram, and a custom
+  tokenizer needs the C API, not the `sqlite3` module (FTS3/4's `icu` tokenizer exists only in
+  `SQLITE_ENABLE_ICU` builds; this machine's SQLite is not one).
+* **Size.** The trigram table over title + affiliations of the Chinese papers measured 2.7 MB for
+  4,894 rows (559 bytes per row, for roughly 100-180 bytes of UTF-8 text per row — *estimate* from
+  the synthetic shape — so about 3-5x the text), built in 0.023 s; restrict the table to CJK
+  papers rather than indexing everything three characters at a time.
 
 ### 3.5 Applied in this change
 
@@ -316,19 +364,26 @@ litradar export --duckdb exports/radar.duckdb         # CREATE TABLE AS from the
 litradar export --parquet out --tables papers,mentions,papers_fts   # include the FTS body text
 ```
 
-Measured on the real database (138,946 rows across 8 tables):
+Measured on the real database (138,354 rows across 8 tables; a read-only snapshot taken with the
+SQLite backup API on 2026-10-17, which is a WAL-mode file without side files, so the export opened
+it with `immutable=1` and said so):
 
 | format | size | time | notes |
 |---|---|---|---|
 | SQLite source | 117.7 MB | — | includes FTS index |
-| CSV (8 files) | 85.0 MB | 1.1 s | `papers_fts.csv` 37.6 MB, `archive_records.csv` 27.4 MB |
-| Parquet, zstd (8 files) | 19.5 MB | 0.6 s | `archive_records.parquet` 0.63 MB for 123 K rows |
-| DuckDB file (8 tables) | 83.6 MB | 2.4 s | 2.2 s of it is `papers_fts` copied row by row (virtual table) |
+| CSV (8 files) | 83.9 MB | 0.9 s | `papers_fts.csv` 37.4 MB, `archive_records.csv` 27.5 MB, `papers.csv` 17.2 MB |
+| Parquet, zstd (8 files) | 19.1 MB | 0.5 s | `archive_records.parquet` 0.63 MB for 123 K rows, `papers_fts.parquet` 13.3 MB |
+| DuckDB file (8 tables) | 83.4 MB | 1.9 s | 1.7 s of it is `papers_fts` copied row by row (virtual table) |
 
 Design of the export:
 
-* The source is opened read-only (`file:...?mode=ro`) and every table is read inside one `BEGIN`,
-  so a running weekly job cannot change the snapshot halfway through.
+* The source is opened read-only (`file:...?mode=ro`, or `immutable=1` for a bare copy of a WAL
+  database that has no -wal/-shm files) and every table is read inside one `BEGIN`, so a running
+  weekly job cannot change the snapshot halfway through. This Python path creates no side files.
+  The DuckDB path is different: `ATTACH ... (TYPE sqlite, READ_ONLY)` (`READ_ONLY` is a general
+  ATTACH option, https://duckdb.org/docs/current/sql/statements/attach.html) is an ordinary SQLite
+  reader and may create `-wal`/`-shm` side files next to the source — observed with DuckDB 1.4.5 on
+  a read-only copy (`-shm` 32 KB, `-wal` 0 bytes); the file contents are never modified.
 * Columns declared INTEGER/REAL are written as int64/double only when `typeof()` confirms every
   stored value matches; otherwise they are written as text so nothing is dropped or coerced.
 * `pyarrow` and `duckdb` are imported lazily. Without pyarrow, `--parquet` writes CSV and says
@@ -384,8 +439,9 @@ steps in `.github/workflows/weekly.yml`:
 
 Rules of thumb that keep the single-writer model safe:
 
-* The job is the only writer. Analysts attach read-only (`ATTACH ... (TYPE sqlite, READ_ONLY)`)
-  or use the exports. `litradar export` itself opens read-only.
+* The job is the only writer. Analysts attach read-only (`ATTACH ... (TYPE sqlite, READ_ONLY)`;
+  this may leave `-wal`/`-shm` side files next to the database, normal for any SQLite reader) or
+  use the exports. `litradar export` itself opens read-only.
 * Backfills (`litradar run --since 2024-01-01 --until 2024-03-31`) are the same writer run at a
   different window; run them serially, never as parallel matrix jobs on one file.
 * Add `PRAGMA busy_timeout = 30000` to `Store.__init__` once a second local process (dashboard,
@@ -420,10 +476,9 @@ Recommended policy:
 ## 9. Order of work
 
 1. Done here: `idx_mentions_entity_id`; `scripts/bench_store.py`; `litradar export`.
-2. Next change to `store.py` (one PR, with a rebuild migration): rowid-keyed FTS rows and no
-   delete for new papers (3.1), window-first entity queries (3.2), `PRAGMA optimize` at the end of
-   a run. Re-run the benchmark at N = 200 K before and after; the load curve should be flat.
-3. FTS date tokens and the trigram table (3.3, 3.4) when windowed search and Chinese search are
-   needed; both are rebuilds, so batch them with step 2 if possible.
+2. Next change to `store.py` (one PR, with a rebuild migration): rowid-keyed FTS rows (3.1),
+   window-first entity queries (3.2), `PRAGMA optimize` at the end of a run. Re-run the benchmark at N = 200 K before and after; the load curve should be flat.
+3. FTS date tokens and the trigram table plus a pre-segmented column (3.3, 3.4) when windowed
+   search and Chinese search are needed; both are rebuilds, so batch them with step 2 if possible.
 4. Weekly workflow: export step, artifact upload, monthly snapshot release (7, 8).
 5. Postgres only when a second writer or a shared query endpoint exists (6).
