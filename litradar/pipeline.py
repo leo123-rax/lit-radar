@@ -546,7 +546,22 @@ class Pipeline:
         self.store.commit()
         self.rank(papers, use_llm=False)
         self.counts["rematched"] = len(papers)
+        self.counts["archive_models_remapped"] = self.remap_archive()
         return {"since": since, "counts": dict(self.counts)}
+
+    def remap_archive(self) -> int:
+        """Re-tag archive records with the current gazetteer (one UPDATE per distinct instrument_model)."""
+        models = [r[0] for r in self.store.conn.execute("SELECT DISTINCT instrument_model FROM archive_records").fetchall()]
+        n = 0
+        for m in models:
+            e = self.instruments.match_archive_model(m)
+            if e:
+                self.store.conn.execute("UPDATE archive_records SET entity_id=?, vendor=?, ticker=? WHERE instrument_model=?", (e.id, e.vendor, e.ticker, m))
+            else:
+                self.store.conn.execute("UPDATE archive_records SET entity_id='', vendor='', ticker='' WHERE instrument_model=?", (m,))
+            n += 1
+        self.store.commit()
+        return n
 
     # ------------------------------------------------------------------ run
     def run(self, since: str, until: str, use_llm: bool = False, fulltext: bool = True, only: Optional[Sequence[str]] = None) -> Dict[str, Any]:

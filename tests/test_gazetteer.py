@@ -75,3 +75,10 @@ def test_no_alias_collisions_between_entries():
             for a in e.aliases:
                 assert seen.get(a.lower(), e.id) == e.id, f"alias {a!r} in both {seen.get(a.lower())} and {e.id}"
                 seen[a.lower()] = e.id
+
+
+def test_solid_tumour_is_not_a_sequencer():
+    gz = _instruments()
+    assert not [m for m in gz.find("Patients with solid tumors were enrolled; SOLID evidence supports this.") if m.entity_id == "thermo-solid"]
+    assert [m for m in gz.find("Libraries were sequenced on an Applied Biosystems SOLiD 4 system.") if m.entity_id == "thermo-solid"]
+    assert gz.match_archive_model("AB SOLiD 3 Plus System").id == "thermo-solid"

@@ -1,6 +1,6 @@
 # Science literature radar: 2026-10-10 to 2026-10-17
 
-3562 new papers and preprints in the window; 429 with parsed full text; 203 instrument entities and 109 companies detected; 123164 new sequencing experiments in public archives.
+3562 new papers and preprints in the window; 429 with parsed full text; 202 instrument entities and 109 companies detected; 123164 new sequencing experiments in public archives.
 
 ## Top 25 innovations
 
@@ -104,12 +104,12 @@ _Science advances, 2026-10-16 · score 5.4_
 **16. [Mitochondrial carbonic anhydrase–VB inhibition rescues brain endothelial stress and memory in Alzheimer’s disease models](https://europepmc.org/article/PMC/PMC13665925)**  
 _Science advances, 2026-10-16 · score 5.4_  
 
-<sub>Instruments: BD FACS, Bruker NMR, HyPerforma, ImageXpress, Indica Labs HALO, LI-COR Odyssey, Meso Scale Discovery, NanoDrop, Nikon AX, Nucleofector, QIAGEN extraction kits, QuantStudio, SOLiD, Synthego, bioimage analysis open-source software · Companies: Abcam, Agilent Technologies, Avantor, Bio-Rad Laboratories, Bio-Techne, Bruker, Danaher, Eppendorf, Lonza, Merck KGaA / MilliporeSigma, QIAGEN, Roche, Thermo Fisher Scientific · Signals: journal tier B; 4 platform(s); 11 lab tool(s); 13 company mention(s)</sub>
+<sub>Instruments: BD FACS, Bruker NMR, HyPerforma, ImageXpress, Indica Labs HALO, LI-COR Odyssey, Meso Scale Discovery, NanoDrop, Nikon AX, Nucleofector, QIAGEN extraction kits, QuantStudio, Synthego, bioimage analysis open-source software · Companies: Abcam, Agilent Technologies, Avantor, Bio-Rad Laboratories, Bio-Techne, Bruker, Danaher, Eppendorf, Lonza, Merck KGaA / MilliporeSigma, QIAGEN, Roche, Thermo Fisher Scientific · Signals: journal tier B; 3 platform(s); 11 lab tool(s); 13 company mention(s)</sub>
 
 **17. [Local control of Cre-regulated genetic modeling in vivo using wireless implantable optoelectronics](https://europepmc.org/article/PMC/PMC13665946)**  
 _Science advances, 2026-10-16 · score 5.4_  
 
-<sub>Instruments: Andor Dragonfly, Bruker microscopy, CytoFLEX, Evident / Olympus microscopy, Leica STELLARIS, NovaSeq X, Polyplus jetPEI, SOLiD, Visium, Visium HD, Zeiss LSM, bioimage analysis open-source software, single-cell analysis open-source software · Companies: 10x Genomics, Abcam, Bruker, Carl Zeiss, Corning Life Sciences, Danaher, Evident (Olympus), Illumina, Merck KGaA / MilliporeSigma, Oxford Instruments, Thermo Fisher Scientific · Signals: journal tier B; 5 platform(s); 8 lab tool(s); 11 company mention(s)</sub>
+<sub>Instruments: Andor Dragonfly, Bruker microscopy, CytoFLEX, Evident / Olympus microscopy, Leica STELLARIS, NovaSeq X, Polyplus jetPEI, Visium, Visium HD, Zeiss LSM, bioimage analysis open-source software, single-cell analysis open-source software · Companies: 10x Genomics, Abcam, Bruker, Carl Zeiss, Corning Life Sciences, Danaher, Evident (Olympus), Illumina, Merck KGaA / MilliporeSigma, Oxford Instruments, Thermo Fisher Scientific · Signals: journal tier B; 4 platform(s); 8 lab tool(s); 11 company mention(s)</sub>
 
 **18. [Product-stabilized filamentation by human glutamine synthetase allosterically tunes metabolic activity](https://europepmc.org/article/PMC/PMC13657631)**  
 _eLife, 2026-10-16 · score 5.4_  
@@ -159,7 +159,6 @@ Sequencers, single-cell and spatial systems, proteomics, cryo-EM, arrays, synthe
 
 | Platform | Vendor | Ticker | Papers | Example |
 |---|---|---|---|---|
-| SOLiD | Thermo Fisher Scientific | TMO | 71 | [Whole-genome sequencing of Lactobacillus helveticus HP-B1137 and its b](https://europepmc.org/article/PMC/PMC13661924) |
 | NovaSeq 6000 | Illumina | ILMN | 46 | [A Living Multi‐Omics PDX Biobank of High‐Risk Sarcomas Reveals ecDNA‐D](https://europepmc.org/article/PMC/PMC13658889) |
 | Orbitrap | Thermo Fisher Scientific | TMO | 42 | [Unifying N- and O-glycopeptide dissociation methods with expedient ele](https://www.biorxiv.org/content/10.64898/2026.10.12.758703v1) |
 | Waters mass spectrometry | Waters | WAT | 32 | [Organic fertilizer amendments reshape soil microbial communities and m](https://europepmc.org/article/PMC/PMC13658193) |
@@ -213,22 +212,17 @@ Each row is a sequencing *experiment* released in the window, with the instrumen
 
 | Vendor / platform | Experiments | Share |
 |---|---|---|
-| Illumina | 105953 | 86.0% |
-| MGI Tech | 5666 | 4.6% |
-| ILLUMINA | 3173 | 2.6% |
+| Illumina | 108951 | 88.5% |
+| MGI Tech | 6767 | 5.5% |
+| Pacific Biosciences | 3380 | 2.7% |
 | Oxford Nanopore Technologies | 2434 | 2.0% |
-| Pacific Biosciences | 2260 | 1.8% |
-| PACBIO_SMRT | 1120 | 0.9% |
-| BGISEQ | 1079 | 0.9% |
 | Element Biosciences | 921 | 0.7% |
-| GENEMIND | 213 | 0.2% |
-| GENAPSYS | 152 | 0.1% |
-| Thermo Fisher Scientific | 136 | 0.1% |
-| DNBSEQ | 22 | 0.0% |
-| ABI_SOLID | 16 | 0.0% |
-| LS454 | 15 | 0.0% |
-| unknown | 2 | 0.0% |
-| CAPILLARY | 2 | 0.0% |
+| GeneMind Biosciences | 213 | 0.2% |
+| ILLUMINA | 175 | 0.1% |
+| Thermo Fisher Scientific | 154 | 0.1% |
+| Genapsys | 152 | 0.1% |
+| Roche | 15 | 0.0% |
+| Singular Genomics | 2 | 0.0% |
 
 | Instrument model | Vendor | Ticker | Experiments | Studies |
 |---|---|---|---|---|
@@ -238,7 +232,7 @@ Each row is a sequencing *experiment* released in the window, with the instrumen
 | Illumina NovaSeq X Plus | Illumina | ILMN | 6023 | 326 |
 | Illumina NovaSeq X | Illumina | ILMN | 5221 | 79 |
 | DNBSEQ-T7 | MGI Tech | 688114.SS | 3961 | 102 |
-| Illumina MiniSeq |  |  | 2498 | 18 |
+| Illumina MiniSeq | Illumina | ILMN | 2498 | 18 |
 | Illumina HiSeq 4000 | Illumina | ILMN | 1664 | 49 |
 | Illumina HiSeq 2500 | Illumina | ILMN | 1643 | 74 |
 | MinION | Oxford Nanopore Technologies | ONT.L | 1499 | 41 |
@@ -248,18 +242,18 @@ Each row is a sequencing *experiment* released in the window, with the instrumen
 | NextSeq 1000 | Illumina | ILMN | 1268 | 27 |
 | Element AVITI | Element Biosciences | private | 921 | 15 |
 | Illumina HiSeq 2000 | Illumina | ILMN | 863 | 32 |
-| MGISEQ-2000RS |  |  | 858 | 10 |
+| MGISEQ-2000RS | MGI Tech | 688114.SS | 858 | 10 |
 | NextSeq 550 | Illumina | ILMN | 826 | 21 |
 | Sequel II | Pacific Biosciences | PACB | 810 | 28 |
 | DNBSEQ-G400 | MGI Tech | 688114.SS | 773 | 28 |
-| Revio |  |  | 759 | 33 |
+| Revio | Pacific Biosciences | PACB | 759 | 33 |
 | BGISEQ-500 | MGI Tech | 688114.SS | 705 | 18 |
 | PromethION | Oxford Nanopore Technologies | ONT.L | 659 | 44 |
 | MiSeq i100 | Illumina | ILMN | 551 | 22 |
-| Illumina Genome Analyzer |  |  | 410 | 6 |
+| Illumina Genome Analyzer | Illumina | ILMN | 410 | 6 |
 | Illumina iSeq 100 | Illumina | ILMN | 348 | 14 |
 | GridION | Oxford Nanopore Technologies | ONT.L | 276 | 11 |
-| BGISEQ-50 |  |  | 195 | 3 |
+| BGISEQ-50 | MGI Tech | 688114.SS | 195 | 3 |
 | Illumina HiSeq 3000 | Illumina | ILMN | 188 | 14 |
 | unspecified |  |  | 175 | 13 |
 
@@ -447,4 +441,4 @@ Records pulled per source: rss.journals 597, rss.subjects 107.
 
 Unique papers after de-duplication: 704 (0 new to the database). Full text parsed: bioRxiv 0 (failed 0), Europe PMC 0 (failed 0). LLM-scored: 0.  
 
-Database totals: 3562 papers, 4064 entity mentions, 123164 archive records, 504 news items. Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. Only metadata, abstracts and open-licensed full text are stored; subscription content is linked, never copied.
+Database totals: 3562 papers, 3989 entity mentions, 123164 archive records, 504 news items. Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. Only metadata, abstracts and open-licensed full text are stored; subscription content is linked, never copied.
