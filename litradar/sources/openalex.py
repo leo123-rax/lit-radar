@@ -18,7 +18,8 @@ WORKS = "https://api.openalex.org/works"
 SELECT = ",".join(
     [
         "id", "doi", "title", "publication_date", "type", "primary_location", "authorships",
-        "abstract_inverted_index", "topics", "primary_topic", "cited_by_count", "open_access", "grants", "biblio",
+        "abstract_inverted_index", "topics", "primary_topic", "cited_by_count", "open_access", "biblio",
+        # 'grants' is no longer a valid `select` field (OpenAlex returns 400 for it, 2026-10); funders now ride in primary_location/ids only
     ]
 )
 MAX_RATE_LIMIT_WAIT = 60.0  # seconds; a plain HTTP 429 (per-second rate limit) is retried once after this at most
