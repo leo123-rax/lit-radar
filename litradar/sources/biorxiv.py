@@ -1,9 +1,16 @@
 """bioRxiv / medRxiv via the public API (https://api.biorxiv.org).
 
 Endpoint: https://api.biorxiv.org/details/{server}/{YYYY-MM-DD}/{YYYY-MM-DD}/{cursor}
-Returns 100 records per page; `messages[0].total` gives the total for the interval. Each record
+Returns **30 records per page** (``messages[0].count`` is 30 on every page observed live, 2026-10-17;
+the ``cursor`` is a plain record offset) and ``messages[0].total`` gives the total for the interval,
+so a one-week bioRxiv window of ~1,800 records is ~60 requests at the 0.5 s host pacing. Each record
 carries a `jatsxml` URL (full-text XML) and, once a preprint is published, its journal DOI in
 `published`. The interval lists every *version* posted, so we keep the latest per DOI.
+
+Full text: the `jatsxml` URL points at www.biorxiv.org / www.medrxiv.org, which rate-limit scripted
+clients (HTTP 429, Cloudflare error 1015) after a handful of requests. ``sources.biorxiv.fulltext`` is
+therefore off by default in config/radar.yaml; the sanctioned bulk route is the requester-pays S3
+bucket (see docs/sources/biorxiv.md). `attach_fulltext` stays available for forks that enable it.
 """
 from __future__ import annotations
 
@@ -84,11 +91,14 @@ def fetch(
     yield from seen.values()
 
 
-def attach_fulltext(http: Http, paper: Paper) -> bool:
-    """Download the JATS XML named in the record and fill paper.sections. Returns success."""
+def attach_fulltext(http: Http, paper: Paper, retries: int = 1) -> bool:
+    """Download the JATS XML named in the record and fill paper.sections. Returns success.
+
+    One retry by default: the host's 429 carries a 30 s Retry-After and a second one blocks the host
+    for the run, so more attempts only add sleep."""
     if not paper.fulltext_url:
         return False
-    resp = http.get(paper.fulltext_url, cache=True)
+    resp = http.get(paper.fulltext_url, cache=True, retries=retries)
     if resp is None or resp.status_code != 200 or not resp.content:
         return False
     parsed = parse_jats(resp.content)

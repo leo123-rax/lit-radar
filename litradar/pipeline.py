@@ -400,20 +400,52 @@ class Pipeline:
         return n
 
     def fetch_news(self, since: str) -> int:
+        """Trade press, press wires, SEC 8-K filings and per-company news.
+
+        Layers (all configurable under ``news:`` and ``sources:`` in radar.yaml):
+        * publisher RSS / press-wire RSS from config/feeds.yaml (kinds ``news`` and ``press``);
+        * SEC EDGAR 8-K Atom per watched company with a plain US ticker (kind ``sec``; needs
+          LITRADAR_CONTACT_EMAIL because EDGAR requires ``<tool> <e-mail>`` in the User-Agent);
+        * GDELT DOC 2.0 per watched company (kind ``gdelt``; feed name ``gdelt:<company>``), query =
+          ``"<company name>"`` + the sector clause from ``news.query_context`` (or the company's own
+          ``news_query``). Built for programmatic use; one request per 5 s;
+        * Google News RSS (kind ``gnews``) only when ``news.google_news: true``: news.google.com/robots.txt
+          disallows ``/rss/`` and Google's Terms prohibit automated access that ignores it, so this is an
+          explicit opt-in for the fork owner.
+
+        Every item passes the ``news.exclude_title_patterns`` filter, and a per-company item (GDELT or
+        Google News) is kept only when the gazetteer actually finds that company in its text.
+        """
+        from urllib.parse import quote_plus
+
+        from .sources import gdelt as gdelt_src
+
         n = 0
-        feeds = list(self.feeds)
-        # Google News RSS per watched company (works where publisher feeds block bots) + SEC 8-K Atom feeds
+        news_cfg = self.cfg.get("news") or {}
+        google_on = bool(news_cfg.get("google_news", False))
+        gdelt_on = bool(news_cfg.get("gdelt", True))
+        gdelt_timespan = str(news_cfg.get("gdelt_timespan") or "7d")
+        gdelt_language = str(news_cfg.get("gdelt_language") or "english")
+        feeds: List[Dict[str, Any]] = []
+        for f in self.feeds:
+            if f.get("kind") == "gnews" and not google_on:
+                self.counts["news.gnews_skipped"] += 1
+                continue
+            feeds.append(dict(f))
+        if self.feeds and not google_on and self.counts["news.gnews_skipped"]:
+            log.info("Google News RSS is opt-in (news.google_news: false); skipped %d configured gnews feed(s)", self.counts["news.gnews_skipped"])
         raw_by_id = {x.get("id"): x for x in (self.settings.yaml("companies") or {}).get("entries", [])}
         sec_on = bool(self._src("sec").get("enabled", True))
         if sec_on and not self.settings.contact_email:
-            log.warning("SEC EDGAR feeds skipped: set LITRADAR_CONTACT_EMAIL (the SEC requires a contact in the User-Agent and answers 403 otherwise)")
+            msg = "SEC 8-K feeds skipped: LITRADAR_CONTACT_EMAIL not set (EDGAR requires '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise)"
+            log.warning(msg)
+            self.errors.append(msg)
             sec_on = False
-        news_cfg = self.cfg.get("news") or {}
         context_by_type = news_cfg.get("query_context") or {
             "tools": "(sequencing OR genomics OR proteomics OR \"life sciences\" OR instrument OR biotech)",
             "diagnostics": "(cancer OR diagnostic OR test OR genomics OR biotech OR FDA OR Medicare)",
-            "synthesis": "(DNA OR synthetic biology OR biotech OR genomics)",
-            "ai_bio": "(AI OR drug discovery OR protein OR biology OR biotech)",
+            "synthesis": "(DNA OR \"synthetic biology\" OR biotech OR genomics)",
+            "ai_bio": "(AI OR \"drug discovery\" OR protein OR biology OR biotech)",
             "pharma": "(FDA OR trial OR drug OR pharma OR biotech)",
             "cro": "(biotech OR pharma OR CDMO OR laboratory)",
             "institute": "(research OR genomics OR biology)",
@@ -422,40 +454,70 @@ class Pipeline:
         pats = news_cfg.get("exclude_title_patterns") or []
         if pats:
             exclude_re = re.compile("|".join(pats), re.I)
+
+        def keep(it: NewsItem, company: Optional[str]) -> bool:
+            """Exclusion patterns + gazetteer gating; sets it.companies. False = drop."""
+            if exclude_re and exclude_re.search(it.title or ""):
+                self.counts["news.excluded"] += 1
+                return False
+            text = f"{it.title} {it.summary}"
+            comps = {m.entity_id for m in self.companies.find(text)}
+            if company and company not in comps:
+                self.counts["news.offtopic"] += 1
+                return False  # a company query whose text never names the company (e.g. "holy grail")
+            it.companies = sorted(comps)
+            return True
+
+        company_feeds: List[Dict[str, Any]] = []
         for e in self.companies.entries:
             raw = raw_by_id.get(e.id, {})
-            if raw.get("watch_news"):
-                ctx = raw.get("news_query") or context_by_type.get(raw.get("type") or "tools", "")
-                q = f'"{e.name}" {ctx}'.strip()
-                from urllib.parse import quote_plus
-
-                feeds.append({"name": f"news:{e.name}", "kind": "gnews", "url": f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en", "company": e.id})
-                if sec_on and re.fullmatch(r"[A-Z]{1,5}", e.ticker or ""):
-                    feeds.append({"name": f"SEC 8-K {e.ticker}", "kind": "sec", "company": e.id, "company_name": e.name,
-                                  "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={e.ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"})
+            if not raw.get("watch_news"):
+                continue
+            ctx = raw.get("news_query") or context_by_type.get(raw.get("type") or "tools", "")
+            if gdelt_on:
+                company_feeds.append({"name": f"gdelt:{e.name}", "kind": "gdelt", "company": e.id, "company_name": e.name, "context": ctx})
+            if google_on:
+                q = f'"{e.name}" {ctx} when:7d'.strip()
+                feeds.append({"name": f"news:{e.name}", "kind": "gnews", "company": e.id,
+                              "url": f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en"})
+            if sec_on and re.fullmatch(r"[A-Z]{1,5}", e.ticker or ""):
+                feeds.append({"name": f"SEC 8-K {e.ticker}", "kind": "sec", "company": e.id, "company_name": e.name,
+                              "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={e.ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"})
         for f in feeds:
             try:
                 items: List[NewsItem] = []
                 for it in rss_src.news_items(self.http, f["name"], f["url"], since=since):
                     if f.get("kind") == "sec":
                         it.title = f"{f.get('company_name')}: {it.title} ({it.published})"
-                    if exclude_re and exclude_re.search(it.title or ""):
-                        self.counts["news.excluded"] += 1
+                    if not keep(it, f.get("company") if f.get("kind") == "gnews" else None):
                         continue
-                    text = f"{it.title} {it.summary}"
-                    comps = {m.entity_id for m in self.companies.find(text)}
-                    if f.get("kind") == "sec" and f.get("company"):
-                        comps.add(f["company"])
-                    if f.get("kind") == "gnews" and f.get("company") and f["company"] not in comps:
-                        self.counts["news.offtopic"] += 1
-                        continue  # a company query that does not actually name the company (e.g. "holy grail")
-                    it.companies = sorted(comps)
+                    if f.get("kind") == "sec" and f.get("company") and f["company"] not in it.companies:
+                        it.companies = sorted(set(it.companies) | {f["company"]})
                     items.append(it)
                 added = self.store.upsert_news(items)
                 n += added
                 self.counts[f"news.{f['kind']}"] += added
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"feed {f['name']}: {exc}")
+        for f in company_feeds:
+            if gdelt_src.DOC_API.split("/")[2] in getattr(self.http, "blocked_hosts", set()):
+                self.counts["news.gdelt_skipped"] += 1
+                continue
+            try:
+                items = []
+                for it in gdelt_src.company_news(self.http, f["company_name"], f["company"], context=f["context"],
+                                                 timespan=gdelt_timespan, language=gdelt_language, since=since):
+                    if keep(it, f["company"]):
+                        items.append(it)
+                added = self.store.upsert_news(items)
+                n += added
+                self.counts["news.gdelt"] += added
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"feed {f['name']}: {exc}")
+        if self.counts.get("news.gdelt_skipped"):
+            msg = f"gdelt: host rate-limited (HTTP 429) during the run; {self.counts['news.gdelt_skipped']} company quer(y/ies) skipped"
+            log.warning(msg)
+            self.errors.append(msg)
         self.store.commit()
         return n
 
