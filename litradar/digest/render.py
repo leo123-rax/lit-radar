@@ -5,6 +5,7 @@ import json
 from collections import defaultdict
 from typing import Any, Dict, List
 
+from ..rank.heuristics import is_platform
 from ..store import Store
 
 
@@ -40,12 +41,17 @@ def render(store: Store, since: str, until: str, cfg: Dict[str, Any], run_report
     news = store.news_in_window(since, limit=int(dcfg.get("news_n", 40)) * 4)
     counts = store.counts()
     in_window = store.papers_in_window(since, until)
+    has_history = store.has_history_before(since)
+    n_inst = store.distinct_entities_in_window(since, until, "instrument")
+    n_comp = store.distinct_entities_in_window(since, until, "company")
+    platforms = [r for r in instruments if is_platform(r.get("category") or "")]
+    infra = [r for r in instruments if not is_platform(r.get("category") or "")]
 
     md: List[str] = []
     md.append(f"# {title}: {since} to {until}\n")
     md.append(
         f"{len(in_window)} new papers and preprints in the window; {sum(1 for p in in_window if p.get('fulltext_available'))} with parsed full text; "
-        f"{len(instruments)} instrument platforms and {len(companies)} companies detected; {sum(r['experiments'] for r in archive)} new sequencing experiments in public archives.\n"
+        f"{n_inst} instrument entities and {n_comp} companies detected; {sum(r['experiments'] for r in archive)} new sequencing experiments in public archives.\n"
     )
 
     # ---- top innovations
@@ -75,18 +81,24 @@ def render(store: Store, since: str, until: str, cfg: Dict[str, Any], run_report
         md.append("\n<sub>" + " · ".join(tail) + "</sub>\n")
 
     # ---- instruments in the literature
-    md.append("## Instruments named in this week's papers\n")
-    md.append("Counted from titles, abstracts and parsed Methods sections (open-access full text and preprints). Papers without accessible full text can only contribute abstract mentions.\n")
+    md.append("## Platforms named in this week's papers\n")
+    md.append("Sequencers, single-cell and spatial systems, proteomics, cryo-EM, arrays, synthesis and cell-engineering platforms, counted from titles, abstracts and parsed Methods sections (open-access full text and preprints). Papers without accessible full text can only contribute abstract mentions.\n")
     md.append(_table(
         ["Platform", "Vendor", "Ticker", "Papers", "Example"],
-        [[r["entity_name"], r["vendor"], r["ticker"], r["papers"], _link((r["example_title"] or "")[:70], r["example_url"])] for r in instruments],
+        [[r["entity_name"], r["vendor"], r["ticker"], r["papers"], _link((r["example_title"] or "")[:70], r["example_url"])] for r in platforms],
     ))
-    if new_instruments:
+    md.append("### Lab infrastructure and consumables named\n")
+    md.append("Library prep, QC, PCR, automation, imaging, cytometry and bioprocess products. Useful for supplier share, not for innovation.\n")
+    md.append(_table(
+        ["Product line", "Vendor", "Ticker", "Papers"],
+        [[r["entity_name"], r["vendor"], r["ticker"], r["papers"]] for r in infra[:25]],
+    ))
+    if new_instruments and has_history:
         md.append("**First appearance in the corpus this window:** " + ", ".join(f"{r['entity_name']} ({r['papers']})" for r in new_instruments[:20]) + "\n")
 
     # ---- archives
-    md.append("## Instruments behind newly public sequencing data (ENA, mirrors SRA + DDBJ)\n")
-    md.append("Each row is a sequencing *experiment* released in the window, with the instrument model the submitter declared. This is a census of what machines are producing data right now, independent of what gets written up.\n")
+    md.append("## Instruments behind newly public sequencing data (NCBI SRA + ENA)\n")
+    md.append("Each row is a sequencing *experiment* released in the window, with the instrument model the submitter declared (SRA covers submissions worldwide; ENA adds European and Japanese records SRA has not mirrored yet). This is a census of what machines are producing data right now, independent of what gets written up. Deposits lag sequencing by months to years, and clinical or commercial sequencing is never deposited.\n")
     vend: Dict[str, int] = defaultdict(int)
     for r in archive:
         vend[r.get("vendor") or r.get("platform") or "unknown"] += r["experiments"]
@@ -101,16 +113,16 @@ def render(store: Store, since: str, until: str, cfg: Dict[str, Any], run_report
 
     # ---- companies
     md.append("## Companies in the literature\n")
-    md.append("How each company appears: as an author affiliation, in funding / competing-interest / acknowledgement statements, or as the subject of the work (title, abstract, methods).\n")
+    md.append("How each company appears: **author** = an author's affiliation; **funding / COI** = named in funding, competing-interest or acknowledgement statements; **subject** = named in the title or abstract (the company or its product is what the paper is about); **supplier** = its product is named in the Methods.\n")
     listed = [c for c in companies if not c["entity_id"].startswith("unlisted:")]
     unlisted = [c for c in companies if c["entity_id"].startswith("unlisted:")]
     md.append(_table(
-        ["Company", "Ticker", "Papers", "As author", "Funding / COI / ack", "As subject", "Example"],
-        [[c["entity_name"], c["ticker"], c["papers"], c["as_author"], c["as_funder_or_coi"], c["as_subject"], _link((c["example_title"] or "")[:60], c["example_url"])] for c in listed],
+        ["Company", "Ticker", "Papers", "Author", "Funding / COI", "Subject", "Supplier", "Example"],
+        [[c["entity_name"], c["ticker"], c["papers"], c["as_author"], c["as_funder_or_coi"], c["as_subject"], c.get("as_supplier", 0), _link((c["example_title"] or "")[:60], c["example_url"])] for c in listed],
     ))
     if unlisted:
         md.append("**Company-type institutions not in the gazetteer (candidates to add):** " + ", ".join(f"{c['entity_name']} ({c['papers']})" for c in unlisted[:30]) + "\n")
-    if new_companies:
+    if new_companies and has_history:
         md.append("**First appearance in the corpus this window:** " + ", ".join(f"{r['entity_name']}" for r in new_companies[:30]) + "\n")
 
     # ---- tracked researchers
@@ -124,7 +136,8 @@ def render(store: Store, since: str, until: str, cfg: Dict[str, Any], run_report
         for grp, rows in by_group.items():
             md.append(f"**{grp}**\n")
             for t in rows:
-                md.append(f"- {t['author_name']}: {_link(t['title'], t['url'])} — {t.get('journal') or ''} {t.get('pub_date') or ''}{' (preprint)' if t.get('kind') == 'preprint' else ''}")
+                how = "" if t.get("matched_by") == "openalex_id" else " <sub>(name match; add the OpenAlex id to make it exact)</sub>"
+                md.append(f"- {t['author_name']}: {_link(t['title'], t['url'])} — {t.get('journal') or ''} {t.get('pub_date') or ''}{' (preprint)' if t.get('kind') == 'preprint' else ''}{how}")
             md.append("")
 
     # ---- news

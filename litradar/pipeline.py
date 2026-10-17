@@ -405,6 +405,9 @@ class Pipeline:
         # Google News RSS per watched company (works where publisher feeds block bots) + SEC 8-K Atom feeds
         raw_by_id = {x.get("id"): x for x in (self.settings.yaml("companies") or {}).get("entries", [])}
         sec_on = bool(self._src("sec").get("enabled", True))
+        if sec_on and not self.settings.contact_email:
+            log.warning("SEC EDGAR feeds skipped: set LITRADAR_CONTACT_EMAIL (the SEC requires a contact in the User-Agent and answers 403 otherwise)")
+            sec_on = False
         for e in self.companies.entries:
             raw = raw_by_id.get(e.id, {})
             if raw.get("watch_news"):

@@ -131,8 +131,11 @@ class Gazetteer:
         items = data.get("entries") if isinstance(data, dict) else data
         return cls(load_entries(items or [], kind))
 
-    def find(self, text: str, section: str = "", paper_id: str = "") -> List[Mention]:
-        """Return one Mention per entry found in `text` (count = occurrences)."""
+    def find(self, text: str, section: str = "", paper_id: str = "", ignore_context: bool = False) -> List[Mention]:
+        """Return one Mention per entry found in `text` (count = occurrences).
+
+        ignore_context=True disables the context-term requirement; use it only on controlled
+        vocabularies (archive instrument_model strings), never on prose."""
         if not text:
             return []
         taken: List[Tuple[int, int]] = []
@@ -142,7 +145,7 @@ class Gazetteer:
                 span = (m.start(), m.end())
                 if any(s < span[1] and span[0] < e for s, e in taken):
                     continue
-                if pat.needs_context:
+                if pat.needs_context and not ignore_context:
                     lo, hi = max(0, span[0] - CONTEXT_WINDOW), min(len(text), span[1] + CONTEXT_WINDOW)
                     window = text[lo : span[0]] + " " + text[span[1] : hi]
                     if not pat.context_regex or not pat.context_regex.search(window):
@@ -188,7 +191,7 @@ class Gazetteer:
         """Map an archive's controlled-vocabulary instrument string to a gazetteer entry."""
         if not instrument_model:
             return None
-        hits = self.find(instrument_model)
+        hits = self.find(instrument_model, ignore_context=True)
         if not hits:
             return None
         # prefer the most specific (longest-named) hit
