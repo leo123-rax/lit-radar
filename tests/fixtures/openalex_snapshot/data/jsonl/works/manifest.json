@@ -2,7 +2,7 @@
  "date": "2026-01-02",
  "format": "jsonl",
  "entity": "works",
- "record_count": 6,
+ "record_count": 7,
  "content_length": 0,
  "files": [
   {
@@ -16,7 +16,7 @@
    "url": "s3://openalex/data/jsonl/works/updated_date=2026-01-02/part_0000.jsonl",
    "meta": {
     "content_length": 0,
-    "record_count": 1
+    "record_count": 2
    }
   }
  ]

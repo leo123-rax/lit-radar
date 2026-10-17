@@ -9,7 +9,8 @@
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
   litradar backfill --from YYYY-MM --to YYYY-MM [--subgroup id ...] [--country CC ...] [--max-per-month N]
-                    [--dry-run] | --snapshot-dir DIR | --status   fill the corpus from OpenAlex (resumable)
+                    [--topics-only] [--redo] [--dry-run] | --snapshot-dir DIR | --status
+                                                              fill the corpus from OpenAlex (resumable; exit 3 = paused)
 """
 from __future__ import annotations
 
@@ -175,6 +176,16 @@ def cmd_check_config(args) -> int:
     return 0 if ok else 1
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
 def cmd_backfill(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     all_groups = (settings.yaml("subgroups") or {}).get("subgroups", []) or []
@@ -189,22 +200,42 @@ def cmd_backfill(args) -> int:
                 print("no backfill progress recorded yet")
             else:
                 for r in rows:
-                    print(f"{r['subgroup']:28} {r['country'] or 'all':6} units={r['units']:<6} fetched={r['fetched'] or 0:<8} {r['first_month']}..{r['last_month']}  last {r['last_done']}")
+                    print(
+                        f"{r['subgroup']:28} {r['country'] or 'all':6} units={r['units']:<6} fetched={r['fetched'] or 0:<8} "
+                        f"capped={r.get('capped_units') or 0:<4} {r['first_month']}..{r['last_month']}  last {r['last_done']}"
+                    )
             return 0
         groups = backfill.select_subgroups(all_groups, args.subgroup)
         countries = args.country or ()
+        if args.redo and args.dry_run:
+            print("--redo is ignored with --dry-run (nothing is cleared)")
         if args.snapshot_dir:
+            root = Path(args.snapshot_dir)
+            if args.redo and not args.dry_run:
+                print(f"--redo: cleared {backfill.clear_snapshot_progress(store, root)} snapshot progress row(s)")
+            if args.dry_run:
+                rows = backfill.snapshot_plan(store, root)
+                pending = [rel for rel, done in rows if not done]
+                print(f"{len(rows)} snapshot file(s); {len(pending)} pending, {len(rows) - len(pending)} already done")
+                for rel, done in rows[:60]:
+                    print(f"  {'done   ' if done else 'pending'} {rel}")
+                if len(rows) > 60:
+                    print(f"  … {len(rows) - 60} more")
+                return 0
             report = backfill.run_snapshot(
-                store, Path(args.snapshot_dir), groups, countries=countries,
-                from_month=args.from_month or "", to_month=args.to_month or "",
+                store, root, groups, countries=countries,
+                from_month=args.from_month or "", to_month=args.to_month or "", topics_only=args.topics_only,
             )
         else:
             if not (args.from_month and args.to_month):
                 print("backfill: --from and --to (YYYY-MM) are required unless --snapshot-dir or --status is given", file=sys.stderr)
                 return 2
+            if args.redo and not args.dry_run:
+                n = backfill.clear_progress(store, [g["id"] for g in groups], args.from_month, args.to_month, countries)
+                print(f"--redo: cleared {n} progress row(s)")
             if args.dry_run:
                 units = backfill.plan(groups, args.from_month, args.to_month, countries)
-                pending = [u for u in units if not backfill.progress_done(store, *u)]
+                pending = [u for u in units if not backfill.progress_done(store, *u, max_per_month=args.max_per_month)]
                 print(f"{len(units)} unit(s) of (subgroup, month, country); {len(pending)} pending, {len(units) - len(pending)} already done")
                 for sg, month, country in pending[:60]:
                     print(f"  {sg:28} {month}  {country or 'all'}")
@@ -215,6 +246,7 @@ def cmd_backfill(args) -> int:
             report = backfill.run_api(
                 store, http, groups, args.from_month, args.to_month, countries=countries,
                 max_per_month=args.max_per_month, mailto=settings.contact_email, api_key=settings.openalex_api_key,
+                topics_only=args.topics_only,
             )
     except backfill.BackfillError as exc:
         print(f"backfill: {exc}", file=sys.stderr)
@@ -223,7 +255,7 @@ def cmd_backfill(args) -> int:
         store.close()
     print(json.dumps(report, indent=1, default=str))
     print(report.get("message", ""))
-    return 0
+    return 3 if report.get("stopped") else 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -288,9 +320,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--to", dest="to_month", help="last month, YYYY-MM (inclusive)")
     p.add_argument("--subgroup", action="append", help="subgroup id from config/subgroups.yaml; repeatable; default: all")
     p.add_argument("--country", action="append", help="ISO 3166-1 alpha-2 code of author institutions (e.g. CN); repeatable; default: no restriction")
-    p.add_argument("--max-per-month", type=int, default=2000, help="cap per (subgroup, month, country) unit; default 2000")
+    p.add_argument("--max-per-month", type=_positive_int, default=2000, help="cap per (subgroup, month, country) unit; default 2000; a larger cap reopens capped units")
     p.add_argument("--snapshot-dir", help="read OpenAlex snapshot works files (JSONL / .gz) from this directory instead of the API")
-    p.add_argument("--dry-run", action="store_true", help="list the pending (subgroup, month, country) units and exit")
+    p.add_argument("--topics-only", action="store_true", help="match on OpenAlex topics alone, without the keyword intersection (both routes)")
+    p.add_argument("--redo", action="store_true", help="forget recorded progress for the selected units / snapshot files and pull them again")
+    p.add_argument("--dry-run", action="store_true", help="list the pending (subgroup, month, country) units or snapshot files and exit")
     p.add_argument("--status", action="store_true", help="show recorded backfill progress and exit")
     p.add_argument("--json", action="store_true", help="with --status: print JSON")
     p.set_defaults(func=cmd_backfill)
