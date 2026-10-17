@@ -1,0 +1,83 @@
+lit-radar
+Copyright (c) 2026 lit-radar contributors
+
+LICENCE SCOPE
+
+The code in this repository and the configuration gazetteers under config/ (lists of publicly
+marketed instruments, kits and platforms, public companies, journals, feeds and research
+subgroups, written by the contributors) are licensed under the MIT License; see LICENSE.
+
+That licence covers only what the contributors wrote. It does NOT cover, and this project does
+not and cannot grant any right to, content retrieved at run time from third-party services:
+paper titles, abstracts, full text, archive and dataset records, regulatory and clinical-trial
+records, grant records, filings and headlines. Such content appears in
+
+  digests/   the committed weekly digests: titles, links, detected entity names, counts and
+             abstract excerpts of at most 420 characters
+  data/      the SQLite database (metadata, abstracts, open-licensed sections and text, derived
+             mentions) and its compressed snapshots, which the weekly workflow publishes as
+             GitHub release assets (db-latest, db-YYYY-MM)
+  .cache/    raw HTTP bodies of full-text fetches (local or on the CI runner; never committed)
+
+and remains subject to the terms of its source. Users are solely responsible for complying with
+those terms and for any API keys they supply. Nothing in this project grants, or can grant,
+access to subscription content.
+
+THIRD-PARTY DATA SOURCES
+
+Terms as read on 2026-10-17; verify them before relying on this list. "Licence" below describes
+the data, not this software. Rate limits are the documented ones; the HTTP client paces at or
+below them (litradar/http.py).
+
+  Europe PMC (EMBL-EBI)        EMBL-EBI Terms of Use. Article metadata is reusable. Full text is
+                               taken only from the Open Access subset, where each article carries
+                               its own Creative Commons (or similar) licence that travels with it.
+                               No numeric rate limit is published; EBI asks users not to impede
+                               the service for others.
+  Crossref REST API            Bibliographic metadata is facts and reusable for any purpose;
+                               Crossref states that some abstracts may be subject to publisher or
+                               author copyright. Requests carry a mailto (polite pool).
+  OpenAlex                     CC0 1.0 public-domain dedication. Abstracts are served as an
+                               inverted index "for legal reasons" and reconstructed locally.
+                               10 requests/s anonymous, 30 with a free key; per-account daily budget.
+  NCBI: E-utilities, PubMed,   NLM/NCBI terms. NLM does not claim copyright on PubMed abstracts but
+  PMC, GEO, SRA                publishers or authors may; NCBI places no restrictions on the use or
+                               distribution of GEO and SRA data; PMC articles carry individual
+                               licences. Requests identify tool and e-mail and stay within
+                               3 requests/s (10 with a key).
+  ENA portal API (EMBL-EBI)    EMBL-EBI Terms of Use; read-experiment metadata (accession,
+                               instrument model, first_public).
+  bioRxiv / medRxiv API        Author-selected licence per preprint (cc_by, cc_by_nc, cc_by_nd,
+                               cc_by_nc_nd, cc0 or "no reuse"). The servers permit text and data
+                               mining through the API and the TDM bucket, ask tools to link back
+                               to the hosted text and forbid re-hosting; this software links and
+                               never re-serves preprint text. No API rate limit is published.
+  arXiv API                    Metadata CC0 1.0; full text stays under the submitter's licence
+                               and is not fetched. One request every 3 seconds.
+  Semantic Scholar API         API Licence Agreement; datasets ODC-BY 1.0 (attribution required).
+                               1 request/s with a key.
+  GDELT Project                Open data, free for any use; the project asks for attribution.
+                               (Applies only when a GDELT news adapter is present and enabled.)
+  SEC EDGAR                    US Government work, public domain. EDGAR fair-access policy: a
+                               declared User-Agent with a contact address and at most
+                               10 requests/s; the feeds are skipped when no contact is configured.
+  openFDA                      Public domain (CC0) with the FDA's "unvalidated data" disclaimer;
+                               results are not for clinical or regulatory decisions.
+                               240 requests/min; 1,000/day per IP or 120,000/day with a free key.
+  ClinicalTrials.gov API v2    US Government work, public domain; about 50 requests/min per IP.
+  NIH RePORTER API             US Government work, public domain; one request per second.
+  PRIDE Archive (EMBL-EBI)     EMBL-EBI Terms of Use; project-level metadata and instrument names.
+  CZ CELLxGENE Discover        Curation API; dataset metadata only. Each collection carries its
+                               own licence and publication link.
+  Google News RSS              Google Terms of Service. news.google.com/robots.txt disallows the
+                               /rss/ path to all agents, so this project treats the source as an
+                               opt-in and documents how to switch it off (docs/LEGAL.md).
+                               Headlines and links only.
+  Journal and press RSS feeds  Publisher terms; headlines, DOIs and links only. Feeds that refuse
+                               scripted access are dropped, not worked around.
+  Unpaywall                    When queried, requests carry the contact e-mail; the same
+                               open-access data is served by OpenAlex under CC0.
+
+Attribution requested by sources (keep it when redistributing derived tables): OpenAlex,
+Semantic Scholar (ODC-BY; cite the Semantic Scholar Open Research Corpus), NLM/PubMed
+("acknowledge NLM in a clear and conspicuous manner"), Europe PMC, GDELT.

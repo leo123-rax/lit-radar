@@ -3,14 +3,23 @@
 .env.*
 !.env.example
 
-# runtime data
+# runtime data: the SQLite database, its WAL/SHM side files, compressed snapshots, the HTTP cache
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite-journal
 *.db
+*.zst
+data/*
+!data/.gitkeep
 .cache/
-data/*.sqlite
+
+# generated outputs that are not the product
+# (digests/*.md ARE tracked on purpose: they are the product. They reveal your watchlist when the
+#  repository is public; see README "Security and privacy".)
 digests/*.json
 digests/_work/
+site/
 
 # python
 __pycache__/
@@ -23,16 +32,8 @@ dist/
 .venv/
 venv/
 
-# os / editors
+# os / editors / local agent worktrees
 .DS_Store
 .idea/
 .vscode/
-
-# local agent worktrees
 .claude/
-site/
-*.sqlite-wal
-*.sqlite-shm
-*.sqlite-journal
-data/*
-!data/.gitkeep
