@@ -171,6 +171,21 @@ def cmd_check_config(args) -> int:
         except yaml.YAMLError as exc:
             print(f"{name}: YAML error {exc}")
             ok = False
+    # archive_models.yaml (instrument time series): ids must exist in instruments.yaml unless `proposed`
+    models_path = Path(settings.config_dir) / "archive_models.yaml"
+    if models_path.exists():
+        from . import timeseries as ts
+
+        try:
+            specs = ts.load_archive_models(models_path)
+        except yaml.YAMLError as exc:
+            print(f"archive_models: YAML error {exc}")
+            return 1
+        warnings = ts.check_models(specs, ts.load_instrument_index(Path(settings.config_dir) / "instruments.yaml"))
+        print(f"archive_models: {len(specs)} entities, {sum(len(x.ena) for x in specs.values())} archive model strings, {len(warnings)} warnings")
+        for w in warnings:
+            print(f"  {w}")
+        ok = ok and not any("NOT in instruments.yaml" in w or "must be lower case" in w for w in warnings)
     return 0 if ok else 1
 
 
@@ -263,7 +278,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--to", dest="end", help="last month YYYY-MM (default: current month)")
     p.add_argument("--sources", help="comma-separated subset of sra,ena,epmc (default: all)")
     p.add_argument("--out", help="output directory (default: <out_dir>/timeseries)")
-    p.add_argument("--refresh-months", type=int, default=2, help="re-fetch cached counts for the last N months (deposit lag; default 2)")
+    p.add_argument("--refresh-months", type=int, default=2, help="re-fetch cached counts for the current month and the N months before it (deposit lag; default 2)")
     p.add_argument("--force", action="store_true", help="re-fetch every month, ignoring the cache")
     p.add_argument("--no-chart", action="store_true", help="skip the PNG even when matplotlib is installed")
     p.add_argument("--dry-run", action="store_true", help="plan only: report how many requests a run would make")

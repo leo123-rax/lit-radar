@@ -8,7 +8,10 @@ never deposited, SRA Properties index vs esummary differences).
 
 Every (source, entity, model, month) count is cached in the `timeseries` table of the radar database,
 so backfills are incremental: a month is fetched again only when it is missing, when it is recent
-enough that its count is still growing (`refresh_months`), or with `force=True`.
+enough that its count is still growing (the current month plus the `refresh_months` months before it),
+or with `force=True`. Each stored count is committed on its own, so an interrupted backfill keeps what it
+fetched, and a fresh 0 never replaces a positive cached count unless `force=True` (deposits are not
+withdrawn wholesale; that pattern means the archive renamed or dropped the vocabulary string).
 
 Endpoints, all verified live on 2026-10-17 (full record in docs/sources/timeseries.md):
 
@@ -20,16 +23,21 @@ NCBI SRA, E-utilities esearch (docs: https://www.ncbi.nlm.nih.gov/books/NBK25499
   the whole string: "instrument illumina novaseq x" gives 18,126 with or without
   `NOT "instrument illumina novaseq x plus"[Properties]`, and 500/500 sampled ExpXml records for that
   query read exactly instrument_model="Illumina NovaSeq X". A string with no records returns count "0"
-  plus warninglist.quotedphrasesnotfound. Pacing: 3 requests/s without NCBI_API_KEY, 10/s with one (the
-  shared Http client enforces this; never run two NCBI loops at once, that is what earns a 429).
+  plus warninglist.quotedphrasesnotfound (querytranslation still carries the [Properties] clause).
+  A misspelt field tag is NOT an error: "instrument revio"[Propertiez] returns HTTP 200, the same count,
+  a querytranslation ending in [All Fields] and an `errorlist` key. sra_count() therefore accepts a count
+  only when `errorlist` is absent and `querytranslation` still contains "[Properties]"; anything else is a
+  failed call (None), never cached. Pacing: 3 requests/s without NCBI_API_KEY, 10/s with one (the shared
+  Http client enforces this; never run two NCBI loops at once, that is what earns a 429).
 
 ENA portal API, count endpoint (docs: https://www.ebi.ac.uk/ena/portal/api/ and
   https://ena-docs.readthedocs.io/en/latest/retrieval/programmatic-access/advanced-search.html)
   GET https://www.ebi.ac.uk/ena/portal/api/count?result=read_experiment&format=json
       &query=first_public>=2024-01-01 AND first_public<=2024-01-31 AND instrument_model="Revio"
   -> {"count":"38"}       (without format=json the body is text/plain "count\\n38"; the number is a string)
-  instrument_model values are the controlled vocabulary of SRA.common.xsd ("Revio", "Sequel IIe",
-  "Illumina NovaSeq X Plus", "PromethION", ...); exact and case-sensitive, quoted or unquoted.
+  instrument_model values must be exact vocabulary strings of SRA.common.xsd ("Revio", "Sequel IIe",
+  "Illumina NovaSeq X Plus", "PromethION", ...), quoted or unquoted. Matching is case-insensitive
+  ("revio" and "REVIO" also give 38); "PacBio Revio" is not a vocabulary value and returns 0.
 
 Europe PMC REST search (docs: https://europepmc.org/RestfulWebService , https://europepmc.org/searchsyntax)
   GET https://www.ebi.ac.uk/europepmc/webservices/rest/search?format=json&resultType=idlist&pageSize=1
@@ -145,7 +153,11 @@ def _str_list(value: Any) -> List[str]:
 
 
 def load_archive_models(path: Path) -> Dict[str, ModelSpec]:
-    with open(path, encoding="utf-8") as fh:
+    """entity_id -> ModelSpec from config/archive_models.yaml (empty when the file is missing)."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    with open(p, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     entities = data.get("entities") if isinstance(data, dict) else None
     out: Dict[str, ModelSpec] = OrderedDict()
@@ -181,12 +193,14 @@ def load_instrument_index(path: Path) -> Dict[str, Dict[str, str]]:
 
 
 def check_models(specs: Dict[str, ModelSpec], instruments: Dict[str, Dict[str, str]]) -> List[str]:
-    """Human-readable warnings: ids missing from the gazetteer, and upper-case SRA strings."""
+    """Human-readable warnings: ids missing from the gazetteer, stale `proposed` flags, upper-case SRA strings."""
     warnings: List[str] = []
     for eid, spec in specs.items():
         if instruments and eid not in instruments:
             tag = "proposed, add the gazetteer entry" if spec.proposed else "NOT in instruments.yaml"
             warnings.append(f"{eid}: {tag}")
+        elif instruments and spec.proposed:
+            warnings.append(f"{eid}: is in instruments.yaml now; drop `proposed: true` from archive_models.yaml")
         for s in spec.sra:
             if s != s.lower():
                 warnings.append(f"{eid}: sra string {s!r} must be lower case")
@@ -195,17 +209,19 @@ def check_models(specs: Dict[str, ModelSpec], instruments: Dict[str, Dict[str, s
 
 def expand_vendor(token: str, instruments: Dict[str, Dict[str, str]], specs: Dict[str, ModelSpec]) -> List[str]:
     """Entity ids (present in archive_models) for a vendor given as id prefix ('pacb'), ticker ('PACB'),
-    vendor name ('Pacific Biosciences') or a distinctive part of it ('nanopore')."""
+    vendor name ('Pacific Biosciences') or a word of it ('nanopore', 'pacific'). A partial token must be at
+    least three characters and start a word of the vendor name, so 'i' or 'e' select nothing."""
     t = (token or "").strip().lower()
     if not t:
         return []
+    word = re.compile(r"\b" + re.escape(t)) if len(t) >= 3 else None
     out: List[str] = []
     for eid, spec in specs.items():
         meta = instruments.get(eid, {})
         vendor = (meta.get("vendor") or spec.vendor or "").lower()
         ticker = (meta.get("ticker") or "").lower()
         prefix = eid.split("-", 1)[0].lower()
-        if t in (prefix, ticker) or (vendor and (t == vendor or t in vendor)):
+        if t in (prefix, ticker) or (vendor and (t == vendor or (word is not None and word.search(vendor)))):
             out.append(eid)
     return out
 
@@ -243,7 +259,12 @@ def sra_term(model: str, start: str, end: str) -> str:
 
 
 def sra_count(http: Http, model: str, start: str, end: str, api_key: str = "") -> Optional[int]:
-    """Experiments with the given instrument_model made public in [start, end]; None on failure."""
+    """Experiments with the given instrument_model made public in [start, end]; None on failure.
+
+    A count is accepted only when esearch really evaluated the Properties clause: NCBI answers a misspelt
+    field tag with HTTP 200, a count, an `errorlist` and a querytranslation rewritten to [All Fields], and
+    that number is not a Properties count. A zero-deposit string keeps the [Properties] clause and adds
+    warninglist.quotedphrasesnotfound; that is a genuine 0."""
     params: Dict[str, Any] = {"db": "sra", "term": sra_term(model, start, end), "retmax": 0, "retmode": "json"}
     if api_key:
         params["api_key"] = api_key
@@ -253,6 +274,13 @@ def sra_count(http: Http, model: str, start: str, end: str, api_key: str = "") -
     result = data.get("esearchresult")
     if not isinstance(result, dict) or "count" not in result:
         return None  # {"error": "..."} and other unexpected shapes
+    if result.get("errorlist"):
+        log.warning("SRA esearch reported errorlist %s for %r", result.get("errorlist"), params["term"])
+        return None
+    translation = str(result.get("querytranslation") or "")
+    if "[Properties]" not in translation:
+        log.warning("SRA esearch did not evaluate the Properties clause (querytranslation=%r)", translation)
+        return None
     return _to_int(result.get("count"))
 
 
@@ -308,8 +336,25 @@ def plan_jobs(specs: Dict[str, ModelSpec], entity_ids: Sequence[str], months: Se
 
 
 def refresh_cutoff(today: date, refresh_months: int) -> str:
-    """Months >= this cutoff are fetched again even when cached (their counts are still growing)."""
+    """Months >= this cutoff are fetched again even when cached (their counts are still growing): the
+    current month plus the `refresh_months` calendar months before it (2 on 2026-10-17 -> 2026-08)."""
     return shift_month(today.strftime("%Y-%m"), -max(0, int(refresh_months)))
+
+
+def job_key(job: Job) -> str:
+    return f"{job.source}:{job.entity_id}:{job.model}:{job.month}"
+
+
+def fetch_count(http: Http, job: Job, api_key: str = "") -> Optional[int]:
+    """One live count for a job (None on failure); dispatches on job.source."""
+    start, end = month_bounds(job.month)
+    if job.source == "sra":
+        return sra_count(http, job.model, start, end, api_key)
+    if job.source == "ena":
+        return ena_count(http, job.model, start, end)
+    if job.source == "epmc":
+        return epmc_count(http, job.terms, start, end)
+    return None
 
 
 def backfill(
@@ -322,39 +367,47 @@ def backfill(
     api_key: str = "",
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Fetch and cache every job's count. Cached months older than the refresh window are skipped
-    unless force=True. Failed calls are reported and never cached (an older cached value survives)."""
+    """Fetch and cache every job's count, committing each stored value on its own so an interrupted run
+    (Ctrl-C, crash, exception) keeps everything fetched so far. Cached months older than the refresh
+    window are skipped unless force=True. Failed calls are reported under `failed` and never cached (an
+    older cached value survives). A fresh 0 for a key whose cached count is positive is reported under
+    `kept` and NOT stored unless force=True: public deposits are not withdrawn wholesale, so that pattern
+    means the archive renamed or dropped the vocabulary string (SRA then also reports
+    warninglist.quotedphrasesnotfound), and overwriting history with zeros would hide it."""
     today = today or date.today()
     cutoff = refresh_cutoff(today, refresh_months)
-    report: Dict[str, Any] = {"jobs": len(jobs), "requests": 0, "cached": 0, "failed": [], "by_source": {}, "cutoff": cutoff}
-    for job in jobs:
-        bs = report["by_source"].setdefault(job.source, {"requests": 0, "cached": 0, "failed": 0})
-        cached = store.get_timeseries_count(job.source, job.entity_id, job.model, job.month)
-        if cached is not None and not force and job.month < cutoff:
-            report["cached"] += 1
-            bs["cached"] += 1
-            continue
-        if dry_run:
+    report: Dict[str, Any] = {"jobs": len(jobs), "requests": 0, "cached": 0, "failed": [], "kept": [], "by_source": {}, "cutoff": cutoff}
+    try:
+        for job in jobs:
+            bs = report["by_source"].setdefault(job.source, {"requests": 0, "cached": 0, "failed": 0, "kept": 0})
+            cached = store.get_timeseries_count(job.source, job.entity_id, job.model, job.month)
+            if cached is not None and not force and job.month < cutoff:
+                report["cached"] += 1
+                bs["cached"] += 1
+                continue
+            if dry_run:
+                report["requests"] += 1
+                bs["requests"] += 1
+                continue
+            n = fetch_count(http, job, api_key)
             report["requests"] += 1
             bs["requests"] += 1
-            continue
-        start, end = month_bounds(job.month)
-        if job.source == "sra":
-            n = sra_count(http, job.model, start, end, api_key)
-        elif job.source == "ena":
-            n = ena_count(http, job.model, start, end)
-        elif job.source == "epmc":
-            n = epmc_count(http, job.terms, start, end)
-        else:
-            n = None
-        report["requests"] += 1
-        bs["requests"] += 1
-        if n is None:
-            report["failed"].append(f"{job.source}:{job.entity_id}:{job.model}:{job.month}")
-            bs["failed"] += 1
-            continue
-        store.put_timeseries_count(job.source, job.entity_id, job.model, job.month, n)
-    store.commit()
+            if n is None:
+                report["failed"].append(job_key(job))
+                bs["failed"] += 1
+                continue
+            if n == 0 and not force and cached is not None and int(cached["count"]) > 0:
+                log.warning(
+                    "timeseries: %s returned 0 for %s but %d is cached; keeping the cached value (--force overwrites)",
+                    job.source, job_key(job), int(cached["count"]),
+                )
+                report["kept"].append(job_key(job))
+                bs["kept"] += 1
+                continue
+            store.put_timeseries_count(job.source, job.entity_id, job.model, job.month, n)
+            store.commit()  # one count per transaction: a commit costs far less than the 0.34 s pacing
+    finally:
+        store.commit()
     return report
 
 
@@ -506,9 +559,13 @@ def run(
     """Resolve entities, backfill the cache, and write CSV + Markdown (+ PNG when matplotlib exists)."""
     today = today or date.today()
     config_dir = Path(config_dir)
-    specs = load_archive_models(config_dir / "archive_models.yaml")
+    specs_path = config_dir / "archive_models.yaml"
+    specs = load_archive_models(specs_path)
     instruments = load_instrument_index(config_dir / "instruments.yaml")
     report: Dict[str, Any] = {"warnings": check_models(specs, instruments), "errors": []}
+    if not specs:
+        report["errors"].append(f"{specs_path} not found or has no `entities`")
+        return report
     bad_sources = [s for s in sources if s not in SOURCES]
     if bad_sources:
         report["errors"].append(f"unknown sources {bad_sources}; choose from {list(SOURCES)}")
@@ -533,7 +590,14 @@ def run(
     if dry_run:
         report["dry_run"] = True
         return report
-    rows = store.timeseries_rows(sources=list(sources), entity_ids=entity_ids, start_month=months[0], end_month=months[-1])
+    # only the series planned for this run: rows left behind by renamed model lists or epmc_terms stay in
+    # the table (prune them by hand if you like) but never leak into the outputs as stale columns
+    keep = {(j.source, j.entity_id, j.model) for j in jobs}
+    rows = [
+        r
+        for r in store.timeseries_rows(sources=list(sources), entity_ids=entity_ids, start_month=months[0], end_month=months[-1])
+        if (r["source"], r["entity_id"], r["model"]) in keep
+    ]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"timeseries_{months[0]}_{months[-1]}"
@@ -545,4 +609,9 @@ def run(
         report["outputs"]["png"] = str(png_path) if write_png(rows, months, png_path) else None
     if report["backfill"]["failed"]:
         report["errors"].append(f"{len(report['backfill']['failed'])} count requests failed (not cached; re-run to retry)")
+    if report["backfill"]["kept"]:
+        report["warnings"].append(
+            f"{len(report['backfill']['kept'])} fresh zero counts ignored because a positive count is cached (see backfill.kept; "
+            "check the vocabulary string, or --force to overwrite)"
+        )
     return report

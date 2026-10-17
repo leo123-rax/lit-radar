@@ -4,14 +4,16 @@
 #   sra         SRA Properties-index strings: SRA's own instrument_model spelling in LOWER CASE, queried as
 #               "instrument <string>"[Properties]. The match is on the whole string ("instrument illumina
 #               novaseq x" does not include "... x plus"), so list every sub-model you want counted.
-#   ena         ENA portal `instrument_model` values, exact and case-sensitive. SRA and ENA share the controlled
-#               vocabulary in SRA.common.xsd (github.com/enasequence/schema), so `ena` is the mixed-case twin of `sra`.
+#   ena         ENA portal `instrument_model` values: the exact vocabulary strings (matching is case-insensitive, but
+#               "PacBio Revio" is not a vocabulary value and returns 0). SRA and ENA share the controlled vocabulary in
+#               SRA.common.xsd (github.com/enasequence/schema), so `ena` is the mixed-case twin of `sra`.
 #   epmc_terms  Phrases searched in Europe PMC Methods sections (METHODS:"..."), OR-ed into one query per entity;
 #               the hit count is papers, not mentions. Europe PMC phrase search is prefix-inclusive at the token
 #               level ("NovaSeq X" also matches "NovaSeq X Plus"), so keep terms specific to the model family.
 #   vendor      fallback for `--vendor` expansion when the id is not (yet) in instruments.yaml.
 #   proposed    true = the id is pre-registered here but the gazetteer entry still has to be added to
-#               instruments.yaml (the time series works without it; `check` warns).
+#               instruments.yaml (the time series works without it; `litradar check-config` and the `warnings`
+#               array of `litradar timeseries` list it, and tell you when the flag has become stale).
 #
 # Vocabulary verified live against SRA esearch, ENA /count and SRA.common.xsd on 2026-10-17. Models in the
 # schema with no gazetteer entry and therefore not covered: Illumina MiniSeq, Ultima UG 200, Genapsys, GeneMind,
@@ -21,11 +23,10 @@ entities:
   # ---------------- Pacific Biosciences ----------------
   pacb-rs-ii:
     vendor: Pacific Biosciences
-    proposed: true
     sra: ["pacbio rs ii", "pacbio rs"]
     ena: ["PacBio RS II", "PacBio RS"]
     epmc_terms: ["PacBio RS II", "PacBio RSII", "RS II system"]
-    notes: "legacy SMRT instruments (2011-2016); not in instruments.yaml yet"
+    notes: "legacy SMRT instruments (2011-2016)"
   pacb-sequel:
     vendor: Pacific Biosciences
     proposed: true

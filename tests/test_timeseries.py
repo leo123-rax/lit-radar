@@ -45,8 +45,33 @@ class FakeHttp:
         return self.payloads.pop(0) if self.payloads else None
 
 
-def _sra(count):
-    return {"header": {"type": "esearch", "version": "0.3"}, "esearchresult": {"count": str(count), "retmax": "0", "retstart": "0", "idlist": [], "translationset": [], "querytranslation": "x"}}
+SRA_TRANSLATION = '2025/09/01[PDAT] : 2025/09/30[PDAT] AND "instrument revio"[Properties]'
+
+
+def _sra(count, **extra):
+    """esearch JSON as returned live on 2026-10-17 (retmax=0, so idlist is empty)."""
+    result = {"count": str(count), "retmax": "0", "retstart": "0", "idlist": [], "translationset": [], "querytranslation": SRA_TRANSLATION}
+    result.update(extra)
+    return {"header": {"type": "esearch", "version": "0.3"}, "esearchresult": result}
+
+
+def _sra_not_found(model="vega"):
+    """A valid vocabulary string with zero deposits: count 0, the [Properties] clause kept, phrase flagged."""
+    return _sra(0, querytranslation=SRA_TRANSLATION.replace("revio", model),
+                warninglist={"phrasesignored": [], "quotedphrasesnotfound": [f'"instrument {model}"[Properties]'], "outputmessages": ["No items found."]})
+
+
+class ExplodingHttp(FakeHttp):
+    """Serves payloads, then raises on call number `blow_at` (simulates Ctrl-C / crash mid-backfill)."""
+
+    def __init__(self, payloads, blow_at):
+        super().__init__(payloads)
+        self.blow_at = blow_at
+
+    def get_json(self, url, params=None, cache=False):
+        if len(self.calls) + 1 == self.blow_at:
+            raise KeyboardInterrupt
+        return super().get_json(url, params, cache)
 
 
 def _specs():
@@ -84,16 +109,25 @@ def test_query_builders_match_verified_live_syntax():
 
 # ---- count parsing: normal / empty / malformed -------------------------------------------------
 def test_sra_count_payloads():
+    # the misspelt-field payload is what NCBI returned live for "instrument revio"[Propertiez]: HTTP 200, a count,
+    # an errorlist (with empty lists) and the clause rewritten to [All Fields]; it must never be taken as a count
+    bad_field = _sra(851, querytranslation=SRA_TRANSLATION.replace("[Properties]", "[All Fields]"), errorlist={"phrasesnotfound": [], "fieldsnotfound": []})
     http = FakeHttp([
         _sra(851),
-        {"header": {}, "esearchresult": {"count": "0", "retmax": "0", "idlist": [], "warninglist": {"quotedphrasesnotfound": ['"instrument vega"[Properties]'], "outputmessages": ["No items found."]}}},
+        _sra_not_found("vega"),
+        bad_field,
+        _sra(851, querytranslation=SRA_TRANSLATION.replace("[Properties]", "[All Fields]")),
+        {"header": {}, "esearchresult": {"count": "851", "retmax": "0", "idlist": []}},
         {"error": "API rate limit exceeded", "api-key": "x"},
-        {"esearchresult": {"count": "lots"}},
+        _sra("lots"),
         [],
         None,
     ])
     assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") == 851
     assert ts.sra_count(http, "Vega", "2025-09-01", "2025-09-30") == 0  # phrase not found == zero deposits
+    assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") is None  # errorlist present
+    assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") is None  # Properties clause lost
+    assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") is None  # no querytranslation at all
     assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") is None  # error envelope
     assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") is None  # non-numeric count
     assert ts.sra_count(http, "Revio", "2025-09-01", "2025-09-30") is None  # wrong JSON shape
@@ -168,12 +202,42 @@ def test_backfill_caches_and_stops_asking_for_old_months(tmp_path):
     assert rep["failed"] == ["sra:pacb-revio:revio:2026-08"] and rep["by_source"]["sra"]["failed"] == 1
     assert store.get_timeseries_count("sra", "pacb-revio", "revio", "2026-08")["count"] == 120
     assert store.get_timeseries_count("sra", "pacb-revio", "revio", "2026-09")["count"] == 131
-    # force re-fetches everything; dry_run plans without touching the network
-    http = FakeHttp([_sra(1)] * 4)
-    assert ts.backfill(http, store, jobs, refresh_months=2, today=today, force=True)["requests"] == 4 and len(http.calls) == 4
+    # a fresh 0 (phrase not found) never overwrites a positive cached count: reported under `kept`
+    http = FakeHttp([_sra_not_found("revio"), _sra(132)])
+    rep = ts.backfill(http, store, jobs, refresh_months=2, today=today)
+    assert rep["kept"] == ["sra:pacb-revio:revio:2026-08"] and rep["failed"] == [] and rep["by_source"]["sra"]["kept"] == 1
+    assert store.get_timeseries_count("sra", "pacb-revio", "revio", "2026-08")["count"] == 120
+    assert store.get_timeseries_count("sra", "pacb-revio", "revio", "2026-09")["count"] == 132
+    # ... but a 0 on top of a cached 0 or a missing month is stored, and force overwrites anything
+    store.put_timeseries_count("sra", "pacb-revio", "revio", "2026-09", 0)
+    http = FakeHttp([_sra_not_found("revio"), _sra_not_found("revio")])
+    rep = ts.backfill(http, store, jobs, refresh_months=2, today=today)
+    assert rep["kept"] == ["sra:pacb-revio:revio:2026-08"] and store.get_timeseries_count("sra", "pacb-revio", "revio", "2026-09")["count"] == 0
+    http = FakeHttp([_sra_not_found("revio")] * 4)
+    rep = ts.backfill(http, store, jobs, refresh_months=2, today=today, force=True)
+    assert rep["requests"] == 4 and rep["kept"] == [] and len(http.calls) == 4
+    assert [r["count"] for r in store.timeseries_rows(sources=["sra"], entity_ids=["pacb-revio"])] == [0, 0, 0, 0]
+    # dry_run plans without touching the network
     http = FakeHttp([])
     rep = ts.backfill(http, store, jobs, refresh_months=2, today=today, dry_run=True)
     assert rep["requests"] == 2 and rep["cached"] == 2 and http.calls == []
+
+
+def test_backfill_commits_each_count_so_an_interrupted_run_keeps_progress(tmp_path):
+    db = tmp_path / "t.sqlite"
+    store = Store(db)
+    jobs = ts.plan_jobs(_specs(), ["pacb-revio"], ["2024-01", "2024-02", "2024-03", "2024-04"], ["sra"])
+    http = ExplodingHttp([_sra(10), _sra(11)], blow_at=3)
+    with pytest.raises(KeyboardInterrupt):
+        ts.backfill(http, store, jobs, today=date(2026, 10, 17))
+    # a SECOND connection sees the first two counts: they were committed, not left in an open transaction
+    other = Store(db)
+    assert [(r["month"], r["count"]) for r in other.timeseries_rows(sources=["sra"], entity_ids=["pacb-revio"])] == [("2024-01", 10), ("2024-02", 11)]
+    other.close()
+    # the next run only asks for the two missing months
+    http = FakeHttp([_sra(12), _sra(13)])
+    rep = ts.backfill(http, store, jobs, today=date(2026, 10, 17))
+    assert rep["requests"] == 2 and rep["cached"] == 2 and [p["term"][:7] for _, p in http.calls] == ["2024/03", "2024/04"]
 
 
 def test_backfill_routes_each_source(tmp_path):
@@ -198,6 +262,7 @@ def test_real_config_is_consistent_with_gazetteer_and_vocabulary():
         "elem-aviti", "ultima-ug100", "mgi-dnbseq-t7", "mgi-dnbseq-g400", "mgi-dnbseq", "thermo-ion-torrent",
     }
     assert required <= set(specs)
+    assert "pacb-rs-ii" in instruments  # landed in the gazetteer; its `proposed` flag was dropped
     for eid, spec in specs.items():
         assert spec.proposed or eid in instruments, f"{eid} is not a gazetteer id"
         assert all(s == s.lower() for s in spec.sra), eid
@@ -207,10 +272,10 @@ def test_real_config_is_consistent_with_gazetteer_and_vocabulary():
     # every archive model string is claimed by exactly one entity
     claimed = [m for s in specs.values() for m in s.ena]
     assert len(claimed) == len(set(claimed)), "an ENA model string is listed under two entities"
-    # only the two legacy PacBio ids are pre-registered ahead of the gazetteer
-    assert {eid for eid, s in specs.items() if s.proposed} == {"pacb-rs-ii", "pacb-sequel"}
+    # only the first-generation Sequel is still pre-registered ahead of the gazetteer
+    assert {eid for eid, s in specs.items() if s.proposed} == {"pacb-sequel"}
     warnings = ts.check_models(specs, instruments)
-    assert all("proposed" in w for w in warnings), warnings
+    assert warnings == ["pacb-sequel: proposed, add the gazetteer entry"]
     # Flongle has no archive model; it is reachable through Europe PMC only
     assert "Flongle" in specs["ont-minion"].epmc_terms and "Vega" in specs["pacb-vega"].ena
 
@@ -222,8 +287,27 @@ def test_load_archive_models_tolerates_sparse_and_odd_entries(tmp_path):
     assert set(specs) == {"a-one", "b-two"}
     assert specs["a-one"].sra == ["revio"] and specs["a-one"].ena == ["Revio"] and specs["a-one"].epmc_terms == []
     assert specs["b-two"].models_for("sra") == [] and specs["b-two"].models_for("epmc") == []
-    assert ts.load_archive_models(tmp_path / "empty.yaml") == {} if (tmp_path / "empty.yaml").write_text("", encoding="utf-8") == 0 else True
+    (tmp_path / "empty.yaml").write_text("", encoding="utf-8")
+    assert ts.load_archive_models(tmp_path / "empty.yaml") == {}
+    assert ts.load_archive_models(tmp_path / "missing.yaml") == {}
     assert ts.load_instrument_index(tmp_path / "missing.yaml") == {}
+
+
+def test_check_models_flags_missing_ids_stale_flags_and_case():
+    specs = {
+        "x-new": ts.ModelSpec("x-new", proposed=True, sra=["x"], ena=["X"]),
+        "x-landed": ts.ModelSpec("x-landed", proposed=True, sra=["y"], ena=["Y"]),
+        "x-unknown": ts.ModelSpec("x-unknown", sra=["Z"], ena=["Z"]),
+        "x-fine": ts.ModelSpec("x-fine", sra=["w"], ena=["W"]),
+    }
+    instruments = {"x-landed": {"name": "L", "vendor": "V", "ticker": ""}, "x-fine": {"name": "F", "vendor": "V", "ticker": ""}}
+    assert ts.check_models(specs, instruments) == [
+        "x-new: proposed, add the gazetteer entry",
+        "x-landed: is in instruments.yaml now; drop `proposed: true` from archive_models.yaml",
+        "x-unknown: NOT in instruments.yaml",
+        "x-unknown: sra string 'Z' must be lower case",
+    ]
+    assert ts.check_models(specs, {}) == ["x-unknown: sra string 'Z' must be lower case"]  # no gazetteer: ids unchecked
 
 
 def test_vendor_expansion_and_entity_resolution():
@@ -234,11 +318,14 @@ def test_vendor_expansion_and_entity_resolution():
         "ont-minion": {"name": "MinION", "vendor": "Oxford Nanopore Technologies", "ticker": "ONT.L"},
         "txg-xenium": {"name": "Xenium", "vendor": "10x Genomics", "ticker": "TXG"},  # no archive models -> never expanded
     }
-    for token in ("pacb", "PACB", "Pacific Biosciences", "pacific"):
+    for token in ("pacb", "PACB", "Pacific Biosciences", "pacific", "biosciences"):
         assert ts.expand_vendor(token, instruments, specs) == ["pacb-revio", "pacb-sequel-ii"], token
     assert ts.expand_vendor("nanopore", instruments, specs) == ["ont-minion"]
     assert ts.expand_vendor("ont.l", instruments, specs) == ["ont-minion"]
     assert ts.expand_vendor("txg", instruments, specs) == [] and ts.expand_vendor("", instruments, specs) == []
+    # partial tokens must start a word and be at least three characters: no accidental select-all
+    for token in ("i", "e", "ci", "cific", "sciences", "ore"):
+        assert ts.expand_vendor(token, instruments, specs) == [], token
     # vendor fallback from archive_models when the id is not in the gazetteer
     assert ts.expand_vendor("pacb", {}, specs) == ["pacb-revio", "pacb-sequel-ii"]
     ids, warnings = ts.resolve_entities(["ont-minion", "nope"], ["pacb", "acme"], instruments, specs)
@@ -286,14 +373,24 @@ def test_png_is_optional_and_never_raises(tmp_path):
 def test_run_end_to_end_offline(tmp_path):
     http = FakeHttp([_sra(38), _sra(40), {"count": "38"}, {"count": "41"}, {"hitCount": 7}, {"hitCount": 9}])
     store = Store(tmp_path / "db.sqlite")
+    # a row from a model string that is no longer configured for this entity must not leak into the outputs
+    store.put_timeseries_count("sra", "pacb-revio", "revio (old spelling)", "2024-01", 5)
+    store.put_timeseries_count("epmc", "pacb-revio", "Revio|Revio system", "2024-01", 9)
+    store.commit()
     rep = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2024-01", end="2024-02",
                  http=http, store=store, today=date(2026, 10, 17), chart=False)
     assert rep["errors"] == [] and rep["entities"] == ["pacb-revio"] and rep["months"] == 2
     assert rep["backfill"]["requests"] == 6 and rep["outputs"]["rows"] == 6
     assert Path(rep["outputs"]["csv"]).name == "timeseries_2024-01_2024-02.csv" and Path(rep["outputs"]["markdown"]).exists()
     assert "png" not in rep["outputs"]
+    csv_text = Path(rep["outputs"]["csv"]).read_text(encoding="utf-8")
+    assert "old spelling" not in csv_text and "Revio system" not in csv_text and csv_text.count("\n") == 7
     md = Path(rep["outputs"]["markdown"]).read_text(encoding="utf-8")
     assert "| 2024-01 | 38 | 38 |" in md  # sra table: one series + total
+    assert "old spelling" not in md
+    # a config dir without archive_models.yaml is an error in the report, not a traceback
+    rep = ts.run(tmp_path, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], http=http, store=store)
+    assert len(rep["errors"]) == 1 and "archive_models.yaml" in rep["errors"][0]
     # nothing selected / bad month / unknown source are reported, not raised
     assert ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", http=http, store=store)["errors"]
     assert "before" in ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2024-03", end="2024-01", http=http, store=store)["errors"][0]
@@ -316,3 +413,14 @@ def test_cli_dry_run_makes_no_requests(tmp_path, monkeypatch, capsys):
     # x 3 months x 2 sources = 48 planned requests
     assert rep["backfill"]["requests"] == 48 and rep["backfill"]["cached"] == 0
     assert main(["timeseries", "--from", "2024-01", "--to", "2024-01", "--dry-run"]) == 1  # no entities selected
+
+
+def test_check_config_validates_archive_models(capsys):
+    from litradar.cli import main
+
+    rc = main(["check-config"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    line = [ln for ln in out.splitlines() if ln.startswith("archive_models:")]
+    assert len(line) == 1 and "entities" in line[0] and "1 warnings" in line[0], out
+    assert "  pacb-sequel: proposed, add the gazetteer entry" in out

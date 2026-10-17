@@ -21,8 +21,9 @@ python -m litradar timeseries --vendor nanopore --vendor ilmn --dry-run  # how m
 Options: `--entity` (repeatable; ids from `config/archive_models.yaml`), `--vendor` (repeatable; vendor
 name, ticker or id prefix such as `pacb`, `ont`, `ilmn`, `mgi`), `--from/--to YYYY-MM` (default: the
 last 36 months), `--sources` (default all three), `--out` (default `<out_dir>/timeseries`),
-`--refresh-months N` (re-fetch the last N months even when cached; default 2), `--force`, `--no-chart`,
-`--dry-run`.
+`--refresh-months N` (re-fetch the current month and the N months before it even when cached; default 2,
+so on 2026-10-17 months >= 2026-08 are always re-fetched), `--force` (re-fetch and overwrite everything),
+`--no-chart`, `--dry-run`.
 
 Outputs in `--out`: `timeseries_<from>_<to>.csv` (long format `source,entity_id,model,month,count`),
 `timeseries_<from>_<to>.md` (one table per source, rows = months, columns = entity/model, with totals) and,
@@ -35,8 +36,27 @@ Every `(source, entity_id, model, month)` count is stored in the `timeseries` ta
 (`CREATE TABLE IF NOT EXISTS timeseries(...)` in `litradar/store.py`). A second run only requests months
 that are missing or inside the refresh window, so a 2019-to-date backfill costs its request budget once:
 live on 2026-10-17 the first Revio run made 135 requests (45 months x 3 sources), the second made 6
-(the two most recent months x 3 sources) and read 129 from the cache. Failed calls are reported under
-`backfill.failed` and never cached, so an older value survives and the next run retries.
+(2026-08 and 2026-09, the two months of the range inside the refresh window, x 3 sources) and read 129
+from the cache. Failed calls are reported under `backfill.failed` and never cached, so an older value
+survives and the next run retries.
+
+Three safety rules protect the cache:
+
+* **Every count is committed on its own.** A Ctrl-C, a crash or an exception half-way through a
+  2,000-request backfill keeps everything fetched so far (verified live: a run interrupted with SIGINT after
+  8 s left its completed months readable from a separate connection, and the next run asked only for the
+  rest).
+* **A fresh 0 never overwrites a positive cached count** (unless `--force`). Public deposits are not
+  withdrawn wholesale, so a month that had 120 experiments and suddenly reports 0 means the archive
+  renamed or dropped the vocabulary string (SRA then also answers `quotedphrasesnotfound`). Such keys are
+  listed under `backfill.kept` and the report carries a warning; fix the string in
+  `config/archive_models.yaml`, or `--force` if the zero is real.
+* **SRA counts are accepted only when esearch really evaluated the `[Properties]` clause** (see the SRA
+  section below); anything else is a failed call, not a number.
+
+Rows whose series is no longer configured (a renamed model string or a changed `epmc_terms` set) stay in
+the table but are excluded from the CSV, Markdown and chart, which only ever contain the series planned
+for the current run. Prune the `timeseries` table by hand if you want them gone.
 
 Request budget: one request per model string per month per source. For all PacBio models (8 archive
 strings + 6 Europe PMC term sets) over 2019-01..2026-10 (94 months) that is 8 x 94 x 2 + 6 x 94 = 2,068
@@ -69,7 +89,14 @@ GET https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi
 * The index is exhaustive: for 2025-09 the eight PacBio strings summed to 4,693, the same figure as
   `"pacbio smrt"[Platform]`.
 * A string with no records returns `count: "0"` with `warninglist.quotedphrasesnotfound` (seen for
-  `vega`, `aviti 24`, `ug 200`, `dnbseq-g800`, all valid vocabulary with zero deposits so far). Treated as 0.
+  `vega`, `aviti 24`, `ug 200`, `dnbseq-g800`, all valid vocabulary with zero deposits so far); the
+  `querytranslation` still carries the `[Properties]` clause. Treated as 0 (subject to the never-overwrite-
+  a-positive-count rule above).
+* **A misspelt field tag is not an error for NCBI.** Live on 2026-10-17, `"instrument revio"[Propertiez]`
+  returned HTTP 200, `count: "851"`, an `errorlist` key (`{"phrasesnotfound": [], "fieldsnotfound": []}`)
+  and a `querytranslation` ending in `"instrument revio"[All Fields]`: a free-text count, not a Properties
+  count. `sra_count()` therefore returns a number only when `errorlist` is absent **and** `querytranslation`
+  contains `[Properties]`; otherwise the call is reported as failed and nothing is cached.
 * `[PDAT]` is the date the SRA record became public, formatted `YYYY/MM/DD:YYYY/MM/DD`, both ends inclusive.
 * Pacing: 3 requests/s without an API key, 10/s with one; `Http` enforces 0.34 s / 0.11 s.
 
@@ -86,8 +113,9 @@ GET https://www.ebi.ac.uk/ena/portal/api/count
 ```
 
 * Without `format=json` the body is `text/plain` with two lines, `count` and `38`. The number is a string.
-* `instrument_model="Revio"` and `instrument_model=Revio` both work (quoted form used). Values are exact and
-  case-sensitive: `"PacBio Revio"` returns 0.
+* `instrument_model="Revio"` and `instrument_model=Revio` both work (quoted form used). The value must be
+  the exact vocabulary string, but matching is case-insensitive: `"revio"` and `"REVIO"` also return 38.
+  `"PacBio Revio"` returns 0 because it is not a vocabulary value, not because of case.
 * `returnFields?result=read_experiment` confirms the field names `first_public`, `instrument_model`,
   `instrument_platform`.
 * All-time counts on 2026-10-17 for a few models: `Illumina HiSeq 2500` 4,366,070; `MinION` 423,568;
@@ -132,9 +160,11 @@ fetched 2026-10-17). The relevant platforms:
 Each entity in the config maps to `sra` (lower-case strings), `ena` (exact strings) and `epmc_terms`.
 `tests/test_timeseries.py` checks that every `ena` value is in this vocabulary, that `sra` is its lower-case
 twin, that no model string is claimed by two entities, and that every id exists in `config/instruments.yaml`
-unless flagged `proposed: true`. Two legacy PacBio ids are pre-registered that way until the gazetteer gains
-entries for them: `pacb-rs-ii` (PacBio RS, RS II) and `pacb-sequel` (first-generation Sequel). They work
-in the time series today; `check` warns until the gazetteer catches up.
+unless flagged `proposed: true`. One legacy PacBio id is still pre-registered that way until the gazetteer
+gains an entry for it: `pacb-sequel` (first-generation Sequel; `pacb-rs-ii` landed in the gazetteer on
+2026-10-17 and its flag was dropped). It works in the time series today; `litradar check-config` prints the
+warning (and tells you when a `proposed` flag has become stale because the id now exists), and
+`litradar timeseries` repeats it in the `warnings` array of its report.
 
 Not coverable from the archives (no `instrument_model` value): Nanopore sub-models and Flongle, Illumina
 MiSeq i100, MGI DNBSEQ-G99 and T20, Singular G4, Roche SBX. Those entities carry only `epmc_terms`.
@@ -179,8 +209,9 @@ GeneMind, Vela Sentosa, capillary and 454 instruments.
 ## Live run on 2026-10-17: Revio, monthly, 2023-01 to 2026-09
 
 `python -m litradar timeseries --entity pacb-revio --from 2023-01 --to 2026-09 --sources sra,ena,epmc`
-(135 requests, 0 failures; second run: 6 requests, 129 cached). Revio began shipping in early 2023, which is
-visible as the first deposits in 2023-08 and the first Methods mentions in 2023-01/02 (early-access sites).
+(135 requests, 0 failures, 0 kept; second run: 6 requests, 129 cached; re-run unchanged after the review
+fixes on the same day). Revio began shipping in early 2023, which is visible as the first deposits in
+2023-08 and the first Methods mentions in 2023-01/02 (early-access sites).
 
 | month | SRA experiments | ENA experiments | Europe PMC papers |
 |---|---:|---:|---:|
@@ -231,9 +262,11 @@ visible as the first deposits in 2023-08 and the first Methods mentions in 2023-
 | 2026-09 | 2081 | 1936 | 41 |
 | **total** | **32855** | **31820** | **1308** |
 
-Yearly SRA experiments: 2023 = 224; 2024 = 3,326; 2025 = 10,921; 2026 (Jan-Sep) = 18,384. The last two to
-three months will still grow (caveat 2); the 2026-08 spike is a handful of large cohort releases, not a
-step change in the installed base (caveat 1).
+Yearly SRA experiments: 2023 = 224; 2024 = 3,326; 2025 = 10,921; 2026 (Jan-Sep) = 18,384. Yearly Europe PMC
+papers: 2023 = 10; 2024 = 121; 2025 = 545; 2026 (Jan-Sep) = 632. The last two to three months will still
+grow (caveat 2). The 2026-08 spike is a handful of large releases, not a step change in the installed base
+(caveat 1): a 1,000-record `esummary` sample of the 4,418 experiments spans 61 studies, and the three largest
+make up 73% of the sample.
 
 ## Wiring into the weekly pipeline (optional)
 
