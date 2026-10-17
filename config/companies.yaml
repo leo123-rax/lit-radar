@@ -12,8 +12,8 @@ entries:
 - {id: oxford-nanopore, name: Oxford Nanopore Technologies, ticker: ONT.L, type: tools, watch_news: true, domains: [nanoporetech.com], aliases: ["Oxford Nanopore", "ONT plc"]}
 - {id: element-biosciences, name: Element Biosciences, ticker: private, type: tools, watch_news: true, domains: [elementbio.com], aliases: ["Element Bio"]}
 - {id: ultima-genomics, name: Ultima Genomics, ticker: private, type: tools, watch_news: true, domains: [ultimagen.com], aliases: []}
-- {id: mgi-tech, name: MGI Tech, ticker: 688114.SS, type: tools, watch_news: true, domains: [mgi-tech.com, completegenomics.com], aliases: ["MGI", "Complete Genomics", "MGI Tech Co"]}
-- {id: bgi-genomics, name: BGI Genomics, ticker: 300676.SZ, type: tools, watch_news: false, domains: [genomics.cn, bgi.com], aliases: ["BGI", "BGI-Shenzhen", "BGI Research", "Beijing Genomics Institute", "STOmics"]}
+- {id: mgi-tech, name: MGI Tech, ticker: 688114.SS, type: tools, watch_news: true, domains: [mgi-tech.com, completegenomics.com], aliases: ["MGI", "Complete Genomics", "MGI Tech Co", "MGI Tech Co., Ltd", "Shenzhen MGI Tech", "华大智造", "深圳华大智造科技股份有限公司", "华大智造科技"]}
+- {id: bgi-genomics, name: BGI Genomics, ticker: 300676.SZ, type: tools, watch_news: false, domains: [genomics.cn, bgi.com, bgigenomics.com], aliases: ["BGI", "BGI-Shenzhen", "BGI Research", "Beijing Genomics Institute", "STOmics", "BGI Group", "BGI Genomics Co", "华大基因", "深圳华大基因股份有限公司", "华大基因研究院", "华大集团", "华大时空"]}
 - {id: singular-genomics, name: Singular Genomics, ticker: private, type: tools, watch_news: false, domains: [singulargenomics.com], aliases: []}
 - {id: roche, name: Roche, ticker: ROG.SW, type: tools, watch_news: true, domains: [roche.com], aliases: ["F. Hoffmann-La Roche", "Hoffmann-La Roche", "Roche Diagnostics", "Roche Sequencing", "Roche Molecular Systems", "Kapa Biosystems", "Stratos Genomics"]}
 - {id: genentech, name: Genentech, ticker: ROG.SW, type: pharma, parent: Roche, domains: [gene.com], aliases: ["Genentech Inc"]}
@@ -34,7 +34,7 @@ entries:
 - {id: quantum-si, name: Quantum-Si, ticker: QSI, type: tools, watch_news: true, domains: [quantum-si.com], aliases: ["Quantum Si", "QuantumSi"]}
 - {id: alamar, name: Alamar Biosciences, ticker: ALMR, type: tools, watch_news: true, domains: [alamarbio.com], aliases: ["Alamar Bio", "Alamar"], case_sensitive_aliases: ["Alamar"], context_terms: ["NULISA", "Biosciences", "Fremont", "proteomic"]}
 - {id: twist, name: Twist Bioscience, ticker: TWST, type: synthesis, watch_news: true, domains: [twistbioscience.com], aliases: ["Twist Biosciences", "Twist Bioscience Corporation"]}
-- {id: genscript, name: GenScript, ticker: 1548.HK, type: synthesis, watch_news: true, domains: [genscript.com, probiocdmo.com], aliases: ["GenScript Biotech", "GenScript ProBio", "Genscript", "Bestzyme", "Legend Biotech"]}
+- {id: genscript, name: GenScript, ticker: 1548.HK, type: synthesis, watch_news: true, domains: [genscript.com, probiocdmo.com, genscript.com.cn], aliases: ["GenScript Biotech", "GenScript ProBio", "Genscript", "Bestzyme", "金斯瑞", "金斯瑞生物科技", "南京金斯瑞生物科技有限公司"]}
 - {id: ansa, name: Ansa Biotechnologies, ticker: private, type: synthesis, watch_news: true, domains: [ansabio.com], aliases: ["Ansa Bio"]}
 - {id: dna-script, name: DNA Script, ticker: private, type: synthesis, watch_news: true, domains: [dnascript.com], aliases: []}
 - {id: telesis-bio, name: Telesis Bio, ticker: private, type: synthesis, watch_news: false, domains: [telesisbio.com, codexdna.com], aliases: ["Codex DNA"]}
@@ -47,7 +47,7 @@ entries:
 - {id: fluent-biosciences, name: Fluent BioSciences, ticker: ILMN, type: tools, parent: Illumina, watch_news: false, domains: [fluentbio.com], aliases: ["Fluent Bio"]}
 - {id: honeycomb, name: Honeycomb Biotechnologies, ticker: private, type: tools, watch_news: false, domains: [honeycomb.bio], aliases: []}
 - {id: mission-bio, name: Mission Bio, ticker: private, type: tools, watch_news: true, domains: [missionbio.com], aliases: []}
-- {id: singleron, name: Singleron Biotechnologies, ticker: private, type: tools, watch_news: false, domains: [singleron.bio, singleronbio.com], aliases: ["Singleron"]}
+- {id: singleron, name: Singleron Biotechnologies, ticker: private, type: tools, watch_news: false, domains: [singleron.bio, singleronbio.com], aliases: ["Singleron", "Singleron Biotechnologies Ltd", "新格元", "新格元生物", "南京新格元生物科技有限公司"]}
 - {id: vizgen, name: Vizgen, ticker: private, type: tools, watch_news: true, domains: [vizgen.com], aliases: ["Vizgen Inc"]}
 - {id: resolve-biosciences, name: Resolve Biosciences, ticker: private, type: tools, watch_news: false, domains: [resolvebiosciences.com], aliases: []}
 - {id: curio-bioscience, name: Curio Bioscience, ticker: private, type: tools, watch_news: false, domains: [curiobioscience.com], aliases: []}
@@ -66,7 +66,7 @@ entries:
 - {id: hamilton, name: Hamilton Company, ticker: private, type: tools, watch_news: false, domains: [hamiltoncompany.com], aliases: ["Hamilton Robotics", "Hamilton Bonaduz"]}
 - {id: opentrons, name: Opentrons, ticker: private, type: tools, watch_news: false, domains: [opentrons.com], aliases: ["Opentrons Labworks"]}
 - {id: azenta, name: Azenta Life Sciences, ticker: AZTA, type: cro, watch_news: false, domains: [azenta.com, genewiz.com], aliases: ["Azenta", "GENEWIZ", "Genewiz"]}
-- {id: novogene, name: Novogene, ticker: private, type: cro, watch_news: false, domains: [novogene.com], aliases: ["Novogene Corporation", "Novogene Co"]}
+- {id: novogene, name: Novogene, ticker: 688315.SS, type: cro, watch_news: false, domains: [novogene.com, novogene.cn], aliases: ["Novogene Corporation", "Novogene Co", "Novogene Bioinformatics Technology", "诺禾致源", "北京诺禾致源科技股份有限公司"]}
 - {id: psomagen, name: Psomagen, ticker: private, type: cro, watch_news: false, domains: [psomagen.com, macrogen.com], aliases: ["Macrogen"]}
 - {id: eurofins, name: Eurofins Scientific, ticker: ERF.PA, type: cro, watch_news: false, domains: [eurofins.com, eurofinsgenomics.com], aliases: ["Eurofins Genomics", "Eurofins"]}
 - {id: 3dhistech, name: 3DHISTECH, ticker: private, type: tools, watch_news: false, domains: [3dhistech.com], aliases: []}
@@ -110,8 +110,8 @@ entries:
 - {id: castle-biosciences, name: Castle Biosciences, ticker: CSTL, type: diagnostics, watch_news: false, domains: [castlebiosciences.com], aliases: ["DecisionDx"]}
 - {id: caredx, name: CareDx, ticker: CDNA, type: diagnostics, watch_news: false, domains: [caredx.com], aliases: ["AlloSure", "AlloMap"]}
 - {id: bionano, name: Bionano Genomics, ticker: BNGO, type: tools, watch_news: false, domains: [bionano.com, bionanogenomics.com], aliases: ["Bionano", "Saphyr", "optical genome mapping"]}
-- {id: twist-dx-dup, name: Burning Rock, ticker: BNR, type: diagnostics, watch_news: false, domains: [brbiotech.com], aliases: ["Burning Rock Biotech", "Burning Rock Dx"]}
-- {id: genetron, name: Genetron Health, ticker: private, type: diagnostics, watch_news: false, domains: [genetronhealth.com], aliases: []}
+- {id: burning-rock, name: Burning Rock Biotech, ticker: BNR, type: diagnostics, watch_news: false, domains: [brbiotech.com], aliases: ["Burning Rock", "Burning Rock Dx", "燃石医学", "广州燃石医学检验所有限公司", "燃石"]}
+- {id: genetron, name: Genetron Health, ticker: private, type: diagnostics, watch_news: false, domains: [genetronhealth.com], aliases: ["Genetron", "Genetron Holdings", "泛生子", "泛生子基因", "北京泛生子基因科技有限公司"]}
 - {id: color-health, name: Color Health, ticker: private, type: diagnostics, watch_news: false, domains: [color.com], aliases: ["Color Genomics"]}
 - {id: billiontoone, name: BillionToOne, ticker: BLLN, type: diagnostics, watch_news: true, domains: [billiontoone.com], aliases: ["UNITY Screen", "Northstar Select"]}
 - {id: 23andme, name: 23andMe, ticker: private, type: diagnostics, watch_news: false, domains: [23andme.com], aliases: []}
@@ -169,7 +169,7 @@ entries:
 - {id: editas, name: Editas Medicine, ticker: EDIT, type: pharma, watch_news: false, domains: [editasmedicine.com], aliases: ["Editas"]}
 - {id: verve, name: Verve Therapeutics, ticker: LLY, type: pharma, parent: Eli Lilly, watch_news: false, domains: [vervetx.com], aliases: []}
 - {id: sana, name: Sana Biotechnology, ticker: SANA, type: pharma, watch_news: false, domains: [sana.com], aliases: []}
-- {id: wuxi, name: WuXi AppTec, ticker: 2359.HK, type: cro, watch_news: false, domains: [wuxiapptec.com, wuxibiologics.com], aliases: ["WuXi Biologics", "WuXi", "Wuxi AppTec"]}
+- {id: wuxi, name: WuXi AppTec, ticker: 2359.HK, type: cro, watch_news: false, domains: [wuxiapptec.com], aliases: ["WuXi", "Wuxi AppTec", "WuXi AppTec Co", "药明康德", "无锡药明康德新药开发股份有限公司"]}
 - {id: charles-river, name: Charles River Laboratories, ticker: CRL, type: cro, watch_news: false, domains: [crl.com, criver.com], aliases: ["Charles River"]}
 - {id: iqvia, name: IQVIA, ticker: IQV, type: cro, watch_news: false, domains: [iqvia.com], aliases: []}
 - {id: broad-institute, name: Broad Institute, ticker: n/a, type: institute, watch_news: false, domains: [broadinstitute.org], aliases: ["Broad Institute of MIT and Harvard", "the Broad"]}
@@ -178,3 +178,32 @@ entries:
 - {id: allen-institute, name: Allen Institute, ticker: n/a, type: institute, watch_news: false, domains: [alleninstitute.org], aliases: ["Allen Institute for Brain Science", "Allen Institute for Cell Science"]}
 - {id: new-york-genome-center, name: New York Genome Center, ticker: n/a, type: institute, watch_news: false, domains: [nygenome.org], aliases: ["NYGC"]}
 - {id: embl, name: EMBL, ticker: n/a, type: institute, watch_news: false, domains: [embl.de, embl.org, ebi.ac.uk], aliases: ["European Molecular Biology Laboratory", "EMBL-EBI", "European Bioinformatics Institute"]}
+# ---- China-based sequencing, tools, services, diagnostics and biopharma ----
+# Aliases include the registered Chinese names used in Chinese-language records (ChinaXiv, GSA submitter fields).
+# Tickers carry exchange suffixes: .SS = Shanghai (incl. STAR), .SZ = Shenzhen (incl. ChiNext), .HK = Hong Kong; bare = US ADR.
+# Note: the text matcher's word boundaries treat CJK characters as word characters, so a Chinese alias matches when it is
+# delimited by punctuation or spaces (affiliation lists, "、" separators), not when embedded in running prose. See docs/sources/china.md.
+- {id: genemind, name: GeneMind Biosciences, ticker: private, type: tools, watch_news: false, domains: [genemind.com], aliases: ["GeneMind", "GeneMind Biosciences Company Limited", "Shenzhen GeneMind", "真迈生物", "深圳市真迈生物科技有限公司"]}
+- {id: salus-biomed, name: Salus BioMed, ticker: private, type: tools, watch_news: false, domains: [salus-bio.com], aliases: ["Salus Bio", "Salus BioMed (Shenzhen)", "赛陆医疗", "深圳赛陆医疗科技有限公司"]}
+- {id: axbio, name: Axbio, ticker: private, type: tools, watch_news: false, domains: [axbio.cn, axbio.com], aliases: ["Axbio Inc", "AXBIO", "安序源", "深圳安序源生物科技有限公司"]}
+- {id: vazyme, name: Vazyme Biotech, ticker: 688105.SS, type: tools, watch_news: false, domains: [vazyme.com, vazymebiotech.com], aliases: ["Vazyme", "Nanjing Vazyme", "诺唯赞", "南京诺唯赞生物科技股份有限公司"]}
+- {id: berry-genomics, name: Berry Genomics, ticker: 000710.SZ, type: diagnostics, watch_news: false, domains: [berrygenomics.com], aliases: ["Berry Genomics Co", "Berry Oncology", "贝瑞基因", "成都市贝瑞和康基因技术股份有限公司", "贝瑞和康", "和瑞基因"]}
+- {id: geneplus, name: Geneplus, ticker: private, type: diagnostics, watch_news: false, domains: [geneplus.org.cn, geneplus.cn], aliases: ["Geneplus-Beijing", "Geneplus Beijing", "吉因加", "北京吉因加科技有限公司"]}
+- {id: haplox, name: HaploX Biotechnology, ticker: private, type: diagnostics, watch_news: false, domains: [haplox.com, haplox.cn], aliases: ["HaploX", "Haplox", "海普洛斯", "深圳市海普洛斯生物科技有限公司"]}
+- {id: genecast, name: Genecast Biotechnology, ticker: private, type: diagnostics, watch_news: false, domains: [genecast.com.cn], aliases: ["Genecast", "臻和科技", "无锡臻和生物科技有限公司", "臻和"]}
+- {id: amoydx, name: Amoy Diagnostics, ticker: 300685.SZ, type: diagnostics, watch_news: false, domains: [amoydx.com], aliases: ["AmoyDx", "Amoy Diagnostics Co", "艾德生物", "厦门艾德生物医药科技股份有限公司"]}
+- {id: daan-gene, name: Daan Gene, ticker: 002030.SZ, type: diagnostics, watch_news: false, domains: [daangene.com], aliases: ["Da An Gene", "Daan Gene Co", "DAAN Gene", "达安基因", "广州达安基因股份有限公司", "中山大学达安基因股份有限公司"]}
+- {id: sansure, name: Sansure Biotech, ticker: 688289.SS, type: diagnostics, watch_news: false, domains: [sansure.com.cn, sansureglobal.com], aliases: ["Sansure", "Sansure Biotech Inc", "圣湘生物", "圣湘生物科技股份有限公司"]}
+- {id: hangzhou-biotest, name: Hangzhou Biotest Biotech, ticker: 688767.SS, type: diagnostics, watch_news: false, domains: [biotests.com.cn], aliases: ["Biotest Biotech", "Hangzhou Biotest", "博拓生物", "杭州博拓生物科技股份有限公司"]}
+- {id: sinopharm, name: Sinopharm, ticker: 1099.HK, type: pharma, watch_news: false, domains: [sinopharm.com, cnbg.com.cn], aliases: ["China National Pharmaceutical Group", "Sinopharm Group", "China National Biotec Group", "CNBG", "Sinopharm Diagnostics", "国药集团", "国药控股", "中国生物技术股份有限公司", "中国医药集团有限公司", "国药集团中国生物"], notes: "parent of the diagnostics and vaccine arms (China National Biotec Group, Sinopharm Diagnostics, the Beijing/Wuhan Institutes of Biological Products)"}
+- {id: biomarker-technologies, name: Biomarker Technologies, ticker: private, type: cro, watch_news: false, domains: [biomarker.com.cn], aliases: ["BioMarker Technologies", "Biomarker Technologies Corporation", "BMKGENE", "百迈客", "北京百迈客生物科技有限公司", "百迈客生物"]}
+- {id: annoroad, name: Annoroad Gene Technology, ticker: private, type: cro, watch_news: false, domains: [annoroad.com], aliases: ["Annoroad", "Annoroad Gene Tech", "安诺优达", "安诺优达基因科技(北京)有限公司", "安诺优达基因科技"]}
+- {id: biotree, name: Biotree, ticker: private, type: cro, watch_news: false, domains: [biotree.cn, biotree.com.cn], aliases: ["Biotree Biotech", "Shanghai Biotree", "百趣生物", "上海百趣生物医学科技有限公司", "百趣"]}
+- {id: pharmaron, name: Pharmaron, ticker: 300759.SZ, type: cro, watch_news: false, domains: [pharmaron.com], aliases: ["Pharmaron Beijing", "Pharmaron Inc", "康龙化成", "康龙化成(北京)新药技术股份有限公司", "康龙化成新药技术"], notes: "also 3759.HK"}
+- {id: wuxi-biologics, name: WuXi Biologics, ticker: 2269.HK, type: cro, watch_news: false, domains: [wuxibiologics.com], aliases: ["WuXi Bio", "Wuxi Biologics", "WuXi XDC", "药明生物", "无锡药明生物技术股份有限公司", "药明合联"]}
+- {id: hengrui, name: Jiangsu Hengrui Pharmaceuticals, ticker: 600276.SS, type: pharma, watch_news: false, domains: [hengrui.com, shhrp.com], aliases: ["Hengrui", "Hengrui Pharma", "Jiangsu Hengrui Medicine", "Hengrui Medicine", "恒瑞医药", "江苏恒瑞医药股份有限公司", "恒瑞"], notes: "also 1276.HK"}
+- {id: beigene, name: BeOne Medicines, ticker: ONC, type: pharma, watch_news: false, domains: [beigene.com, beonemed.com], aliases: ["BeiGene", "BeiGene Ltd", "BeOne", "百济神州", "百济神州(北京)生物科技有限公司", "百济神州生物科技"], notes: "renamed from BeiGene in 2025; also 6160.HK and 688235.SS"}
+- {id: zai-lab, name: Zai Lab, ticker: ZLAB, type: pharma, watch_news: false, domains: [zailaboratory.com], aliases: ["Zai Lab Limited", "Zai Laboratory", "再鼎医药", "再鼎医药(上海)有限公司", "再鼎"], notes: "also 9688.HK"}
+- {id: innovent, name: Innovent Biologics, ticker: 1801.HK, type: pharma, watch_news: false, domains: [innoventbio.com], aliases: ["Innovent", "Innovent Biologics (Suzhou)", "信达生物", "信达生物制药(苏州)有限公司", "信达生物制药"]}
+- {id: akeso, name: Akeso, ticker: 9926.HK, type: pharma, watch_news: false, domains: [akesobio.com], aliases: ["Akeso Biopharma", "Akeso Inc", "康方生物", "中山康方生物医药有限公司", "康方"]}
+- {id: legend-biotech, name: Legend Biotech, ticker: LEGN, type: pharma, parent: GenScript, watch_news: false, domains: [legendbiotech.com], aliases: ["Legend Biotech Corp", "Legend Biotech USA", "传奇生物", "南京传奇生物科技有限公司", "传奇生物科技"]}
