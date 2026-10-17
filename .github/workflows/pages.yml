@@ -38,14 +38,16 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e .
-      - name: Restore the database written by the weekly digest
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            data/radar.sqlite
-            .cache
-          key: radar-db-pages-${{ github.run_id }}
-          restore-keys: radar-db-
+      - name: Restore the database from the state release (published by the weekly digest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          if gh release view db-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download db-latest --repo "$GITHUB_REPOSITORY" --pattern 'radar.sqlite.zst' --dir data --clobber
+            zstd -d -f data/radar.sqlite.zst -o data/radar.sqlite && rm -f data/radar.sqlite.zst
+            python3 -c "import sqlite3; print(sqlite3.connect('data/radar.sqlite').execute('PRAGMA integrity_check').fetchone()[0])"
+          fi
       - name: Is there a database to publish?
         id: db
         run: |
@@ -54,7 +56,7 @@ jobs:
             ls -l data/radar.sqlite
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No cached database yet - run the weekly-digest workflow once, then re-run this one."
+            echo "::notice::No database snapshot yet (release db-latest) - run the weekly-digest workflow once, then re-run this one."
           fi
       - name: Build the static site
         if: steps.db.outputs.found == 'true'
