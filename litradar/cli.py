@@ -14,6 +14,8 @@
   litradar fetch    <source> [--since --until | --days] [...] [--raw] [--out file.jsonl|-]
   litradar fetch    --list                                    raw access to one source adapter, JSON lines out
   litradar browser-check [--cdp-url URL]                      is the optional browser fetcher usable here?
+  litradar show     <id|name|ticker|"First Last"> [--since 365d] [--until DATE|Nd] [--json]   entity dossier from the store
+  litradar watch    add|remove|list <term> | run [--since 7d] [--until DATE|Nd] [--json]      free-text / entity / author watchlist
 """
 from __future__ import annotations
 
@@ -23,11 +25,12 @@ import logging
 import re
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
 from . import __version__, browser, toolkit
+from . import __version__, entities
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -42,6 +45,21 @@ def _parse_since(s: Optional[str]) -> Optional[str]:
     if m:
         return (datetime.now(timezone.utc).date() - timedelta(days=int(m.group(1)))).isoformat()
     return s
+
+
+def _dated_window(since_arg: Optional[str], until_arg: Optional[str], default_since: str) -> tuple:
+    """Resolve --since / --until for `show` and `watch run`: each is YYYY-MM-DD or Nd (N days before today);
+    --until defaults to today. Raises ValueError on anything else or when since is after until."""
+    since = _parse_since(since_arg) or _parse_since(default_since)
+    until = _parse_since(until_arg) or datetime.now(timezone.utc).date().isoformat()
+    for flag, value in (("--since", since), ("--until", until)):
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"bad {flag} {value!r}: use YYYY-MM-DD or Nd (e.g. 30d)") from None
+    if since > until:
+        raise ValueError(f"--since {since} is after --until {until}")
+    return since, until
 
 
 def _window(args) -> tuple:
@@ -239,6 +257,82 @@ def cmd_timeseries(args) -> int:
     )
     print(json.dumps(report, indent=1, default=str))
     return 1 if report.get("errors") else 0
+def _entity_context(settings: Settings) -> tuple:
+    instruments = Gazetteer.from_yaml(settings.yaml("instruments"), "instrument")
+    companies = Gazetteer.from_yaml(settings.yaml("companies"), "company")
+    subgroups = (settings.yaml("subgroups") or {}).get("subgroups", []) or []
+    return instruments, companies, subgroups
+
+
+def cmd_show(args) -> int:
+    try:
+        since, until = _dated_window(args.since, args.until, "365d")
+    except ValueError as exc:
+        print(f"litradar show: error: {exc}", file=sys.stderr)
+        return 2
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    instruments, companies, subgroups = _entity_context(settings)
+    res = entities.resolve(store, args.query, instruments, companies, subgroups)
+    if res.kind == "unknown":
+        if args.json:
+            print(json.dumps(res.to_dict(), indent=1, ensure_ascii=False))
+        else:
+            print(f"nothing in the gazetteers, mentions or author lists matches {args.query!r}")
+            for c in res.candidates:
+                print(f"  did you mean: {c['id']:32} {c['kind']:10} {c['name']}")
+        return 1
+    d = entities.dossier(store, res, since, until, limit=args.limit, instruments=instruments, subgroups=subgroups)
+    print(json.dumps(d, indent=1, default=str, ensure_ascii=False) if args.json else entities.render_dossier(d))
+    return 0
+
+
+def cmd_watch(args) -> int:
+    if args.action == "run":
+        try:
+            since, until = _dated_window(args.since, args.until, "7d")
+        except ValueError as exc:
+            print(f"litradar watch run: error: {exc}", file=sys.stderr)
+            return 2
+    settings = Settings.from_env(config_dir=args.config_dir)
+    store = Store(settings.db_path)
+    as_json = bool(getattr(args, "json", False))
+    if args.action == "add":
+        instruments, companies, subgroups = _entity_context(settings)
+        try:
+            row = entities.watch_add(store, args.term, kind=args.kind, instruments=instruments, companies=companies, subgroups=subgroups)
+        except (ValueError, sqlite3.OperationalError) as exc:
+            print(f"watch: {exc}")
+            return 1
+        if as_json:
+            print(json.dumps(row, indent=1, ensure_ascii=False))
+        else:
+            verb = "added" if row.get("created") else "already present"
+            res = row.get("resolved")
+            print(f"{verb}: {row['term']!r} as {row['kind']}" + (f" ({res['kind']} {res['id'] or res['name']}, by {res['matched_by']})" if res else ""))
+        return 0
+    if args.action == "remove":
+        try:
+            ok = entities.watch_remove(store, args.term)
+        except (ValueError, sqlite3.OperationalError) as exc:
+            print(f"watch: {exc}")
+            return 1
+        print(json.dumps({"term": args.term, "removed": ok}) if as_json else (f"removed {args.term!r}" if ok else f"{args.term!r} was not on the watchlist"))
+        return 0 if ok else 1
+    if args.action == "list":
+        rows = entities.watch_list(store)
+        if as_json:
+            print(json.dumps(rows, indent=1, ensure_ascii=False))
+        elif not rows:
+            print("watchlist is empty")
+        else:
+            for r in rows:
+                print(f"{r['kind']:8} {r['added_at'][:10]}  {r['term']}")
+        return 0
+    instruments, companies, subgroups = _entity_context(settings)
+    rep = entities.watch_run(store, since, until, limit=args.limit, instruments=instruments, companies=companies, subgroups=subgroups)
+    print(json.dumps(rep, indent=1, default=str, ensure_ascii=False) if as_json else entities.render_watch_report(rep))
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -342,6 +436,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="cap on the client-side search index (default: 4000 most recent papers in the window)")
     p.add_argument("--json", action="store_true", help="print the full file manifest as JSON")
     p.set_defaults(func=cmd_dashboard)
+    p = sub.add_parser("show", help="entity dossier: instrument / company id, name, alias, ticker, or an author's 'First Last'")
+    p.add_argument("query")
+    p.add_argument("--since", default="365d", help="YYYY-MM-DD or Nd (default 365d)")
+    p.add_argument("--until", help="YYYY-MM-DD or Nd (default today)")
+    p.add_argument("--limit", type=int, default=15, help="rows per list (recent papers, co-mentions, news)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("watch", help="watchlist of free-text terms, entities and authors, evaluated against the store")
+    wsub = p.add_subparsers(dest="action", required=True)
+    w = wsub.add_parser("add", help="add a term (kind is auto-detected unless --kind is given)")
+    w.add_argument("term")
+    w.add_argument("--kind", choices=list(entities.WATCH_KINDS))
+    w.add_argument("--json", action="store_true")
+    w = wsub.add_parser("remove", help="remove a term")
+    w.add_argument("term")
+    w.add_argument("--json", action="store_true")
+    w = wsub.add_parser("list", help="list watched terms")
+    w.add_argument("--json", action="store_true")
+    w = wsub.add_parser("run", help="report matches for every watched term in the window")
+    w.add_argument("--since", default="7d", help="YYYY-MM-DD or Nd (default 7d)")
+    w.add_argument("--until", help="YYYY-MM-DD or Nd (default today)")
+    w.add_argument("--limit", type=int, default=20, help="rows shown per term (the match count is never capped)")
+    w.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_watch)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
