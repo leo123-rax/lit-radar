@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.60"]
+browser = ["playwright>=1.40"]  # opt-in real-browser fetcher for allow-listed open-licensed hosts; see docs/browser.md
 dev = ["pytest>=7", "ruff>=0.4"]
 
 [project.scripts]
