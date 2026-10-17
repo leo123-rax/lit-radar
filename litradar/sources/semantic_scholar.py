@@ -37,19 +37,36 @@ use"; an introductory API key gets "1 RPS on all endpoints". The key goes in the
 Live without a key, 2 of 4 paced attempts (4 s apart) answered 429 with no Retry-After header before a
 200, and a later run saw three 429s in a row, so the shared pool is best-effort: this module paces at
 1 req/s through the shared Http client (DEFAULT_MIN_INTERVAL["api.semanticscholar.org"]), waits
-DEFAULT_RETRY_WAIT seconds and retries a failed batch DEFAULT_RETRIES times, then stops for the run
-rather than hammering. Whatever was not enriched is picked up next week.
+DEFAULT_RETRY_WAIT seconds and retries a failed batch DEFAULT_RETRIES times, then *skips that batch*
+and carries on (so one poison batch cannot block every older paper on every run); after
+MAX_CONSECUTIVE_FAILURES failed batches in a row it stops for the run rather than hammering.
+Whatever was not enriched is picked up next week.
 
-Store effect: `papers.cited_by_count = MAX(existing, citationCount)` and `papers.extra_json` gains a
-`semantic_scholar` object {paper_id, citation_count, influential_citation_count, publication_date,
-tldr, fetched_at}. Other keys in extra_json are preserved.
+Matching is positional. The contract (documented, and confirmed live twice on 2026-10-17: a 3-id and
+a 7-id batch, both answered in request order with `null` at the unknown id's position) is one element
+per requested id, so when the list has the expected length each element is keyed by its position,
+whatever DOI it echoes in externalIds. That matters because Semantic Scholar's preprint/journal
+handling is per record: it CAN merge a preprint and its journal version into one record and echo only
+one of the two DOIs (live: journal DOI 10.1038/s41592-025-02617-2 resolves to a record with venue
+"bioRxiv", publicationDate 2023-02-14, i.e. the preprint's metadata), or keep them as separate records
+with separate counts (live: scGPT preprint 10.1101/2023.04.30.538439 -> paperId 275fb932…, 123
+citations, 2023-07-02; its journal DOI 10.1038/s41592-024-02201-0 -> paperId 13dc81fc…, 1462 citations,
+2024-02-26). Positional mapping is right in both cases: each requested DOI gets whatever record it
+resolves to, and two DOIs resolving to one merged record both receive its counts. Only when the list
+length is off-contract does the parser fall back to the echoed DOI.
+
+Store effect: `papers.cited_by_count = MAX(COALESCE(existing, 0), citationCount)`; `papers.updated_at`
+moves only when that count rises (so it works as a change marker for a weekly time series);
+`papers.extra_json` gains a `semantic_scholar` object {paper_id, citation_count,
+influential_citation_count, publication_date, tldr, fetched_at}, refreshed on every fetch. Other
+keys in extra_json are preserved.
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from ..http import Http
@@ -65,6 +82,7 @@ FIELDS = "citationCount,influentialCitationCount,publicationDate,externalIds,tld
 DETAIL_FIELDS = "title,venue,year," + FIELDS
 BATCH_LIMIT = 500  # documented hard limit per POST /paper/batch
 EXTRA_KEY = "semantic_scholar"
+DEFAULT_LOOKBACK_DAYS = 365  # papers days old are ~always at 0 citations; the signal is on older items
 
 
 def _now() -> str:
@@ -124,20 +142,30 @@ def parse_batch(data: Any, dois: Sequence[str]) -> Optional[Dict[str, Dict[str, 
 
     Returns {requested_doi: parsed} for the ids the service knew, or None when the payload is not
     the documented list (so the caller can treat it as a failed request, not an empty result).
-    Matching prefers the DOI echoed in externalIds and falls back to list position.
+
+    Matching is strictly positional when the list has one element per requested id (the documented,
+    live-confirmed contract: request order, `null` for unknown ids). The DOI echoed in externalIds is
+    deliberately NOT preferred: Semantic Scholar can merge a preprint and its journal version into one
+    record that echoes only one of the two DOIs, so keying on it would hand both entries to one row and
+    leave the other requested DOI "unmatched". Only when the list length is off-contract do we fall
+    back to the echoed DOI (position is then meaningless), dropping elements without a known DOI.
     """
     if not isinstance(data, list):
         return None
     out: Dict[str, Dict[str, Any]] = {}
-    wanted = {d: d for d in dois}
+    positional = len(data) == len(dois)
+    if not positional:
+        log.warning("Semantic Scholar: batch returned %d elements for %d ids; matching by echoed DOI only", len(data), len(dois))
+    wanted = set(dois)
     for pos, raw in enumerate(data):
         parsed = parse_item(raw)
         if parsed is None:
             continue
-        key = parsed["doi"] if parsed["doi"] in wanted else None
-        if key is None and pos < len(dois):
+        if positional:
             key = dois[pos]
-        if key is None:
+        elif parsed["doi"] in wanted:
+            key = parsed["doi"]
+        else:
             continue
         out[key] = parsed
     return out
@@ -145,6 +173,7 @@ def parse_batch(data: Any, dois: Sequence[str]) -> Optional[Dict[str, Dict[str, 
 
 DEFAULT_RETRIES = 3  # live, the unauthenticated pool answered 429 up to three times running before a 200
 DEFAULT_RETRY_WAIT = 10.0  # seconds between attempts; no Retry-After header is sent, so this is a guess on the polite side
+MAX_CONSECUTIVE_FAILURES = 2  # a single failed batch is skipped; this many in a row ends the run (throttled, not poisoned)
 
 
 def fetch_batch(
@@ -180,6 +209,26 @@ def paper_details(http: Http, doi: str, api_key: str = "", fields: str = DETAIL_
     except ValueError:
         return None
     return parse_item(data)
+
+
+def window_start(since: Optional[str], lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> Optional[str]:
+    """Start of the enrichment window: the run's `since` (YYYY-MM-DD) pushed back by `lookback_days`.
+
+    Papers only days old almost always return citationCount 0, so enriching just the run window is
+    near-inert; the value is velocity on papers weeks to months old. None (= whole store) stays None;
+    a non-positive look-back or an unparsable date returns `since` unchanged.
+    """
+    if not since:
+        return None
+    try:
+        start = date.fromisoformat(str(since)[:10])
+    except ValueError:
+        log.warning("Semantic Scholar: cannot parse since=%r; using it as-is", since)
+        return since
+    days = int(lookback_days or 0)
+    if days <= 0:
+        return start.isoformat()
+    return (start - timedelta(days=days)).isoformat()
 
 
 def _candidates(store: Store, since: Optional[str], limit: Optional[int]) -> List[Tuple[str, str, int, str]]:
@@ -227,14 +276,20 @@ def enrich_citations(
         return summary
     size = min(int(batch_size) if batch_size else BATCH_LIMIT, BATCH_LIMIT)
     fetched_at = _now()
+    consecutive_failures = 0
     for chunk in _chunks(dois, size):
         result = fetch_batch(http, chunk, api_key=api_key, retries=retries, retry_wait=retry_wait)
         summary["batches"] += 1
         if result is None:
             summary["failed_batches"] += 1
-            log.warning("Semantic Scholar: batch %d failed; stopping enrichment for this run (%d of %d DOIs requested)",
-                        summary["batches"], summary["requested"], len(dois))
-            break
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                log.warning("Semantic Scholar: %d batches failed in a row; stopping enrichment for this run (%d of %d DOIs requested)",
+                            consecutive_failures, summary["requested"], len(dois))
+                break
+            log.warning("Semantic Scholar: batch %d failed; skipping it and continuing", summary["batches"])
+            continue
+        consecutive_failures = 0
         summary["requested"] += len(chunk)
         for doi in chunk:
             hit = result.get(doi)
@@ -257,9 +312,16 @@ def enrich_citations(
                     "tldr": hit["tldr"],
                     "fetched_at": fetched_at,
                 }
+                # COALESCE: SQLite's MAX(NULL, n) is NULL, and the column is nullable. updated_at moves only when the
+                # count actually rises so it stays usable as a change marker (the fetch time lives in extra_json).
                 store.conn.execute(
-                    "UPDATE papers SET cited_by_count = MAX(cited_by_count, ?), extra_json = ?, updated_at = ? WHERE id = ?",
-                    (hit["citation_count"], json.dumps(extra, ensure_ascii=False, default=str), fetched_at, pid),
+                    """UPDATE papers
+                       SET cited_by_count = MAX(COALESCE(cited_by_count, 0), ?),
+                           extra_json = ?,
+                           updated_at = CASE WHEN ? > COALESCE(cited_by_count, 0) THEN ? ELSE updated_at END
+                       WHERE id = ?""",
+                    (hit["citation_count"], json.dumps(extra, ensure_ascii=False, default=str),
+                     hit["citation_count"], fetched_at, pid),
                 )
                 if hit["citation_count"] > cited:
                     summary["updated"] += 1

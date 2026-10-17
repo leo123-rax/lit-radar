@@ -136,12 +136,17 @@ def test_malformed_payloads_do_not_crash_or_corrupt(tmp_path):
     http = FakeHttp(post_payloads=[junk])
     out = s2.enrich_citations(http, st, retry_wait=0)
     assert out["failed_batches"] == 0 and out["requested"] == 2
-    # position 0 is skipped; position 1 ({"foo": "bar"}) falls back to the 2nd requested DOI (s2test2) with zero counts;
-    # position 2 names s2test1 explicitly, so it wins over its position
-    assert out["matched"] == 2 and out["updated"] == 0
+    # 3 elements for 2 ids is off-contract, so position means nothing and only the echoed DOI counts:
+    # "garbage" and {"foo": "bar"} carry no DOI and are dropped; the third element names s2test1 -> 1 matched, 1 unmatched
+    assert out["matched"] == 1 and out["unmatched"] == 1 and out["updated"] == 0
     p1 = json.loads(st.get_paper("doi:10.1000/s2test1")["extra_json"])["semantic_scholar"]
-    assert p1["citation_count"] == 0 and p1["tldr"] == "plain text"
+    assert p1["citation_count"] == 0 and p1["tldr"] == "plain text" and p1["paper_id"] == ""
     assert st.get_paper("doi:10.1000/s2test1")["cited_by_count"] == 4  # MAX keeps the stored value over a junk 0
+    assert "semantic_scholar" not in json.loads(st.get_paper("doi:10.1000/s2test2")["extra_json"] or "{}")
+    # on-contract length with a junk element in it: position 1 ({"foo": "bar"}) IS the 2nd requested DOI, zero counts
+    http = FakeHttp(post_payloads=[[None, {"foo": "bar"}]])
+    out = s2.enrich_citations(http, st, retry_wait=0)
+    assert out["matched"] == 1 and out["unmatched"] == 1
     p2 = json.loads(st.get_paper("doi:10.1000/s2test2")["extra_json"])["semantic_scholar"]
     assert p2["citation_count"] == 0 and p2["tldr"] == "" and p2["paper_id"] == ""
     # unreadable existing extra_json is replaced rather than raising
@@ -154,29 +159,105 @@ def test_malformed_payloads_do_not_crash_or_corrupt(tmp_path):
     assert st.get_paper("doi:10.1000/s2test1")["cited_by_count"] == 9
 
 
-def test_batching_500_per_call_and_stop_on_failure(tmp_path):
+def test_batching_500_per_call_and_failure_handling(tmp_path):
     st = Store(tmp_path / "t.sqlite")
     for i in range(1200):
         st.upsert_paper(_paper(i))
+    st.commit()
+    # Candidates are ordered pub_date DESC, first_seen DESC, id. The 1200 upserts above can straddle a wall-clock
+    # second (first_seen has 1 s resolution), which would reshuffle batch membership between runs; pin it so the
+    # test is deterministic and the order is by id alone.
+    st.conn.execute("UPDATE papers SET first_seen='2026-10-12T00:00:00Z'")
     st.commit()
     # three batches: 500, 500, 200
     http = FakeHttp(post_payloads=[[], [], []])
     out = s2.enrich_citations(http, st, retry_wait=0)
     assert out["batches"] == 3 and [len(b["ids"]) for _, b, _ in http.posts] == [500, 500, 200]
     assert out["requested"] == 1200 and all(i.startswith("DOI:10.1000/") for _, b, _ in http.posts for i in b["ids"])
+    assert out["unmatched"] == 1200 and out["failed_batches"] == 0  # an empty list is a (useless) answer, not a failed request
+    first_doi = http.posts[0][1]["ids"][0][len("DOI:"):]  # whichever DOI the store orders first
     # batch_size above the documented limit is clamped; below it is honoured
     http = FakeHttp(post_payloads=[[]] * 12)
     out = s2.enrich_citations(http, st, batch_size=100, limit=250, retry_wait=0)
     assert out["candidates"] == 250 and [len(b["ids"]) for _, b, _ in http.posts] == [100, 100, 50]
-    # first batch fails twice (None = HTTP error / 429 after the client's own handling) -> retries, then stops: no 2nd batch
-    http = FakeHttp(post_payloads=[None, None, None])
+    # None = HTTP error / 429 after the client's own handling. Each failed batch is retried `retries` times, then skipped;
+    # two failed batches IN A ROW end the run: batch 1 (3 attempts) + batch 2 (3 attempts) -> stop, no 3rd batch
+    http = FakeHttp(post_payloads=[None] * 6)
     out = s2.enrich_citations(http, st, retries=2, retry_wait=0)
-    assert len(http.posts) == 3 and out["batches"] == 1 and out["failed_batches"] == 1 and out["requested"] == 0
-    # a failure on the second batch keeps the first batch's results and stops before the third
-    http = FakeHttp(post_payloads=[[_item("10.1000/s2test0", 3)], None])
+    assert len(http.posts) == 6 and out["batches"] == 2 and out["failed_batches"] == 2 and out["requested"] == 0
+    assert [len(b["ids"]) for _, b, _ in http.posts] == [500] * 6
+    # a poison batch at the head is skipped and the older papers behind it still get enriched
+    http = FakeHttp(post_payloads=[None, [], []])
     out = s2.enrich_citations(http, st, retries=0, retry_wait=0)
-    assert len(http.posts) == 2 and out["batches"] == 2 and out["failed_batches"] == 1
-    assert out["requested"] == 500 and out["matched"] == 1 and st.get_paper("doi:10.1000/s2test0")["cited_by_count"] == 3
+    assert len(http.posts) == 3 and out["batches"] == 3 and out["failed_batches"] == 1 and out["requested"] == 700
+    # a failure on the second batch keeps the first batch's results and still runs the third
+    http = FakeHttp(post_payloads=[[_item(first_doi, 3)] + [None] * 499, None, []])
+    out = s2.enrich_citations(http, st, retries=0, retry_wait=0)
+    assert len(http.posts) == 3 and out["batches"] == 3 and out["failed_batches"] == 1
+    assert out["requested"] == 700 and out["matched"] == 1 and st.get_paper(f"doi:{first_doi}")["cited_by_count"] == 3
+    # success resets the consecutive-failure counter: ok, fail, ok, fail, ok -> all five batches run
+    http = FakeHttp(post_payloads=[[], None, [], None, []])
+    out = s2.enrich_citations(http, st, batch_size=100, limit=500, retries=0, retry_wait=0)
+    assert len(http.posts) == 5 and out["batches"] == 5 and out["failed_batches"] == 2 and out["requested"] == 300
+    # ... but two in a row after a success stop the run: ok, fail, fail -> batches 4 and 5 never requested
+    http = FakeHttp(post_payloads=[[], None, None, [], []])
+    out = s2.enrich_citations(http, st, batch_size=100, limit=500, retries=0, retry_wait=0)
+    assert len(http.posts) == 3 and out["batches"] == 3 and out["failed_batches"] == 2 and out["requested"] == 100
+
+
+def test_positional_mapping_for_merged_preprint_and_journal_records(tmp_path):
+    """Semantic Scholar merges a preprint and its journal version into one record and echoes only ONE of the
+    two DOIs in externalIds. Both stored rows must receive the merged counts; neither may be 'unmatched'."""
+    st = Store(tmp_path / "t.sqlite")
+    preprint, journal = "10.1101/2023.04.30.538439", "10.1038/s41592-025-02617-2"
+    st.upsert_paper(_paper(1, doi=preprint, pub_date="2023-05-01"))
+    st.upsert_paper(_paper(2, doi=journal, pub_date="2025-02-14"))
+    st.commit()
+    # request order is newest first: journal, then preprint; both elements echo the journal DOI
+    merged = _item(journal, 177, influential=10, pub="2023-02-14", paper_id="0f9c053f")
+    http = FakeHttp(post_payloads=[[merged, dict(merged)]])
+    out = s2.enrich_citations(http, st, retry_wait=0)
+    assert http.posts[0][1]["ids"] == [f"DOI:{journal}", f"DOI:{preprint}"]
+    assert out["matched"] == 2 and out["unmatched"] == 0 and out["updated"] == 2
+    for doi in (journal, preprint):
+        row = st.get_paper(f"doi:{doi}")
+        assert row["cited_by_count"] == 177
+        assert json.loads(row["extra_json"])["semantic_scholar"]["paper_id"] == "0f9c053f"
+    # the reverse: the element at position 1 echoes a DOI from position 0 -> still keyed by position
+    http = FakeHttp(post_payloads=[[None, _item(journal, 200)]])
+    out = s2.enrich_citations(http, st, retry_wait=0)
+    assert out["matched"] == 1 and st.get_paper(f"doi:{preprint}")["cited_by_count"] == 200
+    assert st.get_paper(f"doi:{journal}")["cited_by_count"] == 177
+
+
+def test_null_cited_by_count_and_updated_at_change_marker(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    st.upsert_paper(_paper(1, cited=0))
+    st.upsert_paper(_paper(2, cited=9))
+    st.commit()
+    # a backfill/import path may leave the nullable column NULL; SQLite's MAX(NULL, n) is NULL, so COALESCE is required
+    st.conn.execute("UPDATE papers SET cited_by_count=NULL, updated_at='2026-01-01T00:00:00Z'")
+    st.commit()
+    http = FakeHttp(post_payloads=[[_item("10.1000/s2test1", 5), _item("10.1000/s2test2", 0)]])
+    out = s2.enrich_citations(http, st, retry_wait=0)
+    assert out["matched"] == 2 and out["updated"] == 1 and out["citations"] == {"doi:10.1000/s2test1": 5, "doi:10.1000/s2test2": 0}
+    p1, p2 = st.get_paper("doi:10.1000/s2test1"), st.get_paper("doi:10.1000/s2test2")
+    assert p1["cited_by_count"] == 5 and p2["cited_by_count"] == 0  # neither NULL
+    # updated_at moves only where the count rose; the fetch time is recorded in extra_json for every matched row
+    assert p1["updated_at"] != "2026-01-01T00:00:00Z" and p2["updated_at"] == "2026-01-01T00:00:00Z"
+    assert json.loads(p2["extra_json"])["semantic_scholar"]["fetched_at"] == json.loads(p1["extra_json"])["semantic_scholar"]["fetched_at"]
+    # a second run with the same count: extra_json refreshed, updated_at untouched
+    marker = p1["updated_at"]
+    st.conn.execute("UPDATE papers SET updated_at='2026-02-02T00:00:00Z' WHERE id='doi:10.1000/s2test1'")
+    st.commit()
+    http = FakeHttp(post_payloads=[[_item("10.1000/s2test1", 5), _item("10.1000/s2test2", 0)]])
+    out = s2.enrich_citations(http, st, retry_wait=0)
+    assert out["updated"] == 0 and st.get_paper("doi:10.1000/s2test1")["updated_at"] == "2026-02-02T00:00:00Z"
+    assert marker  # (first run did set it)
+    # and a rise moves it again
+    http = FakeHttp(post_payloads=[[_item("10.1000/s2test1", 6), None]])
+    out = s2.enrich_citations(http, st, retry_wait=0)
+    assert out["updated"] == 1 and st.get_paper("doi:10.1000/s2test1")["updated_at"] != "2026-02-02T00:00:00Z"
 
 
 def test_paper_details_and_parsers():
@@ -198,4 +279,14 @@ def test_paper_details_and_parsers():
     assert s2.parse_item({"tldr": None, "publicationDate": None})["tldr"] == "" and s2.parse_item({})["publication_date"] == ""
     assert s2.parse_batch({"not": "a list"}, ["10.1/a"]) is None
     assert s2.parse_batch([], ["10.1/a"]) == {}
+    assert s2.parse_batch([None], ["10.1/a"]) == {}
+    assert list(s2.parse_batch([_item("10.1000/zzz", 1)], ["10.1000/a"])) == ["10.1000/a"]  # positional beats the echoed DOI
+    # off-contract length (3 elements for 2 ids): only elements echoing a requested DOI are kept
+    assert list(s2.parse_batch([_item("10.1000/b", 1), _item("10.1000/zzz", 2), None], ["10.1000/a", "10.1000/b"])) == ["10.1000/b"]
     assert list(s2._chunks([1, 2, 3, 4, 5], 2)) == [[1, 2], [3, 4], [5]]
+
+    # look-back window for the wiring: a 7-day run window alone enriches almost nothing (fresh papers sit at 0)
+    assert s2.window_start("2026-10-10") == "2025-10-10" and s2.DEFAULT_LOOKBACK_DAYS == 365
+    assert s2.window_start("2026-10-10", 30) == "2026-09-10" and s2.window_start("2026-10-10T12:00:00Z", 1) == "2026-10-09"
+    assert s2.window_start("2026-10-10", 0) == "2026-10-10" and s2.window_start(None) is None and s2.window_start("") is None
+    assert s2.window_start("not-a-date", 30) == "not-a-date"
