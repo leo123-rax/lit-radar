@@ -172,6 +172,13 @@ def render(store: Store, since: str, until: str, cfg: Dict[str, Any], run_report
 
     # ---- coverage / methodology
     md.append("## Coverage and method\n")
+    if not run_report:
+        row = store.conn.execute("SELECT counts_json FROM runs WHERE since=? AND until=? ORDER BY id DESC LIMIT 1", (since, until)).fetchone()
+        if row and row[0]:
+            try:
+                run_report = json.loads(row[0])
+            except ValueError:
+                run_report = None
     if run_report:
         c = run_report.get("counts", {})
         fetched = {k.split(".", 1)[1]: v for k, v in c.items() if k.startswith("fetched.")}

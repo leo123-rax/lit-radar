@@ -1,6 +1,6 @@
 # Science literature radar: 2026-10-10 to 2026-10-17
 
-3562 new papers and preprints in the window; 429 with parsed full text; 142 instrument entities and 109 companies detected; 123164 new sequencing experiments in public archives.
+3562 new papers and preprints in the window; 429 with parsed full text; 142 instrument entities and 108 companies detected; 123164 new sequencing experiments in public archives.
 
 ## Top 25 innovations
 
@@ -143,19 +143,19 @@ We present draft genome assemblies for two poneroid ant species with distinctive
 
 <sub>Instruments: Beckman Coulter NGS reagents, DeNovix, Fragment Analyzer, PacBio HiFi, QIAseq, Qubit, Revio, Sequel II · Companies: 10x Genomics, Agilent Technologies, Anthropic, Pacific Biosciences, QIAGEN, Thermo Fisher Scientific · Signals: preprint; 3 platform(s); 5 lab tool(s); 6 company mention(s); watchlist: long-read; 1 novelty cue(s)</sub>
 
-**24. [Frequency encoding regulates cell type composition in the small intestine](https://doi.org/10.1126/science.adt1928)**  
-_Science, 2026-10-15 · score 5.4_  
-
-Intestinal homeostasis requires tight regulation of stem cell maintenance and differentiation to absorptive and secretory cell types, two major intestinal lineages. Key signaling pathways have been identified, but how they balance cell type composition remains unclear. We uncovered oscillatory expression of the Notch-target protein Hes1 (hairy and enhancer of split 1) that controls cell fate specification in a freque…  
-
-<sub>Signals: journal tier A; tracked author; 1 novelty cue(s)</sub>
-
-**25. [Spatially resolved tumor-microenvironment architecture defines therapeutic response in unresectable hepatoblastoma](https://www.biorxiv.org/content/10.64898/2026.10.10.758234v1)**  
+**24. [Spatially resolved tumor-microenvironment architecture defines therapeutic response in unresectable hepatoblastoma](https://www.biorxiv.org/content/10.64898/2026.10.10.758234v1)**  
 _biorxiv (preprint), 2026-10-13 · score 5.4_  
 
 Background: Hepatoblastoma exhibits variable therapeutic response that is not fully explained by current risk stratification. While prior studies have characterized tumor composition, the role of spatial organization in determining outcome, particularly in unresectable disease requiring transplantation under immunosuppression, remains unclear. Methods: We integrated spatial transcriptomics using the 10x Genomics Visi…  
 
 <sub>Instruments: CosMx, NovaSeq 6000, Visium · Companies: 10x Genomics, Bruker, Illumina · Signals: preprint; 3 platform(s); 3 company mention(s); watchlist: single-cell, spatial transcriptomics</sub>
+
+**25. [Deep-learning-driven tumor microenvironment profiling improves immunotherapy response prediction](https://www.biorxiv.org/content/10.64898/2026.10.06.757143v1)**  
+_biorxiv (preprint), 2026-10-13 · score 5.1_  
+
+Immunotherapy has transformed the management of many cancers, such as clear cell renal cell carcinoma (ccRCC), yet durable clinical benefit is achieved in only a subset of patients. Immunotherapy outcomes are governed by the multicellular tumor microenvironment (TME), through the structured and directional interplay of regulatory programs and ligand-receptor communications. Yet most existing methods for immunotherapy…  
+
+<sub>Instruments: Bio-Rad NGC, CosMx, Visium · Signals: preprint; 2 platform(s); 1 lab tool(s); watchlist: single-cell, spatial transcriptomics, CRISPR screen; 2 novelty cue(s)</sub>
 
 ## Platforms named in this week's papers
 
@@ -165,7 +165,7 @@ Sequencers, single-cell and spatial systems, proteomics, cryo-EM, arrays, synthe
 |---|---|---|---|---|
 | NovaSeq 6000 | Illumina | ILMN | 46 | [A Living Multi‐Omics PDX Biobank of High‐Risk Sarcomas Reveals ecDNA‐D](https://europepmc.org/article/PMC/PMC13658889) |
 | Neon electroporation | Thermo Fisher Scientific | TMO | 45 | [A B1 SINE element within the mouse Malat1 long noncoding RNA acts as a](https://europepmc.org/article/PMC/PMC13666002) |
-| Orbitrap | Thermo Fisher Scientific | TMO | 41 | [Unifying N- and O-glycopeptide dissociation methods with expedient ele](https://www.biorxiv.org/content/10.64898/2026.10.12.758703v1) |
+| Orbitrap | Thermo Fisher Scientific | TMO | 40 | [Unifying N- and O-glycopeptide dissociation methods with expedient ele](https://www.biorxiv.org/content/10.64898/2026.10.12.758703v1) |
 | NovaSeq | Illumina | ILMN | 30 | [Targeting TREM2+ and TIMD4+ Macrophages Reprograms the Tumor Microenvi](https://europepmc.org/article/PMC/PMC13650241) |
 | Waters mass spectrometry | Waters | WAT | 29 | [Circulating arginine–nitric oxide pathway metabolites and nitrated fat](https://europepmc.org/article/PMC/PMC13657980) |
 | Oxford Nanopore sequencing | Oxford Nanopore Technologies | ONT.L | 26 | [Spatiotemporal Heterogeneity of HPV Integration Architectures Drive On](https://www.biorxiv.org/content/10.64898/2026.10.03.756294v1) |
@@ -175,6 +175,7 @@ Sequencers, single-cell and spatial systems, proteomics, cryo-EM, arrays, synthe
 | ZenoTOF | Danaher | DHR | 17 | [Multi-omics analyses reveal cellular responses to biosynthesis of the](https://europepmc.org/article/PMC/PMC13658176) |
 | Visium | 10x Genomics | TXG | 16 | [Spatially resolved tumor-microenvironment architecture defines therape](https://www.biorxiv.org/content/10.64898/2026.10.10.758234v1) |
 | NovaSeq X | Illumina | ILMN | 15 | [DUF4004 protein BacR (YhbD) of Bacillus subtilis is a regulator of bac](https://europepmc.org/article/PMC/PMC13649987) |
+| GenScript gene synthesis | GenScript | 1548.HK | 13 | [Structural basis of assembly-dependent activation of the MAD3–MAD4 nuc](https://europepmc.org/article/PMC/PMC13662399) |
 
 ### Lab infrastructure and consumables named
 
@@ -278,7 +279,7 @@ How each company appears: **author** = an author's affiliation; **funding / COI*
 | Agilent Technologies | A | 107 | 0 | 1 | 0 | 106 | [A Living Multi‐Omics PDX Biobank of High‐Risk Sarcomas Revea](https://europepmc.org/article/PMC/PMC13658889) |
 | Danaher | DHR | 83 | 1 | 4 | 0 | 83 | [CRISPR-mediated gap-based replacement enables site-specific](https://europepmc.org/article/PMC/PMC13659233) |
 | QIAGEN | QGEN | 76 | 0 | 0 | 0 | 76 | [Exploration of miRNAs promoting eosinophilia and type 2 immu](https://europepmc.org/article/PMC/PMC13649434) |
-| Roche | ROG.SW | 66 | 3 | 15 | 0 | 50 | [Evaluation of early C‐reactive protein kinetics as an early](https://europepmc.org/article/PMC/PMC13662409) |
+| Roche | ROG.SW | 65 | 2 | 15 | 0 | 50 | [Evaluation of early C‐reactive protein kinetics as an early](https://europepmc.org/article/PMC/PMC13662409) |
 | Bio-Rad Laboratories | BIO | 55 | 0 | 1 | 0 | 54 | [Microfluidic Extraction of Extracellular Vesicle-Associated](https://www.biorxiv.org/content/10.64898/2026.10.12.758106v1) |
 | Abcam | DHR | 47 | 0 | 1 | 0 | 46 | [Mitochondrial Protection and Neural Repair via ROS‐Responsiv](https://europepmc.org/article/PMC/PMC13655243) |
 | Bruker | BRKR | 44 | 0 | 1 | 2 | 42 | [Spatially resolved tumor-microenvironment architecture defin](https://www.biorxiv.org/content/10.64898/2026.10.10.758234v1) |
@@ -290,10 +291,10 @@ How each company appears: **author** = an author's affiliation; **funding / COI*
 | New England Biolabs | private | 33 | 0 | 0 | 0 | 33 | [Genomic sequence context differentially impacts stepwise oxi](https://europepmc.org/article/PMC/PMC13659243) |
 | BD (Becton Dickinson) | BDX | 29 | 1 | 2 | 0 | 29 | [Standardizing a human TBMNK cell assay across instrument pla](https://europepmc.org/article/PMC/PMC13655140) |
 | 10x Genomics | TXG | 28 | 0 | 1 | 4 | 28 | [STARgrid: an open-source pipeline from Visium HD sequencing](https://www.biorxiv.org/content/10.64898/2026.10.09.757882v1) |
-| Howard Hughes Medical Institute | n/a | 28 | 24 | 12 | 0 | 1 | [Dystrophic changes of nigrostriatal axons harboring a SYNJ1](https://europepmc.org/article/PMC/PMC13663811) |
+| Howard Hughes Medical Institute | n/a | 26 | 23 | 11 | 0 | 1 | [Dystrophic changes of nigrostriatal axons harboring a SYNJ1](https://europepmc.org/article/PMC/PMC13663811) |
 | Bio-Techne | TECH | 25 | 0 | 0 | 1 | 24 | [Development of a novel organoid-based two-dimensional system](https://europepmc.org/article/PMC/PMC13649504) |
-| Broad Institute | n/a | 24 | 8 | 0 | 7 | 9 | [Systemic elevation of gut derived p-cresol during one year i](https://europepmc.org/article/PMC/PMC13655695) |
 | Cell Signaling Technology | private | 24 | 0 | 0 | 0 | 24 | [Vitamin D binding protein in ventral CA3 of the hippocampus](https://europepmc.org/article/PMC/PMC13666054) |
+| Broad Institute | n/a | 22 | 7 | 0 | 6 | 9 | [Systemic elevation of gut derived p-cresol during one year i](https://europepmc.org/article/PMC/PMC13655695) |
 | Takara Bio | 4974.T | 22 | 0 | 0 | 0 | 22 | [The Fraxinus mandshurica genome reveals a dual adaptive stra](https://europepmc.org/article/PMC/PMC13662928) |
 | AstraZeneca | AZN | 21 | 6 | 17 | 1 | 1 | [Evaluation of early C‐reactive protein kinetics as an early](https://europepmc.org/article/PMC/PMC13662409) |
 | Eppendorf | private | 21 | 1 | 0 | 0 | 20 | [SRF3 couples cellular iron homeostasis and defense responses](https://europepmc.org/article/PMC/PMC13666039) |
@@ -301,27 +302,27 @@ How each company appears: **author** = an author's affiliation; **funding / COI*
 | JEOL | 6951.T | 19 | 0 | 0 | 0 | 19 | [Green photodeposition of Au/TiO2 nanocomposites for wide-ran](https://europepmc.org/article/PMC/PMC13664701) |
 | Oxford Nanopore Technologies | ONT.L | 19 | 0 | 3 | 5 | 14 | [A Living Multi‐Omics PDX Biobank of High‐Risk Sarcomas Revea](https://europepmc.org/article/PMC/PMC13658889) |
 | Shimadzu | 7701.T | 18 | 0 | 0 | 0 | 18 | [Oxidomics of Human Plasma Reveals Lower Oxidized Lipids Afte](https://europepmc.org/article/PMC/PMC13651599) |
-| Pfizer | PFE | 17 | 4 | 15 | 0 | 1 | [Context-dependent value of HLA class I diversity in advanced](https://europepmc.org/article/PMC/PMC13658205) |
-| Eli Lilly | LLY | 16 | 2 | 16 | 0 | 0 | [The Baseline Molecular Profile of Late Relapse: Identifying](https://europepmc.org/article/PMC/PMC13656328) |
 | Novartis | NOVN.SW | 16 | 1 | 14 | 3 | 1 | [Perturb-Seqr: Signature Search Engine Integrating Connectivi](https://www.biorxiv.org/content/10.64898/2026.10.06.757137v1) |
+| Pfizer | PFE | 16 | 4 | 14 | 0 | 1 | [Context-dependent value of HLA class I diversity in advanced](https://europepmc.org/article/PMC/PMC13658205) |
 | Zymo Research | private | 15 | 0 | 0 | 0 | 15 | [Genomic sequence context differentially impacts stepwise oxi](https://europepmc.org/article/PMC/PMC13659243) |
-| EMBL | n/a | 14 | 10 | 4 | 0 | 4 | [WarpDemuX-custom - Multiplexed sequence-specific direct RNA](https://www.biorxiv.org/content/10.64898/2026.10.09.757944v1) |
-| Novo Nordisk | NOVO-B.CO | 14 | 5 | 12 | 0 | 0 | [Continuous glucose monitoring after discontinuation of incre](https://europepmc.org/article/PMC/PMC13656005) |
+| Eli Lilly | LLY | 14 | 0 | 16 | 0 | 0 | [The Baseline Molecular Profile of Late Relapse: Identifying](https://europepmc.org/article/PMC/PMC13656328) |
+| EMBL | n/a | 13 | 9 | 3 | 0 | 4 | [WarpDemuX-custom - Multiplexed sequence-specific direct RNA](https://www.biorxiv.org/content/10.64898/2026.10.09.757944v1) |
 | GenScript | 1548.HK | 13 | 0 | 0 | 0 | 13 | [Structural basis of assembly-dependent activation of the MAD](https://europepmc.org/article/PMC/PMC13662399) |
 | Miltenyi Biotec | private | 13 | 0 | 0 | 0 | 13 | [Oncolytic virus VT1092M synergizes with immune checkpoint in](https://europepmc.org/article/PMC/PMC13662124) |
 | Novogene | private | 13 | 0 | 1 | 0 | 13 | [Integrative omics and field studies reveal the efficacy of P](https://europepmc.org/article/PMC/PMC13661932) |
 | AbbVie | ABBV | 12 | 0 | 14 | 0 | 0 | [Lower circulating angiotensinogen levels across ACLD stages](https://europepmc.org/article/PMC/PMC13668287) |
-| Bristol Myers Squibb | BMY | 12 | 4 | 14 | 0 | 0 | [Evaluation of early C‐reactive protein kinetics as an early](https://europepmc.org/article/PMC/PMC13662409) |
+| Tecan | TECN.SW | 12 | 0 | 0 | 0 | 12 | [Green photodeposition of Au/TiO2 nanocomposites for wide-ran](https://europepmc.org/article/PMC/PMC13664701) |
+| Bristol Myers Squibb | BMY | 11 | 3 | 13 | 0 | 0 | [Evaluation of early C‐reactive protein kinetics as an early](https://europepmc.org/article/PMC/PMC13662409) |
 
 ## Tracked researchers
 
 **ai_bio**
 
-- Bo Wang: [Deep learning reveals ecological decoupling and rate heterogeneity in Hymenoptera wing evolution](https://doi.org/10.1126/sciadv.aef0605) — Science Advances 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- Bo Wang: [Deep learning reveals ecological decoupling and rate heterogeneity in Hymenoptera wing evolution](https://www.science.org/doi/abs/10.1126/sciadv.aef0605?af=R) — Science Advances 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Bonnie Berger: [Learning how single cells respond to perturbations](https://www.cell.com/molecular-cell/fulltext/S1097-2765(26)00676-3?rss=yes) — Molecular Cell 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - David Baker: [Atomic functional site scaffolding in biopolymers with RFdiffusion3](https://doi.org/10.1126/science.aeh2982) — Science 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
-- David Baker: [De novo design of cysteine proteases](https://doi.org/10.1038/s41586-026-11143-w) — Nature 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
-- David Baker: [Computational design of metalloproteases](https://doi.org/10.1038/s41586-026-11167-2) — Nature 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- David Baker: [De novo design of cysteine proteases](https://www.nature.com/articles/s41586-026-11143-w) — Nature 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- David Baker: [Computational design of metalloproteases](https://www.nature.com/articles/s41586-026-11167-2) — Nature 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Tanja Kortemme: [Programming biological behavior with AI-guided de novo protein design](https://www.cell.com/molecular-cell/fulltext/S1097-2765(26)00615-5?rss=yes) — Molecular Cell 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 
 **cell_therapy**
@@ -331,9 +332,9 @@ How each company appears: **author** = an author's affiliation; **funding / COI*
 
 **gene_editing**
 
-- Alexis Komor: [Translating base editors: a decade of progress from the bench to the clinic](https://doi.org/10.1038/s41573-026-01548-7) — Nature Reviews Drug Discovery 2026-10-16 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- Alexis Komor: [Translating base editors: a decade of progress from the bench to the clinic](https://www.nature.com/articles/s41573-026-01548-7) — Nature Reviews Drug Discovery 2026-10-16 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Daniel G. Anderson: [Amira: detection of single and multi-copy antimicrobial resistance genes directly from long reads using gene-space de Bruijn graphs](https://doi.org/10.1186/s13059-026-04301-w) — Genome Biology 2026-10-17 <sub>(name match; add the OpenAlex id to make it exact)</sub>
-- Daniel G. Anderson: [In vivo engineering of CAR natural killer cells for immunotherapy using ligand-directed lipid nanoparticles](https://doi.org/10.1038/s41587-026-03310-1) — Nature Biotechnology 2026-10-13 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- Daniel G. Anderson: [In vivo engineering of CAR natural killer cells for immunotherapy using ligand-directed lipid nanoparticles](https://www.nature.com/articles/s41587-026-03310-1) — Nature Biotechnology 2026-10-13 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Feng Zhang: [A muscle-enriched mitochondrial protein regulates postnatal heart growth through mitonuclear ubiquinone–PPAR signaling](https://doi.org/10.1073/pnas.2619615123) — PNAS 2026-10-16 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Feng Zhang: [Author Correction: Parkinson’s disease as a somato-cognitive action network disorder](https://doi.org/10.1038/s41586-026-11246-4) — Nature 2026-10-13 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Feng Zhang: [Phylogenomics confirms Palaeoptera monophyly and illuminates the origin of winged insects](https://doi.org/10.1073/pnas.2614706123) — PNAS 2026-10-12 <sub>(name match; add the OpenAlex id to make it exact)</sub>
@@ -358,11 +359,11 @@ How each company appears: **author** = an author's affiliation; **funding / COI*
 - Feng Zhang: [Author Correction: Parkinson’s disease as a somato-cognitive action network disorder](https://doi.org/10.1038/s41586-026-11246-4) — Nature 2026-10-13 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Feng Zhang: [Phylogenomics confirms Palaeoptera monophyly and illuminates the origin of winged insects](https://doi.org/10.1073/pnas.2614706123) — PNAS 2026-10-12 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - John G. Doench: [Voices from contributors to Cell Genomics](https://www.cell.com/cell-genomics/fulltext/S2666-979X(26)00258-2?rss=yes) — Cell Genomics 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
-- Michael Bassik: [Elp1 is required for myeloid differentiation and brain repopulation](https://doi.org/10.1038/s41586-026-11112-3) — Nature 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- Michael Bassik: [Elp1 is required for myeloid differentiation and brain repopulation](https://www.nature.com/articles/s41586-026-11112-3) — Nature 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 
 **single_cell**
 
-- Alexander van Oudenaarden: [Frequency encoding regulates cell type composition in the small intestine](https://doi.org/10.1126/science.adt1928) — Science 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- Alexander van Oudenaarden: [Frequency encoding regulates cell type composition in the small intestine](https://www.science.org/doi/abs/10.1126/science.adt1928?af=R) — Science 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Evan Z. Macosko: [Cellular scaling laws in the mammalian brain](https://www.cell.com/cell/fulltext/S0092-8674(26)01017-2?rss=yes) — Cell 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Sarah A. Teichmann: [Comments from the Cell Genomics board](https://www.cell.com/cell-genomics/fulltext/S2666-979X(26)00257-0?rss=yes) — Cell Genomics 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 
@@ -370,85 +371,87 @@ How each company appears: **author** = an author's affiliation; **funding / COI*
 
 - Evan Z. Macosko: [Cellular scaling laws in the mammalian brain](https://www.cell.com/cell/fulltext/S0092-8674(26)01017-2?rss=yes) — Cell 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Fei Chen: [Cellular scaling laws in the mammalian brain](https://www.cell.com/cell/fulltext/S0092-8674(26)01017-2?rss=yes) — Cell 2026-10-15 <sub>(name match; add the OpenAlex id to make it exact)</sub>
-- Xiao Wang: [MFN2-associated astrocyte dysfunction contributes to neuronal hyperexcitability and depressive-like behaviors](https://doi.org/10.1126/sciadv.aed8795) — Science Advances 2026-10-16 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- Xiao Wang: [MFN2-associated astrocyte dysfunction contributes to neuronal hyperexcitability and depressive-like behaviors](https://www.science.org/doi/abs/10.1126/sciadv.aed8795?af=R) — Science Advances 2026-10-16 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 
 **synthetic_biology**
 
-- James J. Collins: [From code to cure: Harnessing AI for antibiotic discovery and design](https://doi.org/10.1126/scitranslmed.aee4629) — Science Translational Medicine 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
+- James J. Collins: [From code to cure: Harnessing AI for antibiotic discovery and design](https://www.science.org/doi/abs/10.1126/scitranslmed.aee4629?af=R) — Science Translational Medicine 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Jay Keasling: [Replacing anaerobic fermentation with reverse β-oxidation enables growth-coupled evolution for enhanced fatty-alcohol production](https://doi.org/10.1038/s41467-026-78481-1) — Nature Communications 2026-10-14 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 - Jay Keasling: [An automated operon refactoring workflow for heterologous expression of non-ribosomal peptide biosynthetic gene clusters](https://doi.org/10.1038/s41467-026-78648-w) — Nature Communications 2026-10-11 <sub>(name match; add the OpenAlex id to make it exact)</sub>
 
 ## Trade press & company news
 
-**grail**
-- [Britain must maintain its lead to unlock energy’s holy grail - The Telegraph](https://news.google.com/rss/articles/CBMirAFBVV95cUxQZ1dGRVRPdFVtYmVaU1ZFalNsN0VOaGlKQ21YeFl2bFdoeHBUdnlRMnNoUWlWUUJ6dEs4emtoYzZPcEpXdy01V2tSaExTaE9kXzZOVmZJNnRySjR0bnRQNTV6a0wtSnNiN05WXzJvMzIxSWxrM2oxdU1zYVRNeE1vLW1GeXE0ZjZQWGNoUGRmczd3QVhmMDNEY19FbnJMcl9xVnBJRDJybHc4Wm9I?oc=5) <sub>news:GRAIL · 2026-10-17</sub>
-- [GRAIL (GRAL) Stock Sees Fair Value Lift After Analysts Back Galleri Outlook - Yahoo Finance](https://news.google.com/rss/articles/CBMikAFBVV95cUxNSjllbTRCT3UtUFFJejY1a295YkxGdkl5SXhCaFJqanlBZ1I2R1FrSG41X0p1VGl4SkxqSnhadlJSX1haR0hGZHQ0NGlrUmZDODN3dmY5V1FhV1F6SlRwZWluV1BkcS1JU0lyUlphb09vTjlxLTFhcEREd2I5SUY0TVl1WF9DR1ZkcUlUbzEyaE8?oc=5) <sub>news:GRAIL · 2026-10-17</sub>
-- [Super Bowl champ Suh reveals 'holy grail' trading card after collecting as a kid - The Sun](https://news.google.com/rss/articles/CBMigwFBVV95cUxOeWIwSjN5eXRXalNBNVc4NmdEZTVFYjlhWkd5TGs0ZlVUWUg5X1hKNG8xQXpBaEI4STFVWWVCVGVIeTJhajFkQmx6dmdBSmg2VV9PUFRkRHJ1Z1B4R1FzUmxzLXNHU2c5ZEF1MFN0S1pvcmNZUzk0bVpHdEpBTGtDTTJ4SQ?oc=5) <sub>news:GRAIL · 2026-10-17</sub>
-- [Form 4 Grail Inc: Gregory L. Summe (Director) For: 15 October - Investing.com Australia](https://news.google.com/rss/articles/CBMiuAFBVV95cUxNRWxoem9uamlXSDMyQjJOLWl2MGw4UGtYUTMxQTRzTEV2QUswOEJZMDVfb1JIZEdmQzUwUVpiUVZPM1dPenpWVVF5cWVNSVpYeHlGUzFYejNoQm5qdzlodzE4dDBjZEhyY2ZPWmF0aXZSWUNNUXRRdV91dHpiYmRDYXFSSHFvZ1Atam5pdjFxUExmQm4tbU4yUy1qRkZ3ZGh4R2IxcWhwc2lwaUM0LW1zQzBsYjBtaGJM?oc=5) <sub>news:GRAIL · 2026-10-17</sub>
+**astrazeneca**
+- [Hong Kong Stock Market Movers / Genscript Biotech (01548) surges over 8% as AstraZeneca joins the "AI + Drug Discovery" boom; AI-driven drug discovery emerges as a key application area for artificial intelligence - Moomoo](https://news.google.com/rss/articles/CBMirgFBVV95cUxNTnhOZlctVkpENTlDT3FpNEMxcHFoOUhDYk1NYm1zbjFZcU9kWXdxOElUM1M2OW95eERBVHVjQjUwWXBrbUxISDhVbFZuTVpSVnNNX0ZTQVVHXzByeUVGc3VweThKUDBOMXVwSnYyQkdNUm1WdFFqS3RLYV9zYzg0dUZzWGVWNmxJWnhyVjZqNTQ3QTJPOERPUGNLZFFQb1pudUZDRVFKWmRTTFkyMVE?oc=5) <sub>news:GenScript · 2026-10-16</sub>
+- [AstraZeneca partners with AI biotech insitro on liver, heart drugs - Quartz](https://news.google.com/rss/articles/CBMickFVX3lxTFBERkxtdjNZbEthLWJFbUdhaHQ0Z3VBcHk0dUZvM292WnBFVEEwbE9WQ2NGNzRXR0h3VG1pZ2t3Y1VYbVRNUms0eUZNNDk1bmpGSm9KOGlvMkxfTWM5OUhKaTBMb0J4aUIzUFp3eURrN3BMQQ?oc=5) <sub>news:insitro · 2026-10-16</sub>
+- [AstraZeneca signs $40 million AI drug-discovery agreement with insitro - finchannel](https://news.google.com/rss/articles/CBMizgFBVV95cUxNYWxfVGxJbkRGYjZQalNiM2ZvdTdKcFdHQ0xEcTRBOEVlZkVUaVlic2N3aVVZR09uWlVaLXlITGZ4SWMtdmZuRVBZM0lJNGRxRzFXRUhETzRHTFk2RkpDRHBpSTVRZW1ZTGdaanpTVkZERzAzejlaZF9qT09nb0t2V2FPRDV1WE5jTEU5djhPc2lNQmFsZ3NOWjkwb3I5WVB3Rk1qdzE2amFGMmxFMEdxbUx6d294Y0twNkY0UUpGUWliZ3hucmJGZFlmcXpDQQ?oc=5) <sub>news:insitro · 2026-10-16</sub>
+- [AstraZeneca and insitro forge $1.5bn AI-powered cardiometabolic partnership - Pharmaceutical Technology](https://news.google.com/rss/articles/CBMiswFBVV95cUxOc2lnbi10ZUZ2UzlDSEFTOTR6Y3FDSVBPTXB0eTZETi1YTTdGTFJQVWE4alRNMWR4VlowcmFKZEc0Q1hTRkpwWEJNYzVaaXpOdVNoRk5LbFcxU19KZVo2Wm1SS3JMNC1rRUNGQTl5OHdyMDRsTHBMWG5JQ1JsQlBETXF4Sk5BVzFrYlFmSzBScTFac3dOb2NzYlduOWhfRzNWa01aWGZBRlVDS251NEV3Y3Z6aw?oc=5) <sub>news:insitro · 2026-10-16</sub>
 
-**natera**
-- [Natera Spotlights New Lymphoma MRD Evidence With David Russler-Germain and Rod Ramchandren - Oncodaily](https://news.google.com/rss/articles/CBMiZkFVX3lxTE9pY3o4ZmViVFR2SEZVRDN3bFBUNjlWLU1VMWlaaV9KbmpVV3p3VC1mbXk4R1FESE5oaFdGSTBseEFFZ1hvN3pNTGxMU0JjQ3M0cldCT0lyVk85NXFGbm1uWklrS0Jsdw?oc=5) <sub>news:Natera · 2026-10-17</sub>
-- [Under a preset plan, Natera (NTRA)'s chairman sells 50,000 shares; he also exercises options. - Stock Titan](https://news.google.com/rss/articles/CBMipwFBVV95cUxNZGVaXzU5RkVYVklzVnhFaGw4amphaXBGQmFuam1jTWhsWk5qNkd1Yi1Pb1VmWkxOLUdMSG9nNlBZY3NTbjJqWjMyQ2RhODlwcXQxMHBoRXNlWm52MTJWS3p3cy1KZnRwTFJUMTllN2VPVFc4eFplckJvMkdmMVBvQ09McG14OGNuQmNwMTIxa3FjYzVuQ3NObUlRRkg3Q3lETGV2eDBhcw?oc=5) <sub>news:Natera · 2026-10-17</sub>
-- [Natera’s Signatera earns TIME recognition for Natera stock - ad-hoc-news.de](https://news.google.com/rss/articles/CBMivgFBVV95cUxNbVVBRUc3VUxPZWw3b2VWQWFPUC13OFlqZnhSZkN2NHJvS1NIakJVa0ZaaDRCQ0ZkcEFUZ3VHdWp6ZEotYzRYMkVDTENhSkdGWVA2S3c5OFNCUFpxa1NoNHNKZTFCNTJVek5OczFIR0JHVHBScUs3TzRBdlRMc1g0cmFxTjdaQVI0ZWZJVlN3QVlKcDY4TnV3TndMNEJLa2hCZXZGRjJrRjhiTlljZWZCcERuRFlpQnpYNEhCYWJn?oc=5) <sub>news:Natera · 2026-10-17</sub>
-- [Natera executive chairman Matthew Rabinowitz sells $20.1m in stock By Investing.com - Investing.com Canada](https://news.google.com/rss/articles/CBMiwwFBVV95cUxOcVRJS2hZWnpjZWhXRE9CcnhTclJ4Z1pQWG11OU9ZVU5jMUlIREU5SC1heklsY2NjVlVtSUhmZGtLSmNoSXp2YlZ3R2k2cEhwd2lydnhUdUQ0SlZpWmx0QVVfNjdKRUlnRldsS1U3QjQzbWNHeVlWLUxrd2FfdFFEb1dwbHZLNk1IX1VmOGRJXzc1Q1lpa01mTnpsY19FLUpGeXl1bHRSbDEwV1c0Tk9aaWlSeUU4WUQwUWVuX1RQVzFKWTg?oc=5) <sub>news:Natera · 2026-10-17</sub>
+**insitro**
+- [AstraZeneca partners with AI biotech insitro on liver, heart drugs - Quartz](https://news.google.com/rss/articles/CBMickFVX3lxTFBERkxtdjNZbEthLWJFbUdhaHQ0Z3VBcHk0dUZvM292WnBFVEEwbE9WQ2NGNzRXR0h3VG1pZ2t3Y1VYbVRNUms0eUZNNDk1bmpGSm9KOGlvMkxfTWM5OUhKaTBMb0J4aUIzUFp3eURrN3BMQQ?oc=5) <sub>news:insitro · 2026-10-16</sub>
+- [AstraZeneca signs $40 million AI drug-discovery agreement with insitro - finchannel](https://news.google.com/rss/articles/CBMizgFBVV95cUxNYWxfVGxJbkRGYjZQalNiM2ZvdTdKcFdHQ0xEcTRBOEVlZkVUaVlic2N3aVVZR09uWlVaLXlITGZ4SWMtdmZuRVBZM0lJNGRxRzFXRUhETzRHTFk2RkpDRHBpSTVRZW1ZTGdaanpTVkZERzAzejlaZF9qT09nb0t2V2FPRDV1WE5jTEU5djhPc2lNQmFsZ3NOWjkwb3I5WVB3Rk1qdzE2amFGMmxFMEdxbUx6d294Y0twNkY0UUpGUWliZ3hucmJGZFlmcXpDQQ?oc=5) <sub>news:insitro · 2026-10-16</sub>
+- [AstraZeneca and insitro forge $1.5bn AI-powered cardiometabolic partnership - Pharmaceutical Technology](https://news.google.com/rss/articles/CBMiswFBVV95cUxOc2lnbi10ZUZ2UzlDSEFTOTR6Y3FDSVBPTXB0eTZETi1YTTdGTFJQVWE4alRNMWR4VlowcmFKZEc0Q1hTRkpwWEJNYzVaaXpOdVNoRk5LbFcxU19KZVo2Wm1SS3JMNC1rRUNGQTl5OHdyMDRsTHBMWG5JQ1JsQlBETXF4Sk5BVzFrYlFmSzBScTFac3dOb2NzYlduOWhfRzNWa01aWGZBRlVDS251NEV3Y3Z6aw?oc=5) <sub>news:insitro · 2026-10-16</sub>
+- [AZ and insitro ink AI collaboration to target MASH and cardiomyopathies - BioXconomy](https://news.google.com/rss/articles/CBMirgFBVV95cUxPeGhJWDhwcXNrN3ZETjVZS3YyelNJSmpLdElhWUJsVXN6M2xGVEpRMVBxbE83SkUwd21mTTBaeUR3NXpySzVhcDQtNGF0WVM3ZkxRNTdiTkVUeEhEMWc0UlN2UXlXVkRPT0VrVHNHSW5hNGR3RzZDMzlnS2ZPUWxvV1MwMXFOVVh4LTUtWE81b2lBVlJyNG5PbFJoZWNMaUhFWTIwTWlZOXRpNDZvRUE?oc=5) <sub>news:insitro · 2026-10-16</sub>
 
-**adaptive-biotech**
-- [Adaptive biotechnologies president & COO Rubinstein sells $897k stock - Investing.com](https://news.google.com/rss/articles/CBMizAFBVV95cUxNNWlJNGZ5Z0dxTXdZaFZkX0J0eGd4ekI0eE51WGQyUkx2MFcteEZPZFVrX3ZLazdTRDZacVFtdXhxd2YzelRFcG9yODZLanpXMlUyS3poblpjSzhfOTJVaDRWUks3SmszaFBwTGhtX2hKc0FkVjA4RUxoOWpHX2hPWDBJOTJjdW1icTlaNEtPaHRGS3ZaRjd3N3FxTjNzajZnUVk3ZjJaNnpqSVRYcnBKSHB6VjhiOXUzbVAxenNlNW41SmpSOExTNEkwbXQ?oc=5) <sub>news:Adaptive Biotechnologies · 2026-10-17</sub>
-- [Adaptive Biotechnologies (NASDAQ:ADPT) Stock: Insider Julie Rubinstein Sells 11,881 Shares - MarketBeat](https://news.google.com/rss/articles/CBMi4gFBVV95cUxQRTV0YkxESUhZY2NTS0x4R1hfckVOblN1ZFdJUElCb3B6b1FkU1UwU0VYUW1FMUlPR2E0V3lfN0k0cmpuQ1lfcVpud0lCaXZLTUhteTFlWm5IQnJRLTlpMGY0MU43V0dZOXlzYW83TXBTRXpUX2NiYXhjRXNodmNmUmFTeWRTMnY4S1FGdW9TeEg0dk15cE5FODYtcXctZG54b3FKMU1EcktRcUtCVmpmWDhUN1JSbVNSaXFSZXEweE9FM2N5LWlHbTJrQ0s4SHZjZDJSYkNMb0dBdTRjQ1lBWVVn?oc=5) <sub>news:Adaptive Biotechnologies · 2026-10-17</sub>
-- [Adaptive Biotechnologies Corp (ADPT) Shares Fall 6.1% -- What GF Score of 68 Tells Investors - GuruFocus](https://news.google.com/rss/articles/CBMiwgFBVV95cUxNc3o0VThHMlppbFlpZEU2dFBvUGdPRnFHRzkycjBIdVllRFF1WWItVzkwTGVKYUN2QUV1Sm5tTVB6dFpHUUUwMjVxOFdHNzVXVENnLUdLUDNoYTEwWUQwZlJ3d0NaQmhGUUZDcmdWZ09vNC1XellXdkhrNWhlODVXa3NqUVhIN1NCMWVRS1UyODdUZzdMS2VjRDhjYWZiSkpfa0dDMFZ2SExROHppdDZlQjVqbkFJaEFPTDlPUFY5QXludw?oc=5) <sub>news:Adaptive Biotechnologies · 2026-10-17</sub>
-- [Form 4 Adaptive Biotechnologies Corp: Julie Rubinstein (President and COO) For: 14 October - Investing.com Canada](https://news.google.com/rss/articles/CBMi4AFBVV95cUxONjR6VEhMRWpYUTJEMVpGTmk0dVVDN2xTZUFJQVR5UklkVUNkbm90MjNMS2NVOGlwWEFwRVhkbU54d3BhTk1UR3UxU0pWTHhKMEtEQzk4ek92TU9QSTh1N3k0TnJ1N185cnNjUGZhc2p3RzhVX0drZVFTSFlIYXhLaTNJZFgyRkY0bV9VS2NZZzR1X3pNa2Y2WThNQTUyTXllLXJIZGV5WGtTVUR2YTZzSVVYcTBrX1ZjRlo2Zi13N0FqUXhSVTNkaVhLM2Uya0k2RDlER3FmazJKeW4xdHZxVQ?oc=5) <sub>news:Adaptive Biotechnologies · 2026-10-17</sub>
-
-**billiontoone**
-- [Billiontoone (NASDAQ:BLLN) CEO Sells $313,016.22 in Stock - MarketBeat](https://news.google.com/rss/articles/CBMitAFBVV95cUxOSE1mVElrd3lSSVpYYkNYQ2Q2NTFpSWFEM3NIenZkRVdQTFdzOHY1NFdYNkZIdG9fLVQ0MkJQczhmeVJETEFWWnhtaEREcG54VHUzb0JDMWRWNzBxQ3NDdUppRjc1TlBfTHBKajllYjNJZkhxdUFfVFY2Skpxc2dQR0J3ZHlkSWpKeVFheWwzQnF2UTRaVm5jcWFPYUcwd1JhSEdiVWpPcHRmYWRNUWtpSW9TNEI?oc=5) <sub>news:BillionToOne · 2026-10-17</sub>
-- [Billiontoone (NASDAQ:BLLN) Stock: Insider Oguzhan Atay Sells 5,150 Shares - MarketBeat](https://news.google.com/rss/articles/CBMiywFBVV95cUxOZ2NyTzh0TjhwRnZxRzBKVXNqbTBWMFJQZ1ctWExXekpTTmZwOGFaOXBlcXVsOWItRlMzX05mOFU5RVI5ZVM3TTF5VmpYTWt4SnUxN0NGUHFnZFFyMDI4OTZlalFtamp1cl9CUTZva3AxdVIzaUEwUzJoc3VPY1Q0WUxYanNsMXlOMm00Nmk4aVJLTnlQQzBpMG1wVTFQSExKUU8yay1BdVRmaTlKY0tHSGt1cmF2VzZUbTRndGpEY3Z3RGRNRHR4MlBwQQ?oc=5) <sub>news:BillionToOne · 2026-10-17</sub>
-- [Form 144 BillionToOne For: 17 October By Investing.com - Investing.com India](https://news.google.com/rss/articles/CBMingFBVV95cUxQTjhzMENFdEEyMlVrSjF6X193MExzcUFwVFNsOHl0U0RVQVR5TS16YnlCaExGOWxmNTZLNi1jcW9DSmo0QzRDd2hZejZhZndiVWUtQURoaVpWMEZMai1NN2E0Yk15dHNOVHJHbldNR3FXUHRyb0hjMHVGYnRpQ2lyaUwxOTBUZ1NXR2EwZ3lQZUFVSHdrYk9jdnA3LUFWdw?oc=5) <sub>news:BillionToOne · 2026-10-17</sub>
-- [Form 4 BillionToOne Inc: Oguzhan Atay (Director, Chairman and CEO) For: 14 October - Investing.com Australia](https://news.google.com/rss/articles/CBMi1AFBVV95cUxPcXpoVUVzWEQydTNMdllkYzdPdU02N0t3bXhCaHVEVTVEcG1HeHhPblpwUXNFZ1BURGhDN3NacVdHWFFFUjI3TlZOem50MU1zc2R4YUVmUV9YYnZJRWdBZ0V0cGtHYldzc29MeWlxNC1HV0R3NERZX2FEVTlORENxNFN6cFB4ZkxVVFZjUjlmaGFtbVZFTXVjNnJlYWRnczVmNW1RLXNOWHlPRnFZbFoxRTVYdi1ySnI0cll2MS1Jbnl4cmpIWktJTkgzZ3hKUml5ZXg3NQ?oc=5) <sub>news:BillionToOne · 2026-10-17</sub>
-
-**illumina**
-- [Introducing SpliceAI2: The Next Generation of Splicing and Transcript Isoform Prediction - Illumina](https://news.google.com/rss/articles/CBMiyAFBVV95cUxPQnlFSjZUc1FZczFLZjl6UzJqd293M2ZvdE5aRi1KZjBteWRTZWlaWkEzTURwSmszeTdtSmQ0U0YxQlV2SlF0cUpqN2NhTVhkeGE4NkEwMmZ5ZmlWVkVUQVZ0UTVuY29JdVdOeXQ2WmpncG5OOE9yaXhKRlotTk1kQnN6OHJWUnIyU0pmc3JGZzBmdC1PNjU2TzBmeVliaWdVT1Fsc0FzZ0IyZzU3UkwzUjRHYWs2QXhvOHZJaGswUDItZWJDVkFOag?oc=5) <sub>news:Illumina · 2026-10-17</sub>
-- [BofA raises Illumina stock target to USD 168.00 - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiqgFBVV95cUxOdHk3OW5FREdqT3VHdUZ0RFQtOHg0cml5aEJIeGd1cVNRNkt4cGJDVW1rd2VsQU5GVlV6eU1ZNDYwZFJDdUdubExPZk4tb3ZSaGNKVDhpMFc2aXR1ZnM0dG5hZWRuYUZPRFBOeHZCbnNPMHhjM1dhTnNqLUllUXYxMHp4M1hzUzFJdndnaHJGRm1idzlNOGdYcnBUZDNIZjItWW1aUTlqbU5fZw?oc=5) <sub>news:Illumina · 2026-10-17</sub>
-- [In Brief This Week: Illumina, Interpace, Ocugen, Roots, Elicera, Verily, Quantum-Si, More - GenomeWeb](https://news.google.com/rss/articles/CBMijAFBVV95cUxQd2RFRHhHNTlsbkx4ZEtIZnJPSG9TZVVCN3ZSakVvb19uc051WFRZdXpTVGRmaEVZckdVQUExUTlIZDgxYmVoeDd1ZmNGNnpGeVNBNzd5U2xFTkhQVUFIMjlmaGpscGRVS2dMS0xNdkp0QzFfR0hQVDM2TXVidzd5c1JxOEpyNWw0azl1bg?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
-
-**roche**
-- [“Fancy French Skin Care at a Friendly Price”—5 La Roche-Posay Products Dermatologists Recommend Over and Over Again - Real Simple](https://news.google.com/rss/articles/CBMiqgFBVV95cUxOQWdmQU1FTHF1TEd4bGU4enQyX0M2dFVNMVF6WVlUVmlrZV9DbHY1dzhxdXdKME4tWFVBT3hXdTlJZ1gyQkYyU1FXMDl0UUhweE1VWi1xR21sZ2RJcFJsRXFmTG5leE1mcmhIX2ZXNnhDdHFfalpMdS1Kbkg0ZTYySjBMN3N6MXphNmx0ekVGcGZSNkJkWXZqUHN5M0NJRktGX2xHZ3ZtZDhDUQ?oc=5) <sub>news:Roche · 2026-10-17</sub>
-- [Champions Cup: Stormers 49-12 Bristol Bears - Prem side lose pool-stage opener - BBC](https://news.google.com/rss/articles/CBMibEFVX3lxTE9ZdElTQkFWWWlORjRfSWNHOGNVSURTM1hlaDhSQUw3dEpfLUg4MVllRHMxU0tZc3hmc2V3NUVvemdGTTJMc1VUNHNqNlJSZGtCempaMlpkMEVQVGdkaGxJNm5yd1RzT3ZvOHBaUQ?oc=5) <sub>news:Roche · 2026-10-17</sub>
-- [This week in charts: Moderna’s massive stock run](https://www.biopharmadive.com/news/biotech-charts-moderna-stock-xbi-roche-china/832886/) <sub>BioPharma Dive · 2026-10-16</sub>
-
-**danaher**
-- [What Danaher Stock's AI Lab Push Means For Shareholders - Yahoo Finance](https://news.google.com/rss/articles/CBMilAFBVV95cUxPM3pVVFI0Vnc5WGJBeGpCY2dFbVRhQVVwcVJvTVhLdzUyUHZRRk1ad0UxeVBTUTdLM05CcFA5dlVZQWdqcEdjbTNMUGVUM0VLcWtIMWdZeWI1akItMjV4cVFCZmJDdkJYVTd6Wnp3MWVKcFNOalo4ZC05dVBvekcwWXlEYnlLU3lKNnpUU2ZVd1pZdnhK?oc=5) <sub>news:Danaher · 2026-10-17</sub>
-- [Danaher adds two directors before third-quarter results - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiugFBVV95cUxORjJnZlpMZ0x3UVpLM0luRDBaeWJOQUtuVHJ6Y3Y5SUZQalNkV0tTN3NzNDFodUNyMnBuRGxFc0ZCdkRNWHF1cUFoQVBwaS02Vmw1di1KYmlkMlFYUm1aSkVZZ0NsNkp6TXJ1b0F6XzZpZFh0anlNSUdPaDNxeUtKdjdDM2ZpZ1pmWGtxXzY0aF9ENGtXdHo0MThOUmY4QTZqOEUwYnNqVldGS3pfM1N4VWJjbkk0dDlqRmc?oc=5) <sub>news:Danaher · 2026-10-17</sub>
-- [People in the News at Mammogen, Danaher, ADLM, Intellia Therapeutics, iMDx, QuidelOrtho, More - GenomeWeb](https://news.google.com/rss/articles/CBMilgFBVV95cUxQbWtfX0FjNElJQzNvNjFBLVBDMnJvek02UUgwZUQ1Rm4tSjdlVmhuQW5yZDNveVFFcmhwM3duT2VQR2JvWFhTZTJzdDJ1cnNxVjF0U2wtZ19ab2pidFNsOVBsSU1nYmVmOThuVV9aemdFXzRRNVEycmFrZ0taUm1CdmtQNllQYVd4Rl8wUzF2TW14XzNic0E?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
-
-**sartorius**
-- [OXB appoints former Sartorius chief Joachim Kreuzburg to board - finchannel](https://news.google.com/rss/articles/CBMiqgFBVV95cUxPeUxEM1BvLXNKZVpfQVlKYkJKNEh6UnFzZjhUZ2NDNk51MENKWEx2ZXgtcTFxWkJwZ3FxUGRfLVpZZXctWFVpMURWbjVOYUJrU0NqcHpCMFV3OWhTNXd5cnk4TFZiQUFEOGVoTFFYWkFkTTdyV25XRjFZc3AwS0gtbURSLUxuWnpaRjQxbk5rb2t1TFZCMmlLSzZaYWxrS2JKaXdFOU5DMXd0QQ?oc=5) <sub>news:Sartorius · 2026-10-17</sub>
-- [Sartorius stock heads into results with EUR 261.00 close - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiuwFBVV95cUxNbTZSME9Lb2ktb0lKZGJoVWYta3hSdWJleGMtcGVCd3pZTThEeEd5cTBiLTlmXzNkOXJiOS04TFg2ajN2YWFMcXpiaGR2cDZBWjFzbHpMRnZSWFhmN3Y3enRUVHhXaXk0dlh5MExtYXBRRXY3NHNPb0RCam9MbmZTMklrYTU5RHdzM3hkV0RkWHhzVlQwQkxoZDFTV2VJcnFxcW1OSjVyMTVucHZfUmlHTDNkSGZ4NGNrRnVN?oc=5) <sub>news:Sartorius · 2026-10-17</sub>
-- [October 22 results call sets focus for Sartorius Stedim stock - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiwgFBVV95cUxPd2JMU2hfN0xGNzIweG1SUHdQQVI5SnBKbUNlVkZqSEs1WmFIWGRsM2JGbDFhcjF5VXI4eGU3UlVwXzZ1Uk45TzVMWWdfZlo1MVhuRTNwd1V6SkQ4SjZoVVJ0UWRHR1o0UV93RFlOYXhuVE83dmxPaEhQZFVnQUs2VW02YlpBS0tzTmZkTFVPNGJYWXpBUUJuRDNBSkhfcHBFUWR1aGcwWVJEbWNGaGxEcWxVOGhhVnVzaXUzZWt2b1RJUQ?oc=5) <sub>news:Sartorius · 2026-10-17</sub>
-
-**thermo-fisher**
-- [Thermo Fisher Scientific (TMO) Is Building A Bigger Role In Precision Diagnostics - Yahoo Finance](https://news.google.com/rss/articles/CBMinwFBVV95cUxNOW5CSXEtRHMyMVJYZEtkbmZHYWU3TTJ3WHlTMWQyeGxPU0dieHhubk90cTB2cHYyLWY0UXQ4aGZkZS1CQ21EWk93Ym1WbVNRQnJBa2p3UXhOMndfbzNIUjZCa25La0hUbDZiWDhpbF9rS1AzM0pOclZUOVJneFlWdnVLRFlwLU5FdzNwQnVTM3NDcFZHdzVUNy1KemJIaVk?oc=5) <sub>news:Thermo Fisher Scientific · 2026-10-17</sub>
-- [Thermo Fisher Scientific Introduces the Thermo Scientific™ EMPAD™ - The National Law Review](https://news.google.com/rss/articles/CBMiuwFBVV95cUxQOXl2N1VTTTN0M2drVVhnbEJzZDBkejZEU1Mya0UyS0VRT1BRTVNXYUVNZ0hKeHZDcTU4bFdRZGM4WkgtY3o4NTQ5NzhnRkJHLU1iOW13bm9sbjU3eWhueTBUTENoVGV2SDZIZ0JGUFhhLUlfanpqci03bHAzZGI3d1BpXzA0anEwazhhTV9oUFhQeFlkajlacF9VRVVNdFZkTmtIMkFkRXJuc3V0endNMXVITmZLa0NQSVFv?oc=5) <sub>news:Thermo Fisher Scientific · 2026-10-17</sub>
-
-**qiagen**
-- [Qiagen N.V. (QGEN) Stock Forecasts - Yahoo! Finance Canada](https://news.google.com/rss/articles/CBMikAFBVV95cUxORm1kMTNjQ3Y4N3VrdkdtbWo1TXBBdGQxanhLajZKdF82QlYxa05UUG5qSEdMank3Nk1ldVRkYjFiTTNpUG1sbXRRTGpnR1J0Ry1EazdRb1lmMTFaME4yNkdQR1ozNy10S1JjMVpEVURZaTltOUs5VGlETkRjb3puaDZNNlNNemRHMGdFdFF6SXY?oc=5) <sub>news:QIAGEN · 2026-10-17</sub>
-- [Qiagen convenes tuberculosis summit. What it means for Qiagen stock - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiyAFBVV95cUxPNXFvTl9QSkljYnY3SkQzZ1BGRUdfTU02c3F5TWVud29zZ3hlZWI1d2RsV1pCd0JabUE0RlhveFBhYjdpYm5lcm1tUzRhdlVUSk1uSktVcHZhdnNKOWJpRHctZV9mc2dBZHdRMjQ5U0dGbUhDQnlVX1VqMTVESm04RjF3TVBTYXV5VExSckR0bi1nN1dpMDY5dzJjX2Z3TGFqQlhRSG12VGQ3Qm01M05GWU02YWstZi1CRkxfNGIwUnlZM05TaG5XZQ?oc=5) <sub>news:QIAGEN · 2026-10-17</sub>
-
-**bio-techne**
-- [What Investors Got Wrong Before Bio-Techne's Rally - Simply Wall Street](https://news.google.com/rss/articles/CBMi0wFBVV95cUxNOHpSYjFMeFlQWkRkYzF5Y0hGbVFrcklPemRzSzlIRDR0REpMb0NBWDNQMGUxUnl4Qi00VFRLY2Nmc2pINGVRVXczWlk5ckd6c1RXZzJlNVJId0pDS1h0YmlLekhuLU43ZU9RMEZESW1hX3pDWEhKNTBENmVBOHAwanZrNUFJRDBXdjFoSlhtdGgzWXdweW5HY282cldReUphQWtjc0twZVRtbjRkMUt1UlpnSkp0MkRKazk2R2tJdjlKaUlQS2dyUThqdmdsSndQVU1v0gHTAUFVX3lxTE04elJiMUx4WVBaRGRjMXljSEZtUWtySU96ZHNLOUhENHRESkxvQ0FYM1AwZTFSeXhCLTRUVEtjY2Zzakg0ZVFVdzNaWTlyR3pzVFdnMmU1Ukh3SkNLWHRiaUt6SG4tTjdlT1EwRkRJbWFfekNYSEo1MEQ2ZUE4cDBqdms1QUlEMFd2MWhKWG10aDNZd3B5bkdjbzZyV1F5SmFBa2NzS3BlVG1uNGQxS3VSWmdKSnQyREprOTZHa0l2OUppSVBLZ3JROGp2Z2xKd1BVTW8?oc=5) <sub>news:Bio-Techne · 2026-10-17</sub>
-- [Bio-Techne stock has a November 4, 2026 reporting date - ad-hoc-news.de](https://news.google.com/rss/articles/CBMisgFBVV95cUxNQlRRMjZCcnRMRmVzT3lyVGtYdjlMR19JUHljOWgzM2NmYnZrVEpOUHFhRVVGMGVFTlFycjdVakRacnJIN3ltZERwNkpTbkg5RWM4MVNzQ1lTaUNVVU5hc1cxanNDLVliZXFWelVjRWtIYkZ6bHI0RzBMeTJnV3A1d21FX3pyQjNabWNVREF5Ym5fcm0wT3hoMmRmWEstbU1Za05oZG1tcU90N2t4dUl3TGp3?oc=5) <sub>news:Bio-Techne · 2026-10-17</sub>
+**veracyte**
+- [Veracyte Nabs Medicare Reimbursement for Prosigna Breast Cancer Recurrence Risk Test - GenomeWeb](https://news.google.com/rss/articles/CBMirAFBVV95cUxPblU4SUdYQkU0dk5fSHR1bHdnNFRxUndFbkdNVFlDdWl4YkExZldwb2JtSzVHamZWNTRZQmx4aFp5SnN1WUxLVENvUklEclBQdEQxNExhVkR0UzQwamdGNExlN1l3REJFeS1GVDhmYXl0SmpGeTdOcVRqX1lEaFQ1b1lJNTdwUmRLaGpSNGVUZWgtcjJjVTE1c0hKRFZDeW9iaE9yeENUOEZsN2lx?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
+- [Veracyte's Prosigna Breast Cancer Recurrence Test Gets Medicare Coverage - marketscreener.com](https://news.google.com/rss/articles/CBMiwwFBVV95cUxPdHpaTmNJV2NMVkotb3pNZkU0bzAwVHVla1hnY1BBYUt0S2RJT0xTNmh4X01nX1lmcHhMNDVxc19yTENxZ3hCR09wSWR0ekdQZUdlLWRMcGx0bS1RUFlZdmRRS294cnVBR3BSTUNkZ3FuSjNjSEtjLXVXUFBXWkJKX1dSQVZyUlVKQUVRblNQZi1YeDl2c2lnQ25PSlpGb3FkRmx1VVVpaEdudWRtdEdkbXBNNTFmaEpfcDgwSFBITGdXZDA?oc=5) <sub>news:Veracyte · 2026-10-16</sub>
+- [Veracyte’s Prosigna breast cancer test receives Medicare coverage - Investing.com](https://news.google.com/rss/articles/CBMivgFBVV95cUxQYlNmWUJtYkpkLUhrZUl0S29GZExDQVQ4aklGbUVQbjZrQkFDdnN4Qmw5ZlhVWHRXbTVxcDR1TXZFMkpRdjFZMzN5SDBJU1BpUl9Dcm9JM3lEMUVnS2kzaW1Da3ZoMFhXT2ctWjNocHFseVE5cUlXdlpsdnY4Ujg5T0c3QXR2di1hTndzNjNIaDQzT08xY0hCejhXNHNWY2JqTDhQSGdvUW5IUE9QcDgyemM5aEFLa0NUaTRiMU1n?oc=5) <sub>news:Veracyte · 2026-10-16</sub>
+- [Veracyte wins Medicare coverage for Prosigna breast cancer test - StreetInsider](https://news.google.com/rss/articles/CBMivwFBVV95cUxNZm9PZnNueXlscjJ2b3ZRZWlVTVdqazhmUVNKUkFWMEVORlFsUU1YRS1VZnN3ZUxnVWltam5BWjJ3bUhuQW5tVXRGcTV0cVhaSHh0ZVFWanpDRUtMQTR3a2J4OUV2Y2FSS0RONFpuTW1SaEFnakplbWJNalZDUDYtZmc4b09Ra3A5LWRvQmp4bG1ldTlfTG9iRW94VTBQMnZZNXMzZFNoYVAwTWRaQjc4OE9nUVk2NUxicGlNVUk3TQ?oc=5) <sub>news:Veracyte · 2026-10-16</sub>
 
 **quantum-si**
-- [Quantum-Si to Provide a Business Update and R - Moomoo](https://news.google.com/rss/articles/CBMiowFBVV95cUxQckxaTUF3WlZPdkNkSXFYejNGRXVYZ1dWS2lHc1pBUzhYUmxBRlJUeWY0eEhrN0EzVng2bWZvN3E2cWFjMUNIZW92aXM2R1ZOZkFka1I2ZHdWTzZralJFSkNMWE04alY5dldVMFVHV19tUmlCX3NiYlM5MjdCczAwVFNjeTVMb3JJUGM1WEVRUW1VTlNhVGZkSERlczBQNzQtVjRj?oc=5) <sub>news:Quantum-Si · 2026-10-17</sub>
 - [In Brief This Week: Illumina, Interpace, Ocugen, Roots, Elicera, Verily, Quantum-Si, More - GenomeWeb](https://news.google.com/rss/articles/CBMijAFBVV95cUxQd2RFRHhHNTlsbkx4ZEtIZnJPSG9TZVVCN3ZSakVvb19uc051WFRZdXpTVGRmaEVZckdVQUExUTlIZDgxYmVoeDd1ZmNGNnpGeVNBNzd5U2xFTkhQVUFIMjlmaGpscGRVS2dMS0xNdkp0QzFfR0hQVDM2TXVidzd5c1JxOEpyNWw0azl1bg?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
+- [Quantum-Si incorporated (QSI) Stock Price, News, Quote & History - Yahoo! Finance Canada](https://news.google.com/rss/articles/CBMiUEFVX3lxTE9YQzBOek1QWjFNVnR2ZE52ZWZ2eDV5SV81V28tSzhpcURDbGxYakNJUno5bWxQaXhQUXFTd04tTVhRMUhKRWhMbGVxamJLLTQw?oc=5) <sub>news:Quantum-Si · 2026-10-16</sub>
+- [Quantum-Si Incorporated to Report Third Quarter 2026 Financial Results and Provide Business Update on November 5 - Quiver Quantitative](https://news.google.com/rss/articles/CBMi3gFBVV95cUxONUdzdy1LQWVGLVBwWk1rNlhGUzVGV1pjQzU5QUZJc08yUVJiakhDVXBQUWVGQVVXeXdvdnZCRG9DR0dScl8yYzZ6Z25EbU1CMUEwbklfZUI5Njc5b0hROC0zZGJsWHdEZTZMajBaakM4dE1nOTdhaHg0NmwxTXJqNVI3WHhfdGVSTW9PZFZCUU1FdnBQbHd1bFNIaGY4aS1uMnNnWXZ2TG9PVk1wZGd6a043Tl9SRVI0cG1mUW53bm5sdy10T1AtWGtJWHI4b2p1a1JlWTdPSVZFbW5XaWc?oc=5) <sub>news:Quantum-Si · 2026-10-16</sub>
+- [Quantum-Si to Provide a Business Update and Report Third Quarter 2026 Financial Results on November 5, 2026 - Investing News Network](https://news.google.com/rss/articles/CBMizgFBVV95cUxQNmp2RERwcUlhdUpuYlBpV3B5SkQwUTZJNER1TmVYWEJ3cldGZUtrcy05dVRlaEg3SkMzdkZsdzQ0TDY1RUl2Ykl2VUVXcUFHajZjb1diLUhvbE9FaElVUWlwaWVRSUoxSzEzR09sZVUtTHY3cFJ6My1MeEtaVlhZQ2hoV0tEaTJfOWpXd2lKYTYxYndIS1V5WWFDQWhYcW53STNLRzNZdWFleE9nYXEweEZTWkt6UXB4ZUxscDljc3pqWnV4cjNDR1U2TW1OUQ?oc=5) <sub>news:Quantum-Si · 2026-10-16</sub>
+
+**moderna**
+- [This week in charts: Moderna’s massive stock run](https://www.biopharmadive.com/news/biotech-charts-moderna-stock-xbi-roche-china/832886/) <sub>BioPharma Dive · 2026-10-16</sub>
+- [Azenta, Myriad Genetics, Moderna, Repligen, and PacBio Shares Plummet, What You Need To Know - StockStory](https://news.google.com/rss/articles/CBMi4wFBVV95cUxOYzBDYk9FY1RSSll0TkVJZ2VDWkNKYXQ3dmFzTXRxdzFvbXNfOFpOVTU5OTZnbTdBem13V0hKLWppMlBGTEFYUkRVMGluTTV6ZUNlNHRxTXBLLUhDVnJlMTN6MVQzdTNadVEtR3E5Q1N0SkZ1OUpRN3I0RjFJNUxIdGNFSTFLSnh4OXlNdUw1b0NLZTljVF9RWnVvTEtSNEtNRlBsdVptQmIycGZtd3VScEtiZ0hjeF85R1ctUXhDdENhOFFvWnhicURiLUp4RklYY0ctaXVDbGZPLTBYY213N0NEOA?oc=5) <sub>news:Repligen · 2026-10-16</sub>
+- [Merck and Moderna have ‘lot of exploring to do’ after initial cancer vaccine success](https://www.statnews.com/2026/10/15/moderna-merck-keytruda-mrna-cancer-vaccine-strategy/?utm_campaign=rss) <sub>STAT News · 2026-10-15</sub>
+- [After a melanoma diagnosis, mRNA cancer vaccine delivered a patient hope — and a path forward](https://www.statnews.com/2026/10/15/melanoma-diagnosis-mrna-cancer-vaccine-stat-summit-boston-2026/?utm_campaign=rss) <sub>STAT News · 2026-10-15</sub>
+
+**labcorp**
+- [Labcorp, Thrive Global launch latest Thrive 5 health test - Fierce Biotech](https://news.google.com/rss/articles/CBMimgFBVV95cUxNb2w1NURWNU9GV3ZFeHpaZEZibDMteUEzSy1vRFZGZWxjQTFTOExVWUtfaEo1VnAzbXM4c09wUGhpM0d0dURYQnFKaG8wdURUNjZTcWEwWHVUVEgtcFRfT2tfR3NLN0doYnhpRFdTWUx2MjAtMThNcFhQVWZIeTZVeWxNcWlMUFNkWjRJOVFTeXh3SXhzcW82bmV3?oc=5) <sub>news:Labcorp · 2026-10-16</sub>
+- [Burlington’s Labcorp to Acquire Select BioReference Health Assets From OPKO Health for $722 Million - BioBuzz](https://news.google.com/rss/articles/CBMivwFBVV95cUxNdy1sNGtkUjdvN0s2TDdXUlZSN3RiMnJmYUFpNnpLQ2dnLVhEUE9SNUVwQ1MzeFlxREMzblo2ZE9LelFqT0dYS18zRndkaWNhQWI0SFdCc0VFMTZVT3QxWHpJRm9rNWdUcmdMajFJZjFMYVJ2czNZRG1HZnpoUVdITzFxSG9DSlNITnBaUC1xcUNkWjEwQklEWngwN0prWk1VMHFmSnNYQWVsdHhOMG9NRDJvYWduWDBxeGdseGpSOA?oc=5) <sub>news:Labcorp · 2026-10-16</sub>
+- [OPKO Health to Sell Select BioReference Assets to Labcorp for $722M - Yahoo Finance](https://news.google.com/rss/articles/CBMingFBVV95cUxPeFlRRlJFaU13dEF0Z2xMSFhZNXVnNHRTbmpkQ0JfcXY5RHBXb2VvaU5PdllaTHJoWU9LQjc2R0ttYVJiTUJqRUtFVnNpYzRJSlB5Q2JMcWUxWXdmbXYtazZXOU1FYy1Ka2tpd2lXenhseHZRZDBzYlJsaW93SGJGX2NVM1NMNlJHbUFWYkJDekxKMFhUTjdmSnNvaTFDdw?oc=5) <sub>news:Labcorp · 2026-10-16</sub>
+- [NC Life Sciences News: Labcorp’s $722M Acquisition, IQVIA’s Veeva Partnership & More - BioBuzz](https://news.google.com/rss/articles/CBMipAFBVV95cUxOeG83QzR4UjBxWm15ZWVzUmNkbXBlVGEtNTZxdEREbDdRSWo3YnNrZDNLaW03TGppMm52Z19Ec294S0JNVFpULUJTZ0Y1X210N3ZyYjl6ejZIUl82eE9qbm1Qa0JxSUs1WDFqVkpodjVwX2lKT092dGktZ3Zna1ZMMVRhNXVBUVhxcnNqNUp4VnlwSE1mTW15cVlyZnpNdVlCMW9rWQ?oc=5) <sub>news:Labcorp · 2026-10-16</sub>
 
 **guardant**
 - [Is 99% Screening Adherence Altering The Investment Case For Guardant Health (GH)? - Yahoo Finance](https://news.google.com/rss/articles/CBMipgFBVV95cUxQaEZNOFF1d2xaX180anRCZ2lUN0lDdjVxZ0ZtT3gwVU9OYW5BRmN1Si1FTEJ6aFB5a2YyZkNGeFFuNnpkYUdObzBOU2FSYkFYcjg3dS13bHFwdy00RFZXT2NXcFZnSVY1TGtqVzlLTVNLSXplNGhyYjJkMG1QamlIV205WlFGaG1VanlDMEFuMTV3ckYzYlZ6M09OUjZ0bTVBNGc1YXB3?oc=5) <sub>news:Guardant Health · 2026-10-17</sub>
 - [USPTO Rules in Favor of TwinStrand Biosciences in Ongoing Guardant Health Litigation - GenomeWeb](https://news.google.com/rss/articles/CBMiqwFBVV95cUxNY3FUQ3h5TTRnMDF4dThyc0RaaHN4TGd3R2FhMGkxSnVxbzQzSUdzS05MTVlhTEt5R2N5RUtic2xsN2J1ZkswS1RYRmsyYkpMbnVxaWstYWxmNV91SnRaMnJWU1FjeWg3SXBiVUxHSTI4S21RdmNZWUhYazFFRUpXTE1QYVpoTzVJWlNSOEtVRWdMSml6QmNON0ZKSnRKS2p2UVl1a3BGcV9TOGM?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
+- [Guardant loses second patent challenge to TwinStrand amid $245m damages fallout - Life Sciences IP Review](https://news.google.com/rss/articles/CBMivwFBVV95cUxPdFpFdXJfbzJVUG90THdkSTlCeUU3QUVYNFBXelRyMElvU0x4a29MdkJVM2p2RUxQMm1ESmFaU1lZbWRIalZFRG9zWFZpa1dpVFc5ZklreUFVc24xdzR6MnY0TFJJMm1RVEdfeVd3cml5eXRnNXhOamNncGhRMzItdElZcWVad1NwTmEybU93RGljQl9FcHhOdVF5MVRrZzRDbUVuTVN1cUJvSVJyXzhjRGNaNjQ2akpVX1NpUXpPUQ?oc=5) <sub>news:Guardant Health · 2026-10-16</sub>
 
-**neogenomics**
-- [NeoGenomics, Inc. (NEO) Stock Forecasts - Yahoo Finance](https://news.google.com/rss/articles/CBMikAFBVV95cUxNWGFScHJad0dSM21xbHZpcWJSNWI4dHVscnlFNHM2Wm9KdVFvNHlXdk5uREEtRzEwYjZZbjFGTnVYbFdUQjFFSTJvVkRUZWd1UnlWR2tvaEx0QVRKdFZ1LVlvVG5hZ2xrc1RoUGpJZzJMTFM0YW5XYlRyWUVUX3NDYUZZWmxoX0RmdzVXUFpHcEU?oc=5) <sub>news:NeoGenomics · 2026-10-17</sub>
-- [NeoGenomics stock fell 3.48 percent to USD 16.65 on October 16 - ad-hoc-news.de](https://news.google.com/rss/articles/CBMivgFBVV95cUxNS1V0U0NqSktrV0FiVnhsVTRMLVd6WWtiU0F5a09LVFRvZGplWmo2SWE5QnpEZUdmZE5kemFkVWpLdXMzWUNQSDVoN2FEbWNCaEQ3WEpPN0NNdDZvOEdGQWhzTGtQY1RDU0lsdUxhZk1Ec2dwR2tETXlkU0M2b1EyczhTdkprNVpXUXJOaWVxY294VXdDdFViN1RmdDNzSlhLQkpzdi1BZG02WXI5ZGloYTZQOE1mOTdERVRrZHlR?oc=5) <sub>news:NeoGenomics · 2026-10-17</sub>
+**natera**
+- [Natera’s Signatera earns TIME recognition for Natera stock - ad-hoc-news.de](https://news.google.com/rss/articles/CBMivgFBVV95cUxNbVVBRUc3VUxPZWw3b2VWQWFPUC13OFlqZnhSZkN2NHJvS1NIakJVa0ZaaDRCQ0ZkcEFUZ3VHdWp6ZEotYzRYMkVDTENhSkdGWVA2S3c5OFNCUFpxa1NoNHNKZTFCNTJVek5OczFIR0JHVHBScUs3TzRBdlRMc1g0cmFxTjdaQVI0ZWZJVlN3QVlKcDY4TnV3TndMNEJLa2hCZXZGRjJrRjhiTlljZWZCcERuRFlpQnpYNEhCYWJn?oc=5) <sub>news:Natera · 2026-10-17</sub>
+- [Natera’s Signatera™ MRD Test Named to TIME’s List of the Best Inventions of 2026 - BioSpace](https://news.google.com/rss/articles/CBMiuAFBVV95cUxPd0c3X3JvZU9Nc2o5TXJCaGdUQWtXOXRfOGszb2lYQ2lzVEltcE9IWWt6Q0VyTjVpWmdIUllSSGlrXzJPUzlDMmlpYlFubURtNzhDVkQtZFAxc2l0MGRrelhyRW8wMURBY1hrM3hiUGJvdWpzeWtDNndNOVcxYzFqMmxzcVF3N3RJY0h5TU9XMGtrUktMNWQtRjBVZllhN19RM2xBT2NnbVZNQUVsM3VhREZ0bEpZaEo0?oc=5) <sub>news:Natera · 2026-10-16</sub>
+- [Natera names Signatera to TIME’s 2026 list; stock pre-market at EUR 361.65 - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiywFBVV95cUxOQldaWEdyZFVTcC1RajNiVk5ib1E4aTFTV1NveG82Qmt2NTYwYXNnWjhLUFBaMHYwMWtjdWxCZDlRdEhzOTRlLVQ5RS01QldoLVQycnFHZmNjQUlTU2VFeTRNcEFuakhmeHVTVy1MRERaNmgyYnBGOUtfWnF6eDlWSkhSeGZqZlBTcnZHbkFqMi1zNHJWVzBhdUdpZHN4NmFLZENhSS1LTW9mcXFBWml0aWs2M1cwX2FMeG13NE1mbDBrYm1KR21OODNTYw?oc=5) <sub>news:Natera · 2026-10-16</sub>
+
+**thermo-fisher**
+- [Thermo Fisher Scientific Outperforms on Strong Results and Life Sciences Recovery - Yahoo Finance](https://news.google.com/rss/articles/CBMipwFBVV95cUxQWElvTU5Vd3NFaFlleEV2dnc4YWNqVXI3a3hxX3ZOVGJQUEJLNmFpal9PZWJSaHRSS2htM0lDZm1QNlp6UXF2Yi1zeFZQZG1uVWNpNFNjWG5rMDUwYjl5U1dQVHlLS2tsOHNkMHZINndjY0ttT20wM2VVdGN4eUFtcUZOVE81bmxfUGxUblhRV0ZTeW40TS1YYkR2Z3BMMGhWcnhEMFRCUQ?oc=5) <sub>news:Thermo Fisher Scientific · 2026-10-16</sub>
+- [Thermo Fisher Scientific (TMO) Q3 2026 Preview: EPS Est. $6.40, Reports October 21 - AlphaStreet](https://news.google.com/rss/articles/CBMirwFBVV95cUxNRl9NLUl1MFltS0d3MGZTWkFmRXRGY2FqeDBpSWdrdGhoTlV3VXk3cUt6SUdFVjNaelNmZDFyRlBKZVdPNmdRNjhQQlFSbUtDNlVwODFyQ1Q5aXE0VE00S1JHdy0xSlMxYlpZbEIwSWM5Ml94WEhxVm1jMnFjbzlrbDZvTE5tTVNZTkNWYzJrSjhXMWZMc1V4OEdsOHpfOTExamN2M25KcmVuQ1N2OFVr0gGvAUFVX3lxTE1GX00tSXUwWW1LR3cwZlNaQWZFdEZjYWp4MGlJZ2t0aGhOVXdVeTdxS3pJR0VWM1p6U2ZkMXJGUEplV082Z1E2OFBCUVJtS0M2VXA4MXJDVDlpcTRUTTRLUkd3LTFKUzFiWllsQjBJYzkyX3hYSHFWbWMycWNvOWtsNm9MTm1NU1lOQ1ZjMmtKOFcxZkxzVXg4R2w4el85MTFqY3YzbkpyZW5DU3Y4VWs?oc=5) <sub>news:Thermo Fisher Scientific · 2026-10-16</sub>
+- [If You Invested $1000 in Thermo Fisher Scientific a Decade Ago, This is How Much It'd Be Worth Now - Yahoo Finance](https://news.google.com/rss/articles/CBMipgFBVV95cUxPSHpYdS1YbEo3cklXYk1hVERVQUpKMzBGQ2dwM2UtUEUxZWtTNFFsRnBXelRwUldjdk1GMS1GNmNqWWpJd0ZjNVZjNS1OaGNrT2N4RVlmTkpnRkdKak1qck5IbzY5WjF4MEFiWFhWSFlMTzRjRy1LVk5CRVBJUkh5S1hiOTZLNmxKMVppVGtoVTJ3RFJSMnBzTzJCdjdkNFc4MFNJS3Zn?oc=5) <sub>news:Thermo Fisher Scientific · 2026-10-16</sub>
+
+**illumina**
+- [Introducing SpliceAI2: The Next Generation of Splicing and Transcript Isoform Prediction - Illumina](https://news.google.com/rss/articles/CBMiyAFBVV95cUxPQnlFSjZUc1FZczFLZjl6UzJqd293M2ZvdE5aRi1KZjBteWRTZWlaWkEzTURwSmszeTdtSmQ0U0YxQlV2SlF0cUpqN2NhTVhkeGE4NkEwMmZ5ZmlWVkVUQVZ0UTVuY29JdVdOeXQ2WmpncG5OOE9yaXhKRlotTk1kQnN6OHJWUnIyU0pmc3JGZzBmdC1PNjU2TzBmeVliaWdVT1Fsc0FzZ0IyZzU3UkwzUjRHYWs2QXhvOHZJaGswUDItZWJDVkFOag?oc=5) <sub>news:Illumina · 2026-10-17</sub>
+- [In Brief This Week: Illumina, Interpace, Ocugen, Roots, Elicera, Verily, Quantum-Si, More - GenomeWeb](https://news.google.com/rss/articles/CBMijAFBVV95cUxQd2RFRHhHNTlsbkx4ZEtIZnJPSG9TZVVCN3ZSakVvb19uc051WFRZdXpTVGRmaEVZckdVQUExUTlIZDgxYmVoeDd1ZmNGNnpGeVNBNzd5U2xFTkhQVUFIMjlmaGpscGRVS2dMS0xNdkp0QzFfR0hQVDM2TXVidzd5c1JxOEpyNWw0azl1bg?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
+
+**sartorius**
+- [October 22 results call sets focus for Sartorius Stedim stock - ad-hoc-news.de](https://news.google.com/rss/articles/CBMiwgFBVV95cUxPd2JMU2hfN0xGNzIweG1SUHdQQVI5SnBKbUNlVkZqSEs1WmFIWGRsM2JGbDFhcjF5VXI4eGU3UlVwXzZ1Uk45TzVMWWdfZlo1MVhuRTNwd1V6SkQ4SjZoVVJ0UWRHR1o0UV93RFlOYXhuVE83dmxPaEhQZFVnQUs2VW02YlpBS0tzTmZkTFVPNGJYWXpBUUJuRDNBSkhfcHBFUWR1aGcwWVJEbWNGaGxEcWxVOGhhVnVzaXUzZWt2b1RJUQ?oc=5) <sub>news:Sartorius · 2026-10-17</sub>
+- [RBC Capital Maintains SARTORIUS STEDIM BIOTECH(SDMHF.US) With Buy Rating, Cuts Target Price to $238.9 - Moomoo](https://news.google.com/rss/articles/CBMisgFBVV95cUxPYzA2NkVTODREMFNSR2l0aE1jYWZZZlY5dzRxWFFiLVFZVVFZQW5obHpoc0Z2ZVJEU1EwR3hiSG4wdjJUOXNvYkNINE9FR096MXU1cWx5TVhsa19XWWpFeUJZZXc0dFFHZmhtOVlMMjdkN1I2M3AwdmxjOEM4Rk41MXdlamJ6R0owNUtvR1dUUlNwQzh4NE1xNEdsSTNsNGpVeVZFbFg1M3ZncHh4MzhkTTNB?oc=5) <sub>news:Sartorius · 2026-10-16</sub>
+
+**watchmaker**
+- [New Products: Watchmaker Genomics, Ambry Genetics, Nabsys, Mirxes, Aignostics - GenomeWeb](https://news.google.com/rss/articles/CBMimwFBVV95cUxQT19ESGMzQmh0RElkdk90eVNoUDhBZy1YeEh1S3NHODZZeUtEWmo0RzNIaGZKMm43WmtmV2pSTnJfSHNFQm15QndZSi1TMGM0c0UxMUhPYmpuRmtVWkR1bnNCLUF3Y0VxdEE4MVo2aFhPUTlQYWozNXJ4ejlmLWd1c2VFN25YZFBWNXZWNFctYTRNN015bHpHVFpwMA?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
+- [Watchmaker Genomics Expanse - GenomeWeb](https://news.google.com/rss/articles/CBMiggFBVV95cUxNNzJLYTZ0LUNmSzVDbW91NlF6cEVLanp6aTdSd0lrbkhibmcyZXk3dHpnN25PRUt0Q2RJMWNHUGxsdTc3RG9PSmZxX3VxeWtzSFZIdjI0UDM5amd0QjU0UjBHdXd1VGEtSVRsYUVidU9BQTU4WEc2SGFMQnhnYjFrXzdn?oc=5) <sub>GenomeWeb (via Google News) · 2026-10-16</sub>
+
+**10x-genomics**
+- [A Look at 10x Genomics Inc (TXG) After 3.5% Decline -- GF Value $18.31 vs Price $69.86 - GuruFocus](https://news.google.com/rss/articles/CBMitAFBVV95cUxNYjVPR1lLWWtBZjBaMmpESkFicDVtUnlSMlZpa0ZVdWV4a2hWeVF2SUpvbVAtMGM3dHF4bmllNU55QjFqR3pnWW9adml6dXBCNGNWTUg0OHRZYzRhRHdlaEtWcV9fZXZKeVRKV09BSWd0dzBJS3BtZ3lzYWRZQk1jb3dTLXlJenVwbTZwNnpWRU5iSGFhcllrbE4zQXd5dDNqYWkxUnp0SFVqZkRLX2owUzRwbEg?oc=5) <sub>news:10x Genomics · 2026-10-16</sub>
+- [10x Genomics, Inc. (TXG) Options Chain - Yahoo Finance - Yahoo! Finance Canada](https://news.google.com/rss/articles/CBMikAFBVV95cUxQbGNaOTgxRDFyTlM1MDRlYTE4WWpmUlFsRmNoNGdtV1pBMW5QXzZMY3pvOUp2c3ByX3RKM3FBQmQ5ekpGZFpRN0t2QmlKWFM4OXVyV2tTX1VNWmJsMVd3RlFMS0hxRDhUZDVqTVNOSEVXZ21acXV6azRqT2pJNGJrZ2l5bnlxNEd1T1RlQUFxRG0?oc=5) <sub>news:10x Genomics · 2026-10-16</sub>
 
 ## Coverage and method
 
+Records pulled per source: rss.journals 597, rss.subjects 107.  
 
-Database totals: 3562 papers, 3729 entity mentions, 123164 archive records, 1263 news items. Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. Only metadata, abstracts and open-licensed full text are stored; subscription content is linked, never copied.
+Unique papers after de-duplication: 704 (0 new to the database). Full text parsed: bioRxiv 0 (failed 0), Europe PMC 0 (failed 0). LLM-scored: 0.  
+
+Database totals: 3562 papers, 3707 entity mentions, 123164 archive records, 504 news items. Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. Only metadata, abstracts and open-licensed full text are stored; subscription content is linked, never copied.

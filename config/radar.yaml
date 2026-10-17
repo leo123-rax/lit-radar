@@ -119,6 +119,26 @@ ranking:
     use_batch: true
     llm_weight: 0.6         # final = 0.4 * heuristic + 0.6 * llm composite
 
+news:
+  # Google News queries are "<company name>" + a context clause chosen by company type, so bare names
+  # like GRAIL or Roche do not pull unrelated stories. Override per company with news_query in companies.yaml.
+  query_context:
+    tools: '(sequencing OR genomics OR proteomics OR "life sciences" OR instrument OR biotech)'
+    diagnostics: '(cancer OR diagnostic OR test OR genomics OR biotech OR FDA OR Medicare)'
+    synthesis: '(DNA OR "synthetic biology" OR biotech OR genomics)'
+    ai_bio: '(AI OR "drug discovery" OR protein OR biology OR biotech)'
+    pharma: '(FDA OR trial OR drug OR pharma OR biotech)'
+    cro: '(biotech OR pharma OR CDMO OR laboratory)'
+    institute: '(research OR genomics OR biology)'
+  # headlines matching any of these regexes are dropped (insider-sale filings and stock-screener chatter)
+  exclude_title_patterns:
+    - '\bForm (4|144|13[FG]|3)\b'
+    - '\b(insider|director|officer|CEO|CFO|COO|president|chairman)\b.*\b(sells?|sold|buys?|bought|purchases?|acquires?)\b.*\b(shares?|stock)\b'
+    - '\bsells? \$?[0-9.,]+[km]? (in|of) (stock|shares)\b'
+    - 'GF Score|MarketBeat|Stock Titan|Fair Value|Zacks|Motley Fool|Seeking Alpha|Simply Wall St|Benzinga|TipRanks'
+    - '\b(stock|shares) (sees?|falls?|rises?|jumps?|slides?|gains?|drops?|climbs?|soars?|plunges?)\b'
+    - 'price target|analyst rating|rating (to|at) (buy|hold|sell)|options? (activity|trading)'
+
 digest:
   top_n: 25
   instruments_table_n: 40

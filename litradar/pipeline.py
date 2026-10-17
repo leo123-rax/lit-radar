@@ -408,11 +408,28 @@ class Pipeline:
         if sec_on and not self.settings.contact_email:
             log.warning("SEC EDGAR feeds skipped: set LITRADAR_CONTACT_EMAIL (the SEC requires a contact in the User-Agent and answers 403 otherwise)")
             sec_on = False
+        news_cfg = self.cfg.get("news") or {}
+        context_by_type = news_cfg.get("query_context") or {
+            "tools": "(sequencing OR genomics OR proteomics OR \"life sciences\" OR instrument OR biotech)",
+            "diagnostics": "(cancer OR diagnostic OR test OR genomics OR biotech OR FDA OR Medicare)",
+            "synthesis": "(DNA OR synthetic biology OR biotech OR genomics)",
+            "ai_bio": "(AI OR drug discovery OR protein OR biology OR biotech)",
+            "pharma": "(FDA OR trial OR drug OR pharma OR biotech)",
+            "cro": "(biotech OR pharma OR CDMO OR laboratory)",
+            "institute": "(research OR genomics OR biology)",
+        }
+        exclude_re = None
+        pats = news_cfg.get("exclude_title_patterns") or []
+        if pats:
+            exclude_re = re.compile("|".join(pats), re.I)
         for e in self.companies.entries:
             raw = raw_by_id.get(e.id, {})
             if raw.get("watch_news"):
-                q = f'"{e.name}"'
-                feeds.append({"name": f"news:{e.name}", "kind": "gnews", "url": f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en", "company": e.id})
+                ctx = raw.get("news_query") or context_by_type.get(raw.get("type") or "tools", "")
+                q = f'"{e.name}" {ctx}'.strip()
+                from urllib.parse import quote_plus
+
+                feeds.append({"name": f"news:{e.name}", "kind": "gnews", "url": f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en", "company": e.id})
                 if sec_on and re.fullmatch(r"[A-Z]{1,5}", e.ticker or ""):
                     feeds.append({"name": f"SEC 8-K {e.ticker}", "kind": "sec", "company": e.id, "company_name": e.name,
                                   "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={e.ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"})
@@ -422,10 +439,16 @@ class Pipeline:
                 for it in rss_src.news_items(self.http, f["name"], f["url"], since=since):
                     if f.get("kind") == "sec":
                         it.title = f"{f.get('company_name')}: {it.title} ({it.published})"
+                    if exclude_re and exclude_re.search(it.title or ""):
+                        self.counts["news.excluded"] += 1
+                        continue
                     text = f"{it.title} {it.summary}"
                     comps = {m.entity_id for m in self.companies.find(text)}
-                    if f.get("company"):
+                    if f.get("kind") == "sec" and f.get("company"):
                         comps.add(f["company"])
+                    if f.get("kind") == "gnews" and f.get("company") and f["company"] not in comps:
+                        self.counts["news.offtopic"] += 1
+                        continue  # a company query that does not actually name the company (e.g. "holy grail")
                     it.companies = sorted(comps)
                     items.append(it)
                 added = self.store.upsert_news(items)

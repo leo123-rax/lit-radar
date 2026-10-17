@@ -94,7 +94,7 @@ entries:
 - {id: natera, name: Natera, ticker: NTRA, type: diagnostics, watch_news: true, domains: [natera.com], aliases: ["Signatera", "Natera Inc", "Prospera", "Panorama NIPT"]}
 - {id: exact-sciences, name: Exact Sciences, ticker: EXAS, type: diagnostics, watch_news: true, domains: [exactsciences.com], aliases: ["Cologuard", "Oncotype DX", "Oncodetect", "Cancerguard", "Exact Sciences Corporation"]}
 - {id: tempus, name: Tempus AI, ticker: TEM, type: diagnostics, watch_news: true, domains: [tempus.com], aliases: ["Tempus Labs", "Tempus", "xT assay", "Tempus xT", "Tempus xF"], case_sensitive_aliases: ["Tempus"], context_terms: ["Labs", "AI", "Chicago", "xT", "sequencing", "Inc"]}
-- {id: grail, name: GRAIL, ticker: GRAL, type: diagnostics, watch_news: true, domains: [grail.com, grailbio.com], aliases: ["Grail", "Galleri", "GRAIL Inc", "GRAIL Bio"]}
+- {id: grail, name: GRAIL, ticker: GRAL, type: diagnostics, watch_news: true, domains: [grail.com, grailbio.com], aliases: ["Grail", "Galleri", "GRAIL Inc", "GRAIL Bio", "GRAIL, Inc."], case_sensitive_aliases: ["GRAIL", "Grail"], context_terms: ["Galleri", "cancer", "GRAL", "Illumina", "detection", "Menlo Park", "Inc"], news_query: '("Galleri" OR GRAL OR "multi-cancer")'}
 - {id: caris, name: Caris Life Sciences, ticker: CAI, type: diagnostics, watch_news: true, domains: [carisls.com], aliases: ["Caris", "Caris MI Profile"]}
 - {id: myriad, name: Myriad Genetics, ticker: MYGN, type: diagnostics, watch_news: true, domains: [myriad.com], aliases: ["Myriad", "MyRisk", "Prolaris", "Precise MRD"]}
 - {id: veracyte, name: Veracyte, ticker: VCYT, type: diagnostics, watch_news: true, domains: [veracyte.com], aliases: ["Decipher Prostate", "Afirma", "Prosigna", "C2i Genomics"]}
