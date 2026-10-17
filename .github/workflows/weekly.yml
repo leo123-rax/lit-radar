@@ -39,7 +39,7 @@ on:
 permissions: {}                      # nothing by default; each job asks for what it needs
 
 concurrency:
-  group: weekly-digest
+  group: lit-radar-db    # shared with daily.yml: the two jobs must never touch the database at once
   cancel-in-progress: false
 
 env:
