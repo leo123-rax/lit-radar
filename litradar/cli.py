@@ -8,6 +8,8 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
+  litradar timeseries [--entity id ...] [--vendor name ...] [--from YYYY-MM --to YYYY-MM] [--sources sra,ena,epmc] [--out DIR]
+                                                              monthly experiment / paper counts per instrument model
 """
 from __future__ import annotations
 
@@ -169,7 +171,47 @@ def cmd_check_config(args) -> int:
         except yaml.YAMLError as exc:
             print(f"{name}: YAML error {exc}")
             ok = False
+    # archive_models.yaml (instrument time series): ids must exist in instruments.yaml unless `proposed`
+    models_path = Path(settings.config_dir) / "archive_models.yaml"
+    if models_path.exists():
+        from . import timeseries as ts
+
+        try:
+            specs = ts.load_archive_models(models_path)
+        except yaml.YAMLError as exc:
+            print(f"archive_models: YAML error {exc}")
+            return 1
+        warnings = ts.check_models(specs, ts.load_instrument_index(Path(settings.config_dir) / "instruments.yaml"))
+        print(f"archive_models: {len(specs)} entities, {sum(len(x.ena) for x in specs.values())} archive model strings, {len(warnings)} warnings")
+        for w in warnings:
+            print(f"  {w}")
+        ok = ok and not any("NOT in instruments.yaml" in w or "must be lower case" in w for w in warnings)
     return 0 if ok else 1
+
+
+def cmd_timeseries(args) -> int:
+    from . import timeseries as ts
+
+    settings = Settings.from_env(config_dir=args.config_dir)
+    sources = [s.strip() for s in (args.sources or ",".join(ts.SOURCES)).split(",") if s.strip()]
+    report = ts.run(
+        config_dir=settings.config_dir,
+        db_path=settings.db_path,
+        out_dir=Path(args.out or (Path(settings.out_dir) / "timeseries")),
+        entities=args.entity or [],
+        vendors=args.vendor or [],
+        start=args.start,
+        end=args.end,
+        sources=sources,
+        refresh_months=args.refresh_months,
+        force=args.force,
+        chart=not args.no_chart,
+        dry_run=args.dry_run,
+        contact_email=settings.contact_email,
+        ncbi_api_key=settings.ncbi_api_key,
+    )
+    print(json.dumps(report, indent=1, default=str))
+    return 1 if report.get("errors") else 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -228,6 +270,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("check-config", help="validate config files")
     p.set_defaults(func=cmd_check_config)
+
+    p = sub.add_parser("timeseries", help="monthly counts of SRA/ENA experiments and Europe PMC papers per instrument model")
+    p.add_argument("--entity", action="append", help="gazetteer id from config/archive_models.yaml (repeatable), e.g. pacb-revio")
+    p.add_argument("--vendor", action="append", help="all entities of a vendor: name, ticker or id prefix (repeatable), e.g. pacb")
+    p.add_argument("--from", dest="start", help="first month YYYY-MM (default: 36 months back)")
+    p.add_argument("--to", dest="end", help="last month YYYY-MM (default: current month)")
+    p.add_argument("--sources", help="comma-separated subset of sra,ena,epmc (default: all)")
+    p.add_argument("--out", help="output directory (default: <out_dir>/timeseries)")
+    p.add_argument("--refresh-months", type=int, default=2, help="re-fetch cached counts for the current month and the N months before it (deposit lag; default 2)")
+    p.add_argument("--force", action="store_true", help="re-fetch every month, ignoring the cache")
+    p.add_argument("--no-chart", action="store_true", help="skip the PNG even when matplotlib is installed")
+    p.add_argument("--dry-run", action="store_true", help="plan only: report how many requests a run would make")
+    p.set_defaults(func=cmd_timeseries)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")

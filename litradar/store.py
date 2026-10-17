@@ -117,6 +117,17 @@ CREATE TABLE IF NOT EXISTS runs (
   until TEXT,
   counts_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS timeseries (
+  source TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  month TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  fetched_at TEXT,
+  PRIMARY KEY (source, entity_id, model, month)
+);
+CREATE INDEX IF NOT EXISTS idx_timeseries_entity_month ON timeseries(entity_id, month);
 """
 
 
@@ -296,6 +307,46 @@ class Store:
             (started, _now(), since, until, json.dumps(counts)),
         )
         self.conn.commit()
+
+    # ---- instrument time series (monthly counts per source / entity / model) ------------
+    def get_timeseries_count(self, source: str, entity_id: str, model: str, month: str) -> Optional[Dict[str, Any]]:
+        rows = _rows(
+            self.conn.execute(
+                "SELECT source, entity_id, model, month, count, fetched_at FROM timeseries WHERE source=? AND entity_id=? AND model=? AND month=?",
+                (source, entity_id, model, month),
+            )
+        )
+        return rows[0] if rows else None
+
+    def put_timeseries_count(self, source: str, entity_id: str, model: str, month: str, count: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO timeseries (source, entity_id, model, month, count, fetched_at) VALUES (?,?,?,?,?,?)",
+            (source, entity_id, model, month, int(count), _now()),
+        )
+
+    def timeseries_rows(
+        self,
+        sources: Optional[Sequence[str]] = None,
+        entity_ids: Optional[Sequence[str]] = None,
+        start_month: Optional[str] = None,
+        end_month: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT source, entity_id, model, month, count, fetched_at FROM timeseries WHERE 1=1"
+        params: List[Any] = []
+        if sources:
+            sql += f" AND source IN ({','.join('?' * len(sources))})"
+            params += list(sources)
+        if entity_ids:
+            sql += f" AND entity_id IN ({','.join('?' * len(entity_ids))})"
+            params += list(entity_ids)
+        if start_month:
+            sql += " AND month >= ?"
+            params.append(start_month)
+        if end_month:
+            sql += " AND month <= ?"
+            params.append(end_month)
+        sql += " ORDER BY source, entity_id, model, month"
+        return _rows(self.conn.execute(sql, params))
 
     # ---- queries used by the digest -----------------------------------------------------
     def papers_in_window(self, since: str, until: str) -> List[Dict[str, Any]]:
