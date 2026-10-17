@@ -1,0 +1,177 @@
+# Archive instrument vocabulary per gazetteer entity, used by `litradar timeseries`.
+#
+# Keys are entity ids from config/instruments.yaml. For each entity:
+#   sra         SRA Properties-index strings: SRA's own instrument_model spelling in LOWER CASE, queried as
+#               "instrument <string>"[Properties]. The match is on the whole string ("instrument illumina
+#               novaseq x" does not include "... x plus"), so list every sub-model you want counted.
+#   ena         ENA portal `instrument_model` values, exact and case-sensitive. SRA and ENA share the controlled
+#               vocabulary in SRA.common.xsd (github.com/enasequence/schema), so `ena` is the mixed-case twin of `sra`.
+#   epmc_terms  Phrases searched in Europe PMC Methods sections (METHODS:"..."), OR-ed into one query per entity;
+#               the hit count is papers, not mentions. Europe PMC phrase search is prefix-inclusive at the token
+#               level ("NovaSeq X" also matches "NovaSeq X Plus"), so keep terms specific to the model family.
+#   vendor      fallback for `--vendor` expansion when the id is not (yet) in instruments.yaml.
+#   proposed    true = the id is pre-registered here but the gazetteer entry still has to be added to
+#               instruments.yaml (the time series works without it; `check` warns).
+#
+# Vocabulary verified live against SRA esearch, ENA /count and SRA.common.xsd on 2026-10-17. Models in the
+# schema with no gazetteer entry and therefore not covered: Illumina MiniSeq, Ultima UG 200, Genapsys, GeneMind,
+# Vela Sentosa, capillary and 454 instruments. Oxford Nanopore sub-models (PromethION 2 Solo, MinION Mk1C, Flongle)
+# are not archive instrument_model values; they are only reachable through Europe PMC terms.
+entities:
+  # ---------------- Pacific Biosciences ----------------
+  pacb-rs-ii:
+    vendor: Pacific Biosciences
+    proposed: true
+    sra: ["pacbio rs ii", "pacbio rs"]
+    ena: ["PacBio RS II", "PacBio RS"]
+    epmc_terms: ["PacBio RS II", "PacBio RSII", "RS II system"]
+    notes: "legacy SMRT instruments (2011-2016); not in instruments.yaml yet"
+  pacb-sequel:
+    vendor: Pacific Biosciences
+    proposed: true
+    sra: ["sequel"]
+    ena: ["Sequel"]
+    epmc_terms: []
+    notes: "first-generation Sequel; Europe PMC cannot separate 'Sequel' from 'Sequel II' (prefix match), so no epmc terms"
+  pacb-sequel-ii:
+    vendor: Pacific Biosciences
+    sra: ["sequel ii", "sequel iie"]
+    ena: ["Sequel II", "Sequel IIe"]
+    epmc_terms: ["Sequel II", "Sequel IIe"]
+  pacb-revio:
+    vendor: Pacific Biosciences
+    sra: ["revio"]
+    ena: ["Revio"]
+    epmc_terms: ["Revio"]
+  pacb-vega:
+    vendor: Pacific Biosciences
+    sra: ["vega"]
+    ena: ["Vega"]
+    epmc_terms: ["PacBio Vega", "Vega system", "Vega sequencer"]
+    notes: "in the SRA/ENA vocabulary since 2025; zero deposits as of 2026-10-17"
+  pacb-onso:
+    vendor: Pacific Biosciences
+    sra: ["onso"]
+    ena: ["Onso"]
+    epmc_terms: ["PacBio Onso", "Onso system", "Onso sequencer"]
+  # ---------------- Oxford Nanopore ----------------
+  ont-promethion:
+    vendor: Oxford Nanopore Technologies
+    sra: ["promethion"]
+    ena: ["PromethION"]
+    epmc_terms: ["PromethION"]
+  ont-gridion:
+    vendor: Oxford Nanopore Technologies
+    sra: ["gridion"]
+    ena: ["GridION"]
+    epmc_terms: ["GridION"]
+  ont-minion:
+    vendor: Oxford Nanopore Technologies
+    sra: ["minion"]
+    ena: ["MinION"]
+    epmc_terms: ["MinION", "Flongle"]
+    notes: "Flongle is a flow-cell adapter, not an archive instrument_model; counted via Europe PMC only"
+  # ---------------- Illumina ----------------
+  ilmn-hiseq:
+    vendor: Illumina
+    sra: ["illumina hiseq 2500", "illumina hiseq 4000", "illumina hiseq x", "hiseq x ten", "hiseq x five",
+          "illumina hiseq 3000", "illumina hiseq 2000", "illumina hiseq 1500", "illumina hiseq 1000"]
+    ena: ["Illumina HiSeq 2500", "Illumina HiSeq 4000", "Illumina HiSeq X", "HiSeq X Ten", "HiSeq X Five",
+          "Illumina HiSeq 3000", "Illumina HiSeq 2000", "Illumina HiSeq 1500", "Illumina HiSeq 1000"]
+    epmc_terms: ["HiSeq", "HiSeq2500", "HiSeq4000"]
+  ilmn-novaseq-6000:
+    vendor: Illumina
+    sra: ["illumina novaseq 6000"]
+    ena: ["Illumina NovaSeq 6000"]
+    epmc_terms: ["NovaSeq 6000", "NovaSeq6000"]
+  ilmn-novaseq-x:
+    vendor: Illumina
+    sra: ["illumina novaseq x", "illumina novaseq x plus"]
+    ena: ["Illumina NovaSeq X", "Illumina NovaSeq X Plus"]
+    epmc_terms: ["NovaSeq X", "NovaSeq X Plus", "NovaSeqX"]
+  ilmn-nextseq-550:
+    vendor: Illumina
+    sra: ["nextseq 500", "nextseq 550"]
+    ena: ["NextSeq 500", "NextSeq 550"]
+    epmc_terms: ["NextSeq 500", "NextSeq 550", "NextSeq500", "NextSeq550"]
+  ilmn-nextseq-1000:
+    vendor: Illumina
+    sra: ["nextseq 1000"]
+    ena: ["NextSeq 1000"]
+    epmc_terms: ["NextSeq 1000", "NextSeq1000"]
+  ilmn-nextseq-2000:
+    vendor: Illumina
+    sra: ["nextseq 2000"]
+    ena: ["NextSeq 2000"]
+    epmc_terms: ["NextSeq 2000", "NextSeq2000"]
+  ilmn-miseq:
+    vendor: Illumina
+    sra: ["illumina miseq"]
+    ena: ["Illumina MiSeq"]
+    epmc_terms: ["MiSeq"]
+  ilmn-miseq-i100:
+    vendor: Illumina
+    sra: []
+    ena: []
+    epmc_terms: ["MiSeq i100"]
+    notes: "not in the archive vocabulary as of 2026-10-17; papers only"
+  ilmn-iseq-100:
+    vendor: Illumina
+    sra: ["illumina iseq 100"]
+    ena: ["Illumina iSeq 100"]
+    epmc_terms: ["iSeq 100", "iSeq100"]
+  # ---------------- Element Biosciences ----------------
+  elem-aviti:
+    vendor: Element Biosciences
+    sra: ["element aviti"]
+    ena: ["Element AVITI"]
+    epmc_terms: ["AVITI"]
+  elem-aviti24:
+    vendor: Element Biosciences
+    sra: ["aviti 24"]
+    ena: ["AVITI 24"]
+    epmc_terms: ["AVITI24", "AVITI 24"]
+    notes: "in the vocabulary; zero SRA deposits as of 2026-10-17"
+  # ---------------- Ultima Genomics ----------------
+  ultima-ug100:
+    vendor: Ultima Genomics
+    sra: ["ug 100"]
+    ena: ["UG 100"]
+    epmc_terms: ["UG 100", "UG100", "Ultima Genomics"]
+  # ---------------- MGI Tech ----------------
+  mgi-dnbseq-t7:
+    vendor: MGI Tech
+    sra: ["dnbseq-t7"]
+    ena: ["DNBSEQ-T7"]
+    epmc_terms: ["DNBSEQ-T7", "MGISEQ-T7"]
+  mgi-dnbseq-g400:
+    vendor: MGI Tech
+    sra: ["dnbseq-g400", "dnbseq-g400 fast", "mgiseq-2000rs"]
+    ena: ["DNBSEQ-G400", "DNBSEQ-G400 FAST", "MGISEQ-2000RS"]
+    epmc_terms: ["DNBSEQ-G400", "MGISEQ-2000"]
+  mgi-dnbseq-g99:
+    vendor: MGI Tech
+    sra: []
+    ena: []
+    epmc_terms: ["DNBSEQ-G99"]
+    notes: "not in the archive vocabulary as of 2026-10-17; papers only"
+  mgi-dnbseq-t20:
+    vendor: MGI Tech
+    sra: []
+    ena: []
+    epmc_terms: ["DNBSEQ-T20"]
+    notes: "not in the archive vocabulary as of 2026-10-17; papers only"
+  mgi-dnbseq:
+    vendor: MGI Tech
+    sra: ["bgiseq-500", "bgiseq-50", "dnbseq-g50", "dnbseq-g800", "dnbseq-t10x4rs"]
+    ena: ["BGISEQ-500", "BGISEQ-50", "DNBSEQ-G50", "DNBSEQ-G800", "DNBSEQ-T10x4RS"]
+    epmc_terms: ["BGISEQ-500", "BGISEQ", "DNBSEQ", "MGISEQ"]
+    notes: "generic / remaining MGI and BGI models"
+  # ---------------- Thermo Fisher Ion Torrent ----------------
+  thermo-ion-torrent:
+    vendor: Thermo Fisher Scientific
+    sra: ["ion torrent pgm", "ion torrent proton", "ion torrent s5", "ion torrent s5 xl", "ion torrent genexus",
+          "ion genestudio s5", "ion genestudio s5 prime", "ion genestudio s5 plus"]
+    ena: ["Ion Torrent PGM", "Ion Torrent Proton", "Ion Torrent S5", "Ion Torrent S5 XL", "Ion Torrent Genexus",
+          "Ion GeneStudio S5", "Ion GeneStudio S5 Prime", "Ion GeneStudio S5 Plus"]
+    epmc_terms: ["Ion Torrent", "Ion S5", "Ion Proton", "Ion PGM", "Ion GeneStudio", "Genexus"]
