@@ -81,6 +81,54 @@ sources:
   rss:
     enabled: true           # journal TOCs that lack ISSN coverage, trade press, press wires (config/feeds.yaml)
 
+  # ---- additional archives (study-level censuses; every record passes through the instrument gazetteer) ----
+  geo:
+    enabled: true           # NCBI GEO: newly released Series (GSE) and the platform (GPL) each ran on
+    max_records: 20000      # a week is ~500 series = 3 esummary pages + ~3 platform lookups (~8 requests, ~5 MB)
+    sequencing_only: true   # adds "high-throughput sequencing"[PTYP] to the esearch; false also pulls microarray / in-situ series
+
+  pride:
+    enabled: true           # PRIDE Archive: proteomics datasets made public, one record per declared mass spectrometer
+    max_projects: 0         # 0 = every project in the window (one request per day of the window)
+
+  cellxgene:
+    enabled: true               # CZ CELLxGENE Discover: curated single-cell / spatial datasets with the assay (one ~10 MB request)
+    include_revisions: false    # also count datasets whose latest revision landed in the window
+    max_records: 0              # 0 = all assay rows in the window
+    max_collection_details: 50  # fallback route only: cap on per-collection detail requests
+
+  # ---- signals (grants, trials, device decisions) rendered in their own digest section ----
+  nih_reporter:
+    enabled: true           # NIH RePORTER: S10 shared-instrumentation awards + awards naming a platform or watched company
+    s10: true
+    keywords: true
+    max_terms: 150          # cap on gazetteer terms used in keyword queries (25 terms per request)
+    max_records: 2000       # per query family
+    decorate_titles: true   # "title — organisation (S10, $amount)"
+
+  clinicaltrials:
+    enabled: true           # ClinicalTrials.gov v2: studies first posted in the window matching sponsors / interventions
+    sponsor_terms: []       # Essie terms matched against sponsor / collaborator names; empty = every company with watch_news: true
+    intervention_terms: []  # matched against intervention / arm names; empty = the watchlist_terms above
+    terms: []               # optional free-text ("other terms") area; higher recall, lower precision
+    max_records: 2000
+
+  openfda:
+    enabled: true             # FDA 510(k) clearances, De Novo grants, PMA decisions via api.fda.gov (OPENFDA_API_KEY optional)
+    kinds: [510k, pma]        # 510k also yields the fda-denovo feed
+    lookback_days: 45         # the datasets refresh MONTHLY; the look-back must exceed one refresh interval (60 is safer)
+    advisory_committees: [CH, HE, IM, MI, PA, TX, MG]   # in-vitro diagnostics only; [] = every device
+    include_supplements: true
+    exclude_supplement_types: ["30-Day Notice"]   # manufacturing-change notices are ~half of PMA decisions
+    watched_applicants_only: true   # keep only decisions whose applicant / device text names a gazetteer company
+    max_records: 5000
+
+  semantic_scholar:
+    enabled: true           # citation counts + influential citations + TLDR for stored papers with DOIs (runs before ranking)
+    whole_store: false      # true = refresh every stored paper each run (1 request per 500 DOIs)
+    lookback_days: 365      # enrich papers published / first seen within this many days before the run window
+    max_papers: 5000        # cap per run; newest first (1 request per 500 DOIs -> at most 10 requests)
+
 # Free-text terms that lift a paper's score when they appear in the title/abstract.
 # Edit freely; these describe what you care about, not what the matcher knows.
 watchlist_terms:

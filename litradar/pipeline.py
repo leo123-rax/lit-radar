@@ -6,13 +6,15 @@ what was scored by the LLM, what failed).
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from . import policy
 from .config import Settings
 from .extract.gazetteer import Gazetteer
 from .http import Http
@@ -20,18 +22,29 @@ from .models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from .rank import heuristics
 from .sources import arxiv as arxiv_src
 from .sources import biorxiv as biorxiv_src
+from .sources import cellxgene as cellxgene_src
+from .sources import clinicaltrials as ctgov_src
 from .sources import crossref as crossref_src
 from .sources import ena as ena_src
 from .sources import europepmc as epmc_src
+from .sources import geo as geo_src
+from .sources import nih_reporter as nih_src
 from .sources import openalex as openalex_src
+from .sources import openfda as openfda_src
+from .sources import pride as pride_src
 from .sources import rss as rss_src
+from .sources import semantic_scholar as s2_src
 from .sources import sra as sra_src
-from .store import Store
+from .store import FULLTEXT_SECTIONS, Store, restricted_sections
 
 log = logging.getLogger(__name__)
 
 INSTRUMENT_SECTIONS = ("title", "abstract", "methods")
 COMPANY_SECTIONS = ("title", "abstract", "methods", "funding", "coi", "ack", "affiliations")
+ARCHIVE_SOURCES = ("sra", "ena", "geo", "pride", "cellxgene")
+SIGNAL_SOURCES = ("nih_reporter", "clinicaltrials", "openfda")
+SIGNAL_FEEDS = ("nih-reporter", "clinicaltrials", "fda-510k", "fda-pma", "fda-denovo")
+DEFAULT_NAME_MATCH_CAP = 5  # per run, per tracked name, when the match is by name only (common names)
 
 
 def _norm_name(name: str) -> str:
@@ -72,8 +85,30 @@ class Pipeline:
                     self.tracked_ids.setdefault(str(a["openalex_id"]), []).append((a.get("name", a["openalex_id"]), g["id"]))
         self.counts: Counter = Counter()
         self.errors: List[str] = []
+        self._name_hit_counts: Counter = Counter()  # (display name, subgroup) -> name-only hits this run
+        self._company_raw: Dict[str, Dict[str, Any]] = {
+            str(x.get("id")): x for x in ((settings.yaml("companies") or {}).get("entries") or []) if isinstance(x, dict) and x.get("id")
+        }
 
     # ------------------------------------------------------------------ helpers
+    @property
+    def company_types(self) -> Dict[str, str]:
+        """{company id: type} from config/companies.yaml, for the digest's typed company tables."""
+        return {cid: str(raw.get("type") or "") for cid, raw in self._company_raw.items()}
+
+    def _company_terms(self, watch_only: bool = False, min_len: int = 5) -> List[str]:
+        names = []
+        for e in self.companies.entries:
+            if watch_only and not (self._company_raw.get(e.id) or {}).get("watch_news"):
+                continue
+            if len(e.name) >= min_len:
+                names.append(e.name)
+        return sorted(set(names))
+
+    def _platform_terms(self, min_len: int = 4) -> List[str]:
+        return sorted({e.name for e in self.instruments.entries
+                       if heuristics.is_platform(e.category) and len(e.name) >= min_len and not e.context_required})
+
     def _src(self, name: str) -> Dict[str, Any]:
         return (self.cfg.get("sources") or {}).get(name) or {}
 
@@ -297,19 +332,90 @@ class Pipeline:
         for p in ordered:
             if p.fulltext_available:
                 continue
-            if want_b and p.fulltext_url and nb < cap_b and p.source in ("biorxiv", "medrxiv"):
+            can_b = want_b and bool(p.fulltext_url) and p.source in ("biorxiv", "medrxiv")
+            can_e = want_e and bool((p.extra or {}).get("pmcid"))
+            if not (can_b or can_e):
+                continue
+            # decide what may be kept BEFORE fetching: 'full' keeps sections and body, 'facts_only' keeps only the
+            # derived mentions / snippets, 'none' skips the fetch
+            level = self.fulltext_policy(p)
+            self.counts[f"fulltext.policy_{level}"] += 1
+            if level == "none":
+                continue
+            p.extra["fulltext_policy"] = level
+            if can_b and nb < cap_b:
                 nb += 1
                 if biorxiv_src.attach_fulltext(self.http, p):
                     self.counts["fulltext.biorxiv"] += 1
                 else:
                     self.counts["fulltext.biorxiv_failed"] += 1
                 continue
-            if want_e and (p.extra or {}).get("pmcid") and ne < cap_e:
+            if can_e and ne < cap_e:
                 ne += 1
                 if epmc_src.attach_fulltext(self.http, p):
                     self.counts["fulltext.europepmc"] += 1
                 else:
                     self.counts["fulltext.europepmc_failed"] += 1
+
+    @staticmethod
+    def fulltext_policy(p: Paper) -> str:
+        """Storage level for a paper's full text (litradar/policy.py): bioRxiv -> Paper.license, Europe PMC ->
+        extra['is_open_access'] == 'Y'."""
+        extra = p.extra or {}
+        open_access = str(extra.get("is_open_access") or "").upper() == "Y"
+        has_text = bool(p.fulltext_url or extra.get("pmcid"))
+        return policy.fulltext_storage_level(p.license, open_access=open_access, text_available=has_text)
+
+    @staticmethod
+    def apply_fulltext_policy(p: Paper) -> Tuple[str, ...]:
+        """Enforce the paper's level on the in-memory object before it is stored.
+
+        Returns the sections whose stored mentions must survive future re-ingests (because their text is not kept)."""
+        level = (p.extra or {}).get("fulltext_policy")
+        if not level or level == "full":
+            return ()
+        p.sections = restricted_sections(p.sections, p.extra or {})
+        return FULLTEXT_SECTIONS
+
+    def _merge_stored(self, row: Dict[str, Any], fresh: Paper) -> Paper:
+        """Fold the stored version of a paper into a freshly fetched one so a metadata-only re-fetch keeps the
+        stored Methods / funding / COI text (and therefore its mentions). Fresh metadata wins where it is non-empty."""
+        stored = self.paper_from_row(row)
+        merged = self.merge(stored, fresh)
+        for k, v in (fresh.extra or {}).items():
+            if v is None or v == "" or v == [] or v == {}:
+                continue
+            if k == "sources":
+                continue
+            merged.extra[k] = v
+        if not merged.source or merged.source.startswith("rss:"):
+            merged.source = fresh.source
+        if fresh.cited_by_count > merged.cited_by_count:
+            merged.cited_by_count = fresh.cited_by_count
+        return merged
+
+    # ------------------------------------------------------------------ tracked-author hits
+    def _record_hits(self, paper_id: str, hits: Sequence[Tuple[str, str, str]]) -> int:
+        """Store tracked-author hits; name-only matches are capped per tracked name per run (common names)."""
+        cap = int((self.cfg.get("tracked_authors") or {}).get("name_match_cap", DEFAULT_NAME_MATCH_CAP))
+        n = 0
+        for name, grp, how in hits:
+            if how == "name":
+                key = (name, grp)
+                self._name_hit_counts[key] += 1
+                if self._name_hit_counts[key] > cap:
+                    self.counts["tracked_hits.name_capped"] += 1
+                    continue
+            self.store.add_tracked_author_hit(paper_id, name, grp, how)
+            n += 1
+        return n
+
+    def _log_name_overflow(self) -> None:
+        cap = int((self.cfg.get("tracked_authors") or {}).get("name_match_cap", DEFAULT_NAME_MATCH_CAP))
+        for (name, grp), count in sorted(self._name_hit_counts.items()):
+            if count > cap:
+                log.warning("tracked author %r (%s): %d name-only matches this run, kept the first %d; add an OpenAlex id to make matching exact",
+                            name, grp, count, cap)
 
     # ------------------------------------------------------------------ extract
     def extract(self, p: Paper) -> Tuple[List[Mention], List[Tuple[str, str, str]]]:
@@ -367,9 +473,10 @@ class Pipeline:
         n = 0
         batch: List[ArchiveRecord] = []
         for r in records:
-            e = self.instruments.match_archive_model(r.instrument_model)
-            if e:
-                r.entity_id, r.vendor, r.ticker = e.id, e.vendor, e.ticker
+            if not r.entity_id:  # adapters that map assays themselves (CELLxGENE) keep their id
+                e = self.instruments.match_archive_model(r.instrument_model)
+                if e:
+                    r.entity_id, r.vendor, r.ticker = e.id, e.vendor, e.ticker
             batch.append(r)
             if len(batch) >= 2000:
                 n += self.store.upsert_archive_records(batch)
@@ -397,6 +504,43 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"ena: {exc}")
                 log.exception("ena failed")
+        # study-level censuses: GEO series x platform, PRIDE proteomics datasets x instrument, CELLxGENE datasets x assay
+        if self._enabled("geo", only):
+            cfg = self._src("geo")
+            try:
+                extra = '"high-throughput sequencing"[PTYP]' if cfg.get("sequencing_only", True) else ""
+                n += self._store_archive(
+                    geo_src.fetch(self.http, since, until, api_key=self.settings.ncbi_api_key,
+                                  max_records=int(cfg.get("max_records", 20000)), extra_term=extra),
+                    "geo",
+                )
+                if geo_src.sweep_error():
+                    self.errors.append(geo_src.sweep_error())
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"geo: {exc}")
+                log.exception("geo failed")
+        if self._enabled("pride", only):
+            cfg = self._src("pride")
+            try:
+                n += self._store_archive(pride_src.fetch(self.http, since, until, max_projects=int(cfg.get("max_projects", 0))), "pride")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"pride: {exc}")
+                log.exception("pride failed")
+        if self._enabled("cellxgene", only):
+            cfg = self._src("cellxgene")
+            try:
+                n += self._store_archive(
+                    cellxgene_src.fetch(
+                        self.http, since, until,
+                        include_revisions=bool(cfg.get("include_revisions", False)),
+                        max_records=int(cfg.get("max_records", 0)),
+                        max_collection_details=int(cfg.get("max_collection_details", 50)),
+                    ),
+                    "cellxgene",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"cellxgene: {exc}")
+                log.exception("cellxgene failed")
         return n
 
     def fetch_news(self, since: str) -> int:
@@ -459,14 +603,119 @@ class Pipeline:
         self.store.commit()
         return n
 
+    # ------------------------------------------------------------------ signals (grants, trials, clearances)
+    def _tag_news(self, items: Iterable[NewsItem], require_company: bool = False, drop_counter: str = "") -> List[NewsItem]:
+        """Tag news-like items with the companies the gazetteer finds in title + summary (as fetch_news does)."""
+        out: List[NewsItem] = []
+        for it in items:
+            comps = {m.entity_id for m in self.companies.find(f"{it.title} {it.summary}")}
+            if require_company and not comps:
+                if drop_counter:
+                    self.counts[drop_counter] += 1
+                continue
+            it.companies = sorted(comps)
+            out.append(it)
+        return out
+
+    def fetch_signals(self, since: str, until: str, only: Optional[Sequence[str]] = None) -> int:
+        """NIH RePORTER awards, ClinicalTrials.gov registrations and FDA device decisions as news items.
+
+        Feeds: 'nih-reporter', 'clinicaltrials', 'fda-510k' / 'fda-denovo' / 'fda-pma'. Items are tagged with gazetteer
+        companies and stored through Store.upsert_news; the digest renders them in their own section."""
+        n = 0
+        if self._enabled("nih_reporter", only):
+            cfg = self._src("nih_reporter")
+            errors: List[str] = []
+            try:
+                maxr = int(cfg.get("max_records", 2000))
+                decorate = bool(cfg.get("decorate_titles", True))
+                items: List[NewsItem] = []
+                if cfg.get("s10", True):
+                    items.extend(nih_src.s10_awards(self.http, since, until, max_records=maxr, decorate_titles=decorate, errors=errors))
+                if cfg.get("keywords", True):
+                    terms = (self._platform_terms() + self._company_terms())[: int(cfg.get("max_terms", 150))]
+                    if terms:
+                        items.extend(nih_src.keyword_awards(self.http, since, until, terms, max_records=maxr, decorate_titles=decorate, errors=errors))
+                added = self.store.upsert_news(self._tag_news(items))
+                n += added
+                self.counts["signals.nih-reporter"] += added
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"nih_reporter: {exc}")
+                log.exception("nih_reporter failed")
+            self.errors.extend(f"nih_reporter: {e}" for e in errors)
+        if self._enabled("clinicaltrials", only):
+            cfg = self._src("clinicaltrials")
+            try:
+                sponsor_terms = list(cfg.get("sponsor_terms") or []) or self._company_terms(watch_only=True)
+                intervention_terms = list(cfg.get("intervention_terms") or []) or list(self.cfg.get("watchlist_terms") or [])
+                items = ctgov_src.new_studies(
+                    self.http, since, until, sponsor_terms=sponsor_terms, intervention_terms=intervention_terms,
+                    terms=list(cfg.get("terms") or []), max_records=int(cfg.get("max_records", 2000)),
+                )
+                added = self.store.upsert_news(self._tag_news(items))
+                n += added
+                self.counts["signals.clinicaltrials"] += added
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"clinicaltrials: {exc}")
+                log.exception("clinicaltrials failed")
+        if self._enabled("openfda", only):
+            cfg = self._src("openfda")
+            try:
+                lookback = int(cfg.get("lookback_days", openfda_src.RECOMMENDED_LOOKBACK_DAYS))  # the datasets refresh monthly
+                start = (date.fromisoformat(since) - timedelta(days=lookback)).isoformat()
+                items = openfda_src.fetch(
+                    self.http, start, until,
+                    kinds=tuple(cfg.get("kinds") or ("510k", "pma")),
+                    advisory_committees=tuple(cfg.get("advisory_committees") or ()),
+                    include_supplements=bool(cfg.get("include_supplements", True)),
+                    exclude_supplement_types=tuple(cfg.get("exclude_supplement_types") or ()),
+                    max_records=int(cfg.get("max_records", 5000)),
+                )
+                kept = self._tag_news(items, require_company=bool(cfg.get("watched_applicants_only", True)), drop_counter="signals.fda_unwatched")
+                by_feed: Counter = Counter()
+                for it in kept:
+                    if self.store.upsert_news([it]):
+                        by_feed[it.feed] += 1
+                for feed, c in by_feed.items():
+                    self.counts[f"signals.{feed}"] += c
+                    n += c
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"openfda: {exc}")
+                log.exception("openfda failed")
+        self.store.commit()
+        return n
+
+    def enrich_citations(self, papers: Dict[str, Paper], since: str) -> None:
+        """Semantic Scholar citation counts for stored papers (and the in-memory ones about to be ranked)."""
+        cfg = self._src("semantic_scholar")
+        try:
+            s2 = s2_src.enrich_citations(
+                self.http, self.store,
+                since=None if cfg.get("whole_store") else s2_src.window_start(since, int(cfg.get("lookback_days", 365))),
+                api_key=self.settings.semantic_scholar_api_key,
+                limit=int(cfg.get("max_papers", 5000)) or None,
+            )
+            for k in ("candidates", "requested", "matched", "updated", "unmatched", "failed_batches"):
+                self.counts[f"semantic_scholar.{k}"] = int(s2.get(k, 0) or 0)
+            s2_src.apply_to_papers(papers.values(), s2.get("citations") or {})
+        except Exception as exc:  # noqa: BLE001
+            self.errors.append(f"semantic_scholar: {exc}")
+            log.exception("semantic_scholar failed")
+
     # ------------------------------------------------------------------ rank
-    def rank(self, papers: Dict[str, Paper], use_llm: bool = False) -> None:
+    def rank(self, papers: Iterable[Paper], use_llm: bool = False) -> int:
+        """Heuristic (and optionally LLM) scoring. Accepts any iterable of Paper (a dict's values are used), scores
+        each paper as it streams past and returns how many were scored. The LLM shortlist is built on the way."""
+        if isinstance(papers, dict):
+            papers = papers.values()
         rcfg = self.cfg.get("ranking") or {}
         weights = rcfg.get("weights") or {}
         wl = self.cfg.get("watchlist_terms", [])
         llm_cfg = rcfg.get("llm") or {}
         shortlist: List[Dict[str, Any]] = []
-        for p in papers.values():
+        n = 0
+        for p in papers:
+            n += 1
             mentions = self.store.mentions_for(p.id)
             tracked = bool(self.store.conn.execute("SELECT 1 FROM tracked_author_hits WHERE paper_id=? LIMIT 1", (p.id,)).fetchone())
             h, reasons = heuristics.score_paper(
@@ -476,9 +725,10 @@ class Pipeline:
             prev = self.store.get_score(p.id)
             llm_prev = None
             if prev and prev.get("llm_json"):
-                import json
-
-                llm_prev = json.loads(prev["llm_json"])
+                try:
+                    llm_prev = json.loads(prev["llm_json"])
+                except ValueError:
+                    llm_prev = None
             final = heuristics.blend(h, llm_prev.get("composite") if llm_prev else None, float(llm_cfg.get("llm_weight", 0.6)))
             self.store.save_score(p.id, h, llm_prev, final, reasons)
             if use_llm and not llm_prev and h >= float(llm_cfg.get("min_heuristic", 3.0)):
@@ -488,6 +738,8 @@ class Pipeline:
                     "companies": sorted({m["entity_name"] for m in mentions if m["kind"] == "company"}),
                     "_h": h, "_reasons": reasons,
                 })
+            if n % 500 == 0:
+                self.store.commit()
         self.store.commit()
         if use_llm and shortlist:
             from .rank import llm as llm_mod
@@ -503,16 +755,15 @@ class Pipeline:
                 self.store.save_score(item["id"], item["_h"], res, final, item["_reasons"] + ("; llm scored" if res else "; llm unscored"))
                 self.counts["llm.scored" if res else "llm.unscored"] += 1
             self.store.commit()
+        return n
 
     # ------------------------------------------------------------------ rematch
     def paper_from_row(self, row: Dict[str, Any]) -> Paper:
-        import json
-
         authors = [Author(**{k: v for k, v in a.items() if k in Author.__dataclass_fields__}) for a in json.loads(row.get("authors_json") or "[]")]
         sections = json.loads(row.get("sections_json") or "{}")
-        body = self.store.conn.execute("SELECT body FROM papers_fts WHERE id=?", (row["id"],)).fetchone()
-        if body and body[0]:
-            sections["body"] = body[0]
+        body = self.store.body_for(row["id"], rowid=row.get("_rowid"))
+        if body:
+            sections["body"] = body
         return Paper(
             id=row["id"], source=row.get("source") or "", kind=row.get("kind") or "article", title=row.get("title") or "",
             doi=row.get("doi"), abstract=row.get("abstract") or "", journal=row.get("journal") or "", pub_date=row.get("pub_date") or "",
@@ -522,31 +773,40 @@ class Pipeline:
             topics=json.loads(row.get("topics_json") or "[]"), extra=json.loads(row.get("extra_json") or "{}"),
         )
 
-    def rematch(self, since: Optional[str] = None) -> Dict[str, Any]:
-        """Re-run gazetteer matching, tracked-author detection and heuristic scoring over stored papers."""
-        sql = "SELECT * FROM papers"
-        params: List[Any] = []
-        if since:
-            sql += " WHERE pub_date >= ? OR substr(first_seen,1,10) >= ?"
-            params = [since, since]
-        cur = self.store.conn.execute(sql, params)
-        cols = [c[0] for c in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-        papers: Dict[str, Paper] = {}
-        for row in rows:
+    def _rematch_stream(self, since: Optional[str]) -> Iterator[Paper]:
+        """Stream stored papers one batch at a time: re-extract, store mentions / hits, then hand the paper (without
+        its body) to rank(). Nothing holds more than one batch of rows in memory."""
+        n = 0
+        for row in self.store.iter_papers(since=since):
             p = self.paper_from_row(row)
-            mentions, hits = self.extract(p)
-            self.store.replace_mentions(p.id, mentions)
+            mentions, hits = self.extract(p)  # on whatever text is stored, BEFORE the policy strips it
+            keep: Tuple[str, ...] = ()
+            has_text = any(p.sections.get(k) for k in FULLTEXT_SECTIONS)
+            level = self.store.stored_fulltext_level(p.license, p.extra or {}) if (has_text or (p.extra or {}).get("fulltext_policy")) else "full"
+            if level != "full":
+                keep = FULLTEXT_SECTIONS  # the derived mentions stay; the text they came from does not
+                if self.store.purge_paper_fulltext(p.id, level, rowid=row.get("_rowid")):
+                    self.counts["fulltext.purged"] += 1
+            self.counts["mentions"] += self.store.replace_mentions(p.id, mentions, keep_sections=keep)
             self.store.conn.execute("DELETE FROM tracked_author_hits WHERE paper_id=?", (p.id,))
-            for name, grp, how in hits:
-                self.store.add_tracked_author_hit(p.id, name, grp, how)
-            self.counts["mentions"] += len(mentions)
-            self.counts["tracked_hits"] += len(hits)
-            papers[p.id] = p
-        self.store.commit()
-        self.rank(papers, use_llm=False)
-        self.counts["rematched"] = len(papers)
+            self.counts["tracked_hits"] += self._record_hits(p.id, hits)
+            p.sections.pop("body", None)
+            n += 1
+            if n % 500 == 0:
+                self.store.commit()
+                log.info("rematch: %d papers", n)
+            yield p
+
+    def rematch(self, since: Optional[str] = None) -> Dict[str, Any]:
+        """Re-run gazetteer matching, tracked-author detection and heuristic scoring over stored papers.
+
+        Papers whose licence does not allow keeping full text (e.g. preprints cached as 'cc_no' before the data
+        policy existed) are stripped on the way through, after their mentions have been re-derived."""
+        self.counts["fulltext.purged"] = 0
+        self.counts["rematched"] = self.rank(self._rematch_stream(since), use_llm=False)
         self.counts["archive_models_remapped"] = self.remap_archive()
+        self._log_name_overflow()
+        self.store.checkpoint()
         return {"since": since, "counts": dict(self.counts)}
 
     def remap_archive(self) -> int:
@@ -555,40 +815,67 @@ class Pipeline:
         n = 0
         for m in models:
             e = self.instruments.match_archive_model(m)
+            # CELLxGENE rows carry the adapter's own assay -> entity mapping; only fill its blanks, never override
             if e:
-                self.store.conn.execute("UPDATE archive_records SET entity_id=?, vendor=?, ticker=? WHERE instrument_model=?", (e.id, e.vendor, e.ticker, m))
+                self.store.conn.execute(
+                    "UPDATE archive_records SET entity_id=?, vendor=?, ticker=? WHERE instrument_model=? AND (archive != 'cellxgene' OR entity_id = '')",
+                    (e.id, e.vendor, e.ticker, m),
+                )
             else:
-                self.store.conn.execute("UPDATE archive_records SET entity_id='', vendor='', ticker='' WHERE instrument_model=?", (m,))
+                self.store.conn.execute("UPDATE archive_records SET entity_id='', vendor='', ticker='' WHERE instrument_model=? AND archive != 'cellxgene'", (m,))
             n += 1
         self.store.commit()
         return n
 
     # ------------------------------------------------------------------ run
-    def run(self, since: str, until: str, use_llm: bool = False, fulltext: bool = True, only: Optional[Sequence[str]] = None) -> Dict[str, Any]:
-        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        papers = self.fetch_papers(since, until, only=only)
-        if fulltext:
-            self.attach_fulltext(papers)
+    def ingest(self, papers: Dict[str, Paper]) -> int:
+        """Store fetched papers: extract on the full in-memory text, enforce the data policy, upsert, replace
+        mentions (keeping those whose source text is not stored) and record tracked-author hits. Returns new count."""
         new = 0
-        for p in papers.values():
+        for p in list(papers.values()):
+            mentions, hits = self.extract(p)
+            keep = self.apply_fulltext_policy(p)
             if self.store.upsert_paper(p):
                 new += 1
-            mentions, hits = self.extract(p)
-            self.store.replace_mentions(p.id, mentions)
-            for name, grp, how in hits:
-                self.store.add_tracked_author_hit(p.id, name, grp, how)
-            self.counts["mentions"] += len(mentions)
-            self.counts["tracked_hits"] += len(hits)
+            self.counts["mentions"] += self.store.replace_mentions(p.id, mentions, keep_sections=keep)
+            self.store.conn.execute("DELETE FROM tracked_author_hits WHERE paper_id=?", (p.id,))
+            self.counts["tracked_hits"] += self._record_hits(p.id, hits)
+            p.sections.pop("body", None)  # the body is in the store (when the policy allows); free the memory
         self.store.commit()
         self.counts["papers.new"] = new
-        if only is None or "ena" in only or "sra" in only:
-            self.fetch_archives(since, until, only=only)
-        if only is None or "rss" in only:
-            self.fetch_news(since)
-        self.rank(papers, use_llm=use_llm)
-        report = {"since": since, "until": until, "counts": dict(self.counts), "errors": self.errors, "http": dict(self.http.stats)}
-        self.store.record_run(started, since, until, report)
-        return report
+        return new
+
+    def run(self, since: str, until: str, use_llm: bool = False, fulltext: bool = True, only: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            papers = self.fetch_papers(since, until, only=only)
+            # fold in what the store already knows BEFORE full text and extraction, so a metadata-only re-fetch
+            # never wipes Methods mentions and already-parsed papers are not fetched again
+            for pid in list(papers):
+                row = self.store.get_paper(pid)
+                if row:
+                    papers[pid] = self._merge_stored(row, papers[pid])
+                    self.counts["papers.reingested"] += 1
+            if fulltext:
+                self.attach_fulltext(papers)
+            self.ingest(papers)
+            if only is None or any(s in only for s in ARCHIVE_SOURCES):
+                self.fetch_archives(since, until, only=only)
+            if only is None or "rss" in only:
+                self.fetch_news(since)
+            if only is None or any(s in only for s in SIGNAL_SOURCES):
+                self.fetch_signals(since, until, only=only)
+            if self._enabled("semantic_scholar", only):
+                self.enrich_citations(papers, since)
+            self.rank(papers, use_llm=use_llm)
+            report = {"since": since, "until": until, "counts": dict(self.counts), "errors": self.errors, "http": dict(getattr(self.http, "stats", {}) or {})}
+            self.store.record_run(started, since, until, report)
+            return report
+        finally:
+            # the caller may still render from this store, so fold the WAL into the main file here and leave
+            # closing to whoever opened it (Store.close is idempotent)
+            self._log_name_overflow()
+            self.store.checkpoint()
 
 
 def window(days: int = 7, until: Optional[date] = None) -> Tuple[str, str]:
