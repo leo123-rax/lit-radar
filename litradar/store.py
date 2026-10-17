@@ -346,7 +346,8 @@ class Store:
                       COUNT(DISTINCT m.paper_id) AS papers,
                       SUM(CASE WHEN m.section='affiliations' THEN 1 ELSE 0 END) AS as_author,
                       SUM(CASE WHEN m.section IN ('funding','coi','ack') THEN 1 ELSE 0 END) AS as_funder_or_coi,
-                      SUM(CASE WHEN m.section IN ('title','abstract','methods') THEN 1 ELSE 0 END) AS as_subject
+                      SUM(CASE WHEN m.section IN ('title','abstract') THEN 1 ELSE 0 END) AS as_subject,
+                      SUM(CASE WHEN m.section='methods' THEN 1 ELSE 0 END) AS as_supplier
                FROM mentions m JOIN papers p ON p.id = m.paper_id
                WHERE m.kind='company' AND ((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date='' AND substr(p.first_seen,1,10) >= ?))
                GROUP BY m.entity_id ORDER BY papers DESC LIMIT ?""",
@@ -411,6 +412,19 @@ class Store:
         for r in rows:
             r["companies"] = json.loads(r.get("companies_json") or "[]")
         return rows
+
+    def distinct_entities_in_window(self, since: str, until: str, kind: str) -> int:
+        row = self.conn.execute(
+            """SELECT COUNT(DISTINCT m.entity_id) FROM mentions m JOIN papers p ON p.id=m.paper_id
+               WHERE m.kind=? AND ((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date='' AND substr(p.first_seen,1,10) >= ?))""",
+            (kind, since, until, since),
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+    def has_history_before(self, since: str) -> bool:
+        """True when the store already held papers before this window (so 'first appearance' means something)."""
+        row = self.conn.execute("SELECT 1 FROM papers WHERE substr(first_seen,1,10) < ? LIMIT 1", (since,)).fetchone()
+        return row is not None
 
     def counts(self) -> Dict[str, int]:
         out = {}
