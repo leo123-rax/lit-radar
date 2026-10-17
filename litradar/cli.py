@@ -10,6 +10,9 @@
   litradar check-config                                       validate YAML files and report duplicates
   litradar timeseries [--entity id ...] [--vendor name ...] [--from YYYY-MM --to YYYY-MM] [--sources sra,ena,epmc] [--out DIR]
                                                               monthly experiment / paper counts per instrument model
+  litradar fetch    <source> [--since --until | --days] [...] [--raw] [--out file.jsonl|-]
+  litradar fetch    --list                                    raw access to one source adapter, JSON lines out
+  litradar browser-check [--cdp-url URL]                      is the optional browser fetcher usable here?
 """
 from __future__ import annotations
 
@@ -22,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__
+from . import __version__, browser, toolkit
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -284,6 +287,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="plan only: report how many requests a run would make")
     p.set_defaults(func=cmd_timeseries)
 
+    # raw access to every source adapter without the pipeline (litradar/toolkit.py)
+    toolkit.add_fetch_parser(sub)
+
+    p = sub.add_parser("browser-check", help="report whether the optional real-browser fetcher is installed and a Chrome DevTools endpoint is listening")
+    p.add_argument("--cdp-url", help="Chrome DevTools URL to probe (default: browser.cdp_url in radar.yaml, else http://localhost:9222)")
+    p.set_defaults(func=browser.cmd_browser_check)
     # Plugin commands: any module in litradar/commands/ exposing register(subparsers) is added here,
     # so new features never need to edit this file.
     import importlib
