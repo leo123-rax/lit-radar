@@ -197,3 +197,11 @@ id), delete the cached XML under `.cache/` if present, and re-render the digest 
   were read from captures or developer pages; the uncertainties are flagged in the per-source notes
   under `docs/sources/`.
 * **Legal advice.** Have counsel read sections 3 to 6 before publishing or relying on a fork.
+
+## Personal subscription reading assist
+
+`litradar login` and `litradar read` (docs/reading-assist.md) let a subscriber read individual paywalled
+articles through their own browser session: the user signs in themselves in a visible window, the code
+never handles credentials, articles are fetched one at a time with pacing and a daily cap, and by default
+only derived facts are stored (policy level `facts_only`). This stays within personal reading; it is not
+text-and-data mining and is never used by the scheduled jobs.

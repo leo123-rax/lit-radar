@@ -54,17 +54,19 @@ class FakePage:
         self.ctx, self._html, self.url = ctx, html, url
     def goto(self, url, **kw):
         self.url = self.ctx.redirect.get(url, url)
+        if isinstance(self._html, dict):
+            self._html = next((v for k, v in self._html.items() if k in url), "<html></html>")
     def wait_for_load_state(self, *a, **k):
         pass
     def content(self):
-        return self._html
+        return self._html if isinstance(self._html, str) else "<html></html>"
     def close(self):
         pass
 
 
 class FakeContext:
     def __init__(self, html, redirect):
-        self.html, self.redirect = html, redirect
+        self.html, self.redirect = html, redirect  # html: str, or {url-substring: html}
     def new_page(self):
         return FakePage(self, self.html, "")
     def close(self):
@@ -84,11 +86,11 @@ class FakePW:
 def test_login_detection_and_status(tmp_path):
     settings = Settings(cache_dir=tmp_path)
     # not signed in: the account page bounces to the identity provider
-    pw_out = lambda: FakePW("<html>Sign in</html>", {"https://www.nature.com/my-account": "https://idp.nature.com/auth/personal/springernature"})  # noqa: E731
+    pw_out = lambda: FakePW(PAYWALL_HTML, {})  # noqa: E731
     st = S.status(settings, factory=pw_out)
     assert st == {"nature": False, "science": False}
     # signed in: stays on nature.com, and Science shows a sign-out link
-    pw_in = lambda: FakePW("<html><a href='/action/showLogout'>Log out</a></html>", {})  # noqa: E731
+    pw_in = lambda: FakePW({"nature.com": NATURE_HTML, "science.org": SCIENCE_HTML}, {})  # noqa: E731
     assert S.status(settings, factory=pw_in) == {"nature": True, "science": True}
     rep = S.login(settings, "nature", wait_s=10, poll_s=1, factory=pw_in, sleep=lambda s: None)
     assert rep["logged_in"] and rep["note"] == "already signed in"

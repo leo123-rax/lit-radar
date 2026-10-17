@@ -39,9 +39,9 @@ PUBLISHERS: Dict[str, Dict[str, Any]] = {
     "nature": {
         "hosts": ["www.nature.com", "nature.com"],
         "login_url": "https://idp.nature.com/auth/personal/springernature?redirect_uri=https%3A%2F%2Fwww.nature.com%2F",
-        "probe_url": "https://www.nature.com/my-account",
-        # logged in when the account page stays on nature.com instead of bouncing to the identity provider
-        "logged_in": lambda final_url, html_text: urlsplit(final_url).netloc.endswith("nature.com") and "idp.nature.com" not in final_url and "/my-account" in final_url,
+        # a known paywalled research article: the session is live only when its Methods come back without paywall markers
+        "probe_url": "https://www.nature.com/articles/s41592-026-03265-w",
+        "logged_in": lambda final_url, html_text: _has_full_text(html_text, "nature"),
         "doi_prefixes": ["10.1038/"],
         "article_url": lambda doi: f"https://www.nature.com/articles/{doi.split('/', 1)[1]}",
         "paywall_markers": ["Access options", "Buy article", "Access through your institution", "c-article-access-provider"],
@@ -49,8 +49,8 @@ PUBLISHERS: Dict[str, Dict[str, Any]] = {
     "science": {
         "hosts": ["www.science.org", "science.org"],
         "login_url": "https://www.science.org/action/showLogin?redirectUri=%2F",
-        "probe_url": "https://www.science.org/",
-        "logged_in": lambda final_url, html_text: ("action/showLogout" in html_text) or ("Sign out" in html_text) or ("Log out" in html_text),
+        "probe_url": "https://www.science.org/doi/10.1126/science.aeh2982",
+        "logged_in": lambda final_url, html_text: _has_full_text(html_text, "science"),
         "doi_prefixes": ["10.1126/"],
         "article_url": lambda doi: f"https://www.science.org/doi/{doi}",
         "paywall_markers": ["Log in to view the full text", "Purchase this article", "Get access to this article", "Already a subscriber"],
@@ -59,6 +59,12 @@ PUBLISHERS: Dict[str, Dict[str, Any]] = {
 
 
 # ---------------------------------------------------------------------------------------------- helpers
+def _has_full_text(html_text: str, publisher: str) -> bool:
+    """True when a publisher page carries a real Methods section and no paywall markers (the only honest session test)."""
+    art = extract_article(html_text, publisher)
+    return bool(art["sections"].get("methods")) and not art["paywalled"]
+
+
 def publisher_for(target: str) -> Optional[str]:
     """Publisher key for a DOI or URL, or None when it is not a configured subscription host."""
     doi = normalize_doi(target)
