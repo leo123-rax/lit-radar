@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.60"]
+serve = ["datasette>=0.64"]
 dev = ["pytest>=7", "ruff>=0.4"]
 
 [project.scripts]
