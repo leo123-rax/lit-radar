@@ -18,6 +18,11 @@ LANG_CASES = [
     ("zh", "CRISPR-Cas9介导的基因编辑技术研究进展"),  # Latin acronym inside a Chinese title
     ("ja", "シングルセルRNAシーケンスによる腫瘍微小環境の解析"),
     ("ja", "遺伝子発現の解析"),  # one hiragana particle is enough to separate Japanese from Chinese
+    ("ja", "遺伝子発現解析"),  # kanji-only, no kana: 伝 and 発 are Japanese-only forms (zh would be 传/傳, 发/發)
+    ("ja", "脳腫瘍の遺伝子解析"),
+    ("zh", "基因表达分析"),  # Simplified Chinese
+    ("zh", "腫瘤微環境之異質性研究"),  # Traditional Chinese: no shinjitai, no kana -> zh
+    ("zh", "肺癌患者"),  # documented limit: kanji-only Japanese without any shinjitai form is indistinguishable -> zh
     ("ko", "단일세포 RNA 시퀀싱을 이용한 종양 미세환경 분석"),
     ("ru", "Анализ микроокружения опухоли методом секвенирования единичных клеток"),
     ("es", "Análisis de la heterogeneidad del microambiente tumoral mediante secuenciación de célula única"),
@@ -34,6 +39,10 @@ LANG_CASES = [
     ("other", "Analisi dell'eterogeneità del microambiente tumorale nelle pazienti"),  # Italian
     ("other", "Een analyse van de heterogeniteit van deze tumoren: resultaten en onderzoek"),  # Dutch
     ("other", "Ανάλυση του μικροπεριβάλλοντος του όγκου"),  # Greek
+    # documented limits: Latin-script languages without a stopword set fall back to the English prior
+    ("en", "Badanie ekspresji genów w raku piersi"),  # Polish
+    ("en", "Tek hücreli RNA dizileme ile tümör mikroçevresinin analizi"),  # Turkish
+    ("en", "Studi ekspresi gen pada kanker payudara"),  # Indonesian
     ("other", ""),
     ("other", None),
     ("other", "12345 --- 67 ***"),
@@ -54,6 +63,8 @@ def test_paper_language_prefers_non_latin_title():
     # Chinese-journal pattern: Chinese title, English abstract -> the paper is tagged zh
     assert i18n.paper_language("肿瘤微环境研究", "We profiled the tumour microenvironment of 40 patients with single-cell RNA sequencing.") == "zh"
     assert i18n.paper_language("A short title", "Esto es un estudio de la expresión de los genes en el cáncer de mama con secuenciación.") == "es"
+    # documented limit: a Latin-script (Spanish) title with an English abstract is tagged en - the abstract carries the stopwords
+    assert i18n.paper_language("Análisis de la expresión génica", "We profiled gene expression in the tumour microenvironment of 40 patients with single-cell RNA sequencing and found heterogeneity.") == "en"
 
 
 # ----------------------------------------------------------------------------------------------
@@ -104,12 +115,43 @@ AFF_CASES = [
     ([], "Georgia"),  # US state or country: no guess
     ([], "Boehringer Ingelheim RCV GmbH & Co KG"),
     ([], ""),
+    # false positives found in a real week of data: language-level or ambiguous phrases must not decide
+    (["MX"], "General Surgery, Hospital Universitario, Universidad Autónoma de Nuevo León (UANL), Monterrey, MEX"),  # not ES
+    (["ES"], "Hospital Universitario La Paz, Madrid, Spain"),  # not BO
+    (["ES"], "Hospital Universitario Reina Sofía (HURS)"),  # named Spanish hospital, no city
+    (["ES"], "HOSPITAL UNIVERSITARIO NUESTRA SEÑORA DE LA CANDELARIA, SANTA CRUZ DE TENERIFE, Spain"),  # not US
+    (["US"], "University of California Santa Cruz"),
+    (["CR"], "Centro de Investigación y Manejo del Cáncer (CIMCA), San José, Costa Rica"),  # not US
+    ([], "San Jose"),  # CR capital or CA city: no guess
+    (["BO"], "Universidad Mayor de San Andrés, La Paz, Bolivia"),
+    (["MX"], "Universidad Autónoma de Baja California Sur, La Paz, Baja California Sur"),  # the other La Paz
+    (["CA"], "London Health Sciences Centre Research Institute, London, Ontario, Canada"),  # not GB
+    (["CA"], "Department of Radiation Oncology, University of Western Ontario, London, ON, Canada"),
+    (["CA"], "Western University, London, Canada"),
+    (["GB"], "Imperial College London, London, UK"),
+    (["US"], "New England Biolabs, Ipswich, MA"),  # not GB
+    ([], "New England Journal of Medicine"),
+    (["AR"], "Universidad Nacional del Sur, Bahía Blanca, Argentina"),  # not BR
+    (["BR"], "Universidade Federal da Bahia, Salvador, Brazil"),
+    (["NG"], "Niger Delta University, Wilberforce Island, Bayelsa State, Nigeria"),  # not NE
+    (["NE"], "Université Abdou Moumouni, Niamey, Niger"),
+    (["HK"], "School of Chinese Medicine, Hong Kong Baptist University"),  # discipline, not a place: no CN leak
+    (["HK"], "School of Chinese Medicine, The University of Hong Kong, Hong Kong SAR"),
+    (["CN"], "Nanjing University of Chinese Medicine"),  # mainland still resolves via the city
+    (["CN"], "Chongqing Hospital of Traditional Chinese Medicine"),
+    (["CN"], "Fujian University of Traditional Chinese Medicine , , ,"),
 ]
 
 
 @pytest.mark.parametrize("expected,text", AFF_CASES)
 def test_countries_in(expected, text):
     assert i18n.countries_in(text) == expected
+
+
+def test_gazetteer_has_no_fold_collisions():
+    # Two spellings that accent-fold onto one key with different codes would make the later one dead data
+    # ("san josé": None vs "san jose": "US" was one). The build records them; there must be none.
+    assert i18n.PHRASE_COLLISIONS == []
 
 
 def test_country_of_prefers_openalex_country_codes():
@@ -184,9 +226,47 @@ def test_tag_store_writes_lang_and_countries(tmp_path):
     rep2 = i18n.tag_store(st, since="2026-01-01")
     assert rep2["papers"] == 4 and "es" not in rep2["languages"]
     h = i18n.histograms(st, since="2026-01-01")
-    assert h["papers"] == 4 and h["tagged"] == 4 and h["languages"] == {"en": 2, "zh": 1, "ja": 1}
+    assert h["papers"] == 4 and h["tagged"] == 4 and h["untagged"] == 0 and h["languages"] == {"en": 2, "zh": 1, "ja": 1}
     assert h["primary_countries"] == {"US": 1, "CN": 1, "JP": 1, "??": 1}
     assert st.conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0] == 0  # table exists, empty
+
+
+def test_tag_store_and_histograms_chunked(tmp_path):
+    # rowid chunks smaller than the table must give the same answer as one pass
+    st = Store(tmp_path / "t.sqlite")
+    _fill(st)
+    rep = i18n.tag_store(st, chunk_size=2)
+    assert rep["papers"] == 5 and rep["tagged"] == 5 and rep["languages"] == {"en": 2, "zh": 1, "ja": 1, "es": 1}
+    assert i18n.histograms(st, chunk_size=2) == i18n.histograms(st)
+    assert i18n.histograms(st, chunk_size=2)["tagged"] == 5
+    assert i18n.tag_store(st, since="2026-01-01", chunk_size=1)["papers"] == 4
+    assert i18n.tag_store(Store(tmp_path / "empty.sqlite"))["papers"] == 0
+
+
+def test_tags_are_lost_on_reingest_and_reported(tmp_path):
+    import time
+
+    st = Store(tmp_path / "t.sqlite")
+    _fill(st)
+    i18n.tag_store(st)
+    assert i18n.histograms(st)["untagged"] == 0
+    # Store.upsert_paper replaces extra_json wholesale -> the tags of a re-fetched paper vanish
+    st.conn.execute("UPDATE papers SET updated_at='2020-01-01T00:00:00Z'")
+    st.commit()
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _fill(st)  # the same five records come in again; only their updated_at moves forward
+    st.conn.execute("UPDATE papers SET updated_at='2020-01-01T00:00:00Z' WHERE id != 'doi:10.1000/i18n2'")
+    st.commit()
+    h = i18n.histograms(st)
+    assert h["untagged"] == 5 and h["tagged"] == 0  # every row was re-upserted
+    assert "lang" not in json.loads(st.get_paper("doi:10.1000/i18n2")["extra_json"])
+    # the pipeline wiring re-tags what the run touched, regardless of pub_date
+    rep = i18n.tag_store(st, updated_since=ts)
+    assert rep["tagged"] == 1 and rep["languages"] == {"zh": 1}
+    assert json.loads(st.get_paper("doi:10.1000/i18n2")["extra_json"])["lang"] == "zh"
+    assert i18n.histograms(st)["untagged"] == 4
+    assert i18n.tag_store(st, since="2026-01-01", updated_since="2000-01-01T00:00:00Z")["tagged"] == 4
+    assert i18n.histograms(st)["untagged"] == 1  # the 2025 paper is outside the pub-date window
 
 
 def test_translation_candidates_skip_english_and_translated(tmp_path):
@@ -270,8 +350,10 @@ def test_translate_titles_batch_path(tmp_path, monkeypatch):
     assert len(client.messages.batches.created) == 1 and [r["custom_id"] for r in reqs] == ["tr-0", "tr-1", "tr-2"]
     params = reqs[0]["params"]
     assert params["model"] == "claude-opus-5-5"
-    assert params["output_config"] == {"format": {"type": "json_schema", "schema": i18n.TRANSLATION_SCHEMA}}
-    assert params["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert params["output_config"] == {"format": {"type": "json_schema", "schema": i18n.TRANSLATION_SCHEMA}, "effort": "low"}
+    assert params["max_tokens"] == 16000  # thinking tokens count against max_tokens; a long abstract must not truncate
+    assert params["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}  # batches outlive the 5-minute cache
+    assert rep["truncated"] == 0 and rep["waited_seconds"] >= 0
     assert "LANGUAGE HINT (heuristic, may be wrong): zh" in params["messages"][0]["content"]
     assert "基于单细胞测序" in params["messages"][0]["content"]
     rows = st.conn.execute("SELECT paper_id, lang, title_en, abstract_en, model FROM translations").fetchall()
@@ -289,7 +371,106 @@ def test_translate_titles_batch_never_ends(tmp_path):
     client = FakeClient({"tr-0": _Result("tr-0", "succeeded", _Message(json.dumps({"language": "zh", "title_en": "x", "abstract_en": ""})))}, end_after=10**6)
     rep = i18n.translate_titles(st, client=client, poll_seconds=1, max_wait_seconds=2)
     assert rep["status"] == "incomplete" and rep["translated"] == 0 and client.messages.batches.retrieves == 2
+    assert rep["processing_status"] == "in_progress" and rep["waited_seconds"] == 2
     assert st.conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0] == 0
+
+
+def test_translate_titles_deadline_is_wall_clock(tmp_path):
+    import time
+
+    # poll_seconds=0 must not turn the deadline into dead code (the old loop counted sleeps, not time)
+    st = Store(tmp_path / "t.sqlite")
+    _fill(st)
+    client = FakeClient({}, end_after=10**9)
+    t0 = time.monotonic()
+    rep = i18n.translate_titles(st, client=client, poll_seconds=0, max_wait_seconds=0.5)
+    elapsed = time.monotonic() - t0
+    assert rep["status"] == "incomplete" and 0.4 <= elapsed < 5
+    assert client.messages.batches.retrieves >= 1
+    # poll longer than the deadline: one retrieve, then out
+    client = FakeClient({}, end_after=10**9)
+    rep = i18n.translate_titles(st, client=client, poll_seconds=0.2, max_wait_seconds=0.1)
+    assert rep["status"] == "incomplete" and client.messages.batches.retrieves == 1
+
+
+class _RaisingBatches(FakeBatches):
+    def __init__(self, where):
+        super().__init__({}, end_after=1)
+        self.where = where
+
+    def create(self, requests):
+        if self.where == "create":
+            raise RuntimeError("401 authentication_error: invalid x-api-key")
+        return super().create(requests)
+
+    def retrieve(self, batch_id):
+        if self.where == "retrieve":
+            raise ConnectionError("connection reset")
+        return super().retrieve(batch_id)
+
+    def results(self, batch_id):
+        yield _Result("tr-0", "succeeded", _Message(json.dumps({"language": "zh", "title_en": "saved before the failure", "abstract_en": ""})))
+        if self.where == "results":
+            raise RuntimeError("529 overloaded_error")
+
+
+def test_translate_titles_api_failures_are_reported_not_raised(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    _fill(st)
+    for where, exc_name in (("create", "RuntimeError"), ("retrieve", "ConnectionError")):
+        client = FakeClient({})
+        client.messages.batches = _RaisingBatches(where)
+        rep = i18n.translate_titles(st, client=client, poll_seconds=0, max_wait_seconds=1)
+        assert rep["status"] == "error" and rep["error"].startswith(exc_name + ": ") and rep["translated"] == 0
+        assert st.conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0] == 0
+    # a failure while streaming results keeps what was already saved
+    client = FakeClient({})
+    client.messages.batches = _RaisingBatches("results")
+    rep = i18n.translate_titles(st, client=client, poll_seconds=0, max_wait_seconds=1)
+    assert rep["status"] == "error" and rep["error"] == "RuntimeError: 529 overloaded_error" and rep["translated"] == 1
+    assert st.conn.execute("SELECT title_en FROM translations").fetchone() == ("saved before the failure",)
+    # a client constructor that blows up is also a report, not an exception
+    import types as _types
+
+    fake_sdk = _types.SimpleNamespace(Anthropic=lambda **kw: (_ for _ in ()).throw(ValueError("bad base_url")))
+    import sys as _sys
+
+    _sys.modules["anthropic"] = fake_sdk
+    try:
+        rep = i18n.translate_titles(st, api_key="sk-test")
+    finally:
+        _sys.modules.pop("anthropic", None)
+    assert rep["status"] == "error" and rep["error"] == "ValueError: bad base_url"
+
+
+def test_translate_titles_counts_truncation_separately(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    _fill(st)
+    outcomes = {
+        "tr-0": _Result("tr-0", "succeeded", _Message('{"language": "zh", "title_en": "cut off', stop_reason="max_tokens")),
+        "tr-1": _Result("tr-1", "succeeded", _Message("I cannot help with that.", stop_reason="refusal")),
+        "tr-2": _Result("tr-2", "succeeded", _Message(json.dumps({"language": "es", "title_en": "Gene expression in breast cancer", "abstract_en": "A"}))),
+    }
+    rep = i18n.translate_titles(st, client=FakeClient(outcomes), poll_seconds=0, max_wait_seconds=1)
+    assert rep["truncated"] == 1 and rep["refused_or_invalid"] == 1 and rep["translated"] == 1 and rep["errored"] == 0
+    # the sync path counts the same way
+    class _Trunc(FakeClient):
+        def _create(self, **params):
+            return _Message("{", stop_reason="max_tokens")
+
+    rep = i18n.translate_titles(st, client=_Trunc({}), use_batch=False)
+    assert rep["candidates"] == 2 and rep["truncated"] == 2 and rep["translated"] == 0
+    # effort can be dropped for a model that does not take output_config.effort
+    client = FakeClient({})
+    i18n.translate_titles(st, client=client, use_batch=False, effort=None)
+    assert "effort" not in client.sync_calls[0]["output_config"]
+
+
+def test_save_translation_works_on_a_fresh_store(tmp_path):
+    st = Store(tmp_path / "fresh.sqlite")  # no i18n call has created the table yet
+    i18n.save_translation(st, "doi:10.1/x", "zh", "Title", "Abstract", "m")
+    st.commit()
+    assert i18n.translations_for(st, ["doi:10.1/x"])["doi:10.1/x"]["title_en"] == "Title"
 
 
 def test_translate_titles_sync_path_and_malformed_json(tmp_path):
@@ -346,4 +527,16 @@ def test_cli_tag_subcommand(tmp_path, monkeypatch, capsys):
     assert cli.main(["tag", "--translate"]) == 0
     text = capsys.readouterr().out
     assert "skipped" in text and "ANTHROPIC_API_KEY" in text
+    # --check is read-only and reports what a dashboard would see
+    assert cli.main(["tag", "--check", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["tagged"] == 5 and out["untagged"] == 0 and out["primary_countries"]["CN"] == 1
+    # a re-ingest wipes the tags; --check says so on stderr
+    st = Store(tmp_path / "cli.sqlite")
+    _fill(st)
+    st.close()
+    assert cli.main(["tag", "--check"]) == 0
+    captured = capsys.readouterr()
+    assert "0 of 5 papers in window are tagged" in captured.out
+    assert "WARNING: 5 papers in window are untagged" in captured.err and "litradar tag" in captured.err
     os.environ.pop("LITRADAR_DB", None)

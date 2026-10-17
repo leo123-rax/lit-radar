@@ -8,7 +8,7 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
-  litradar tag      [--since 365d] [--translate]              tag papers with language + country codes; optionally translate non-English titles with Claude
+  litradar tag      [--since 365d] [--translate] [--check]    tag papers with language + country codes; optionally translate non-English titles with Claude; --check only reports
 """
 from __future__ import annotations
 
@@ -177,6 +177,19 @@ def cmd_tag(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
     since, until = _parse_since(args.since), args.until
+    if args.check:
+        # read-only: what a dashboard would see, plus how many rows lost their tags to a re-ingest
+        report = i18n.histograms(store, since=since, until=until)
+        if args.json:
+            print(json.dumps(report, indent=1, ensure_ascii=False))
+        else:
+            print(f"{report['tagged']} of {report['papers']} papers in window are tagged")
+            print("languages: " + ", ".join(f"{k} {v}" for k, v in report["languages"].items()))
+            top = list(report["primary_countries"].items())[:30]
+            print("primary countries: " + ", ".join(f"{k} {v}" for k, v in top) + (" …" if len(report["primary_countries"]) > 30 else ""))
+        if report["untagged"]:
+            print(f"WARNING: {report['untagged']} papers in window are untagged (new or re-ingested since the last tag); run `litradar tag`", file=sys.stderr)
+        return 0
     report = i18n.tag_store(store, since=since, until=until)
     if args.translate:
         report["translation"] = i18n.translate_titles(
@@ -195,7 +208,14 @@ def cmd_tag(args) -> int:
         if t["status"] == "skipped":
             line += f" ({t.get('reason')})"
         else:
-            line += f" model={t['model']} candidates={t['candidates']} translated={t['translated']} refused_or_invalid={t['refused_or_invalid']} errored={t['errored']}"
+            line += (
+                f" model={t['model']} candidates={t['candidates']} submitted={t['submitted']} translated={t['translated']}"
+                f" refused_or_invalid={t['refused_or_invalid']} truncated={t['truncated']} errored={t['errored']}"
+            )
+            if t["status"] == "error":
+                line += f" error={t.get('error')}"
+            elif t["status"] == "incomplete":
+                line += f" processing_status={t.get('processing_status')} waited_seconds={t.get('waited_seconds')}"
         print(line)
     return 0
 
@@ -262,6 +282,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--until", help="YYYY-MM-DD; default: open-ended")
     p.add_argument("--translate", action="store_true", help="translate non-English titles/abstracts into English with Claude via one Message Batches request (needs ANTHROPIC_API_KEY; model from LITRADAR_LLM_MODEL)")
     p.add_argument("--max-translate", type=int, default=1000, help="cap on papers sent for translation per run")
+    p.add_argument("--check", action="store_true", help="read-only: histograms of already-tagged papers and a warning if any row in the window is untagged (tags are lost on re-ingest)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_tag)
 

@@ -34,15 +34,19 @@ Anthropic Message Batches - https://platform.claude.com/docs/en/build-with-claud
   ``request_counts`` {processing, succeeded, errored, canceled, expired}, ``results_url``.
   Results are a .jsonl stream of ``{"custom_id", "result": {"type": succeeded|errored|canceled|expired, "message"}}``.
   Structured output - https://platform.claude.com/docs/en/build-with-claude/structured-outputs
-  ``params.output_config = {"format": {"type": "json_schema", "schema": {...}}}`` (objects need
-  ``additionalProperties: false``; the JSON comes back in the first ``text`` block; check ``stop_reason``
-  for ``refusal`` / ``max_tokens`` before parsing). SDK calls used, same as ``litradar/rank/llm.py``:
+  ``params.output_config = {"format": {"type": "json_schema", "schema": {...}}, "effort": "low"}`` (objects
+  need ``additionalProperties: false``; the JSON comes back in the first ``text`` block; check ``stop_reason``
+  for ``refusal`` / ``max_tokens`` before parsing). ``effort`` lives inside ``output_config`` and controls how
+  much the model thinks; thinking tokens count against ``max_tokens`` on current models, hence
+  ``max_tokens=16000`` and ``effort="low"`` for a translation job. SDK calls used, same as
+  ``litradar/rank/llm.py``:
   ``client.messages.batches.create(requests=[Request(custom_id, params=MessageCreateParamsNonStreaming(...))])``,
   ``client.messages.batches.retrieve(id)``, ``client.messages.batches.results(id)``. Import paths and the
   ``output_config`` field were verified against anthropic 0.125.0; no credentials were available in the
   build environment, so the live batch round-trip was NOT exercised here - the control flow is covered by
-  an offline test with a fake client. First real run: ``litradar tag --since 30d --translate`` with
-  ANTHROPIC_API_KEY set, then inspect ``SELECT * FROM translations LIMIT 5``.
+  offline tests with a fake client (success, refusal, truncation, API error, exception, deadline).
+  First real run: ``litradar tag --since 30d --translate`` with ANTHROPIC_API_KEY set, then inspect
+  ``SELECT * FROM translations LIMIT 5``.
 
 The ``anthropic`` package is optional (``pip install 'lit-radar[llm]'``); it is imported inside
 ``translate_titles`` only, and only when an API key is present.
@@ -93,6 +97,13 @@ _KANA = ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF), (0xFF66, 0xFF9F))
 _HANGUL = ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F), (0xD7B0, 0xD7FF))
 _CYRILLIC = ((0x0400, 0x04FF), (0x0500, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F))
 _LATIN = ((0x41, 0x5A), (0x61, 0x7A), (0xC0, 0xD6), (0xD8, 0xF6), (0xF8, 0x24F), (0x1E00, 0x1EFF))
+# Japanese-only character forms: post-war shinjitai simplifications whose Simplified and Traditional Chinese
+# counterparts are different code points (発 vs 发/發, 経 vs 经/經, 対 vs 对/對, 図 vs 图/圖 ...) plus kokuji
+# (characters coined in Japan: 働 込 枠 畑 峠 辻). One of them in a kana-free CJK string is enough to call it
+# Japanese; a kanji-only title with none of them (e.g. 肺癌患者) stays ``zh``.
+_SHINJITAI = frozenset(
+    "発経対図変気単価択検験剤伝壊応従続読総円栄営労駅薬挙歩戦悪絵緑録鉄塩売実関観権顕繊沢訳釈駆齢脳蔵臓滝覧覚増恵渋帰両辺鉱砕粋歓勧剰譲醸壌嚢稲穂縄聴毎黒隣雑歯鶏児効働込枠畑峠匂辻"
+)
 
 
 def _in(cp: int, ranges: Sequence[Tuple[int, int]]) -> bool:
@@ -154,13 +165,20 @@ def detect_language(text: Optional[str]) -> str:
     """Cheap stdlib language guess -> en | zh | ja | ko | ru | es | pt | fr | de | other.
 
     Script ranges decide the family (CJK ideographs weighted x3 against Latin letters because one
-    ideograph is roughly one word); kana => ja, Hangul-dominant => ko, else zh; Cyrillic => ru.
-    Latin-script text is split by weighted stopword counts (a word unique to one language counts 2,
-    a shared one 1) plus small diacritic and elision bonuses. English is the prior for scientific
-    text, so another language wins only with real evidence: at least ``MIN_SCORE``, ``MIN_MARGIN``
-    ahead of the next non-English candidate and ``MIN_MARGIN_EN`` ahead of English. A short English
-    title therefore stays ``en`` rather than being flipped by one loanword. Empty / non-alphabetic
-    input => ``other``.
+    ideograph is roughly one word); kana => ja, Hangul-dominant => ko, a Japanese-only character form
+    (``_SHINJITAI``) in kana-free CJK => ja, else zh; Cyrillic => ru. Latin-script text is split by
+    weighted stopword counts (a word unique to one language counts 2, a shared one 1) plus small
+    diacritic and elision bonuses. English is the prior for scientific text, so another language wins
+    only with real evidence: at least ``MIN_SCORE``, ``MIN_MARGIN`` ahead of the next non-English
+    candidate and ``MIN_MARGIN_EN`` ahead of English. A short English title therefore stays ``en``
+    rather than being flipped by one loanword.
+
+    Documented limits (see tests/test_i18n.py LANG_CASES for the probes): Latin-script languages with
+    no stopword set here (Polish, Turkish, Indonesian, Vietnamese, ...) fall back to ``en``, not
+    ``other``; Italian and Dutch are recognised only to land in ``other``; Serbian/Macedonian in
+    Cyrillic report as ``ru``; Simplified and Traditional Chinese are both ``zh``; a kanji-only
+    Japanese title without any shinjitai form is ``zh``; non-Latin/non-CJK/non-Cyrillic scripts
+    (Greek, Arabic, Devanagari, Thai ...) => ``other``; empty / non-alphabetic input => ``other``.
     """
     if not text:
         return "other"
@@ -173,7 +191,7 @@ def detect_language(text: Optional[str]) -> str:
     if east > 0 and east >= latin and east >= 3 * cyr and east >= 3 * other:
         if hangul > 0 and hangul >= kana and 2 * hangul >= cjk:
             return "ko"
-        if kana > 0:
+        if kana > 0 or any(ch in _SHINJITAI for ch in text):
             return "ja"
         return "zh"
     if cyr > 0 and cyr >= latin and cyr >= other:
@@ -231,19 +249,35 @@ def fold(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _build_phrase_regex(tables: Iterable[Dict[str, Optional[str]]]) -> Tuple[Any, Dict[str, Optional[str]]]:
+def _build_phrase_regex(
+    tables: Iterable[Dict[str, Optional[str]]],
+) -> Tuple[Any, Dict[str, Optional[str]], List[Tuple[str, Optional[str], Optional[str]]]]:
+    """Merge the lookup tables into one longest-match regex.
+
+    Keys are accent-folded, so two spellings can collapse onto one key ("san josé" / "san jose"). The first
+    definition wins (countries > regions > cities > institutions); a later definition with a *different*
+    code is dead data and is reported in the third return value so a test can fail on it.
+    """
     merged: Dict[str, Optional[str]] = {}
+    collisions: List[Tuple[str, Optional[str], Optional[str]]] = []
     for table in tables:
         for phrase, code in table.items():
             key = fold(phrase).lower()
-            if key and key not in merged:  # first definition wins (countries > regions > cities > institutions)
-                merged[key] = code
+            if not key:
+                continue
+            if key in merged:
+                if merged[key] != code:
+                    collisions.append((key, merged[key], code))
+                continue
+            merged[key] = code
     ordered = sorted(merged, key=len, reverse=True)
     pattern = "(?<![a-z0-9])(?:" + "|".join(re.escape(p) for p in ordered) + ")(?![a-z0-9])"
-    return re.compile(pattern), merged
+    return re.compile(pattern), merged, collisions
 
 
-_PHRASE_RE, _PHRASES = _build_phrase_regex((data.COUNTRY_NAMES, data.REGIONS, data.CITIES, data.INSTITUTIONS))
+_PHRASE_RE, _PHRASES, PHRASE_COLLISIONS = _build_phrase_regex((data.COUNTRY_NAMES, data.REGIONS, data.CITIES, data.INSTITUTIONS))
+if PHRASE_COLLISIONS:  # pragma: no cover - data bug; tests/test_i18n.py asserts the list is empty
+    log.warning("i18n gazetteer: %d phrase(s) fold onto an earlier entry with a different code (first wins): %s", len(PHRASE_COLLISIONS), PHRASE_COLLISIONS)
 _ACRONYMS = {fold(k): v for k, v in data.ACRONYMS.items()}
 _ACRONYM_RE = re.compile("(?<![A-Za-z0-9])(?:" + "|".join(re.escape(a) for a in sorted(_ACRONYMS, key=len, reverse=True)) + r")(?![A-Za-z0-9])")
 _RAW_TERMS = {k.casefold(): v for k, v in data.RAW_TERMS.items()}
@@ -352,7 +386,14 @@ def country_of(paper: Any) -> List[str]:
 # =============================================================================================
 # (d) tagging the store
 # =============================================================================================
-def _window_sql(since: Optional[str], until: Optional[str]) -> Tuple[str, List[Any]]:
+def _window_clauses(since: Optional[str], until: Optional[str], updated_since: Optional[str] = None) -> Tuple[List[str], List[Any]]:
+    """SQL predicates on ``papers p`` for a publication window plus, optionally, an ingest window.
+
+    ``since`` / ``until`` follow the digest's rule (undated papers are matched on ``first_seen``).
+    ``updated_since`` (an ISO timestamp, the format ``Store`` writes into ``updated_at``) selects every
+    row an ingest touched since then, whatever its publication date - that is what a run should
+    re-tag, because ``Store.upsert_paper`` rewrites ``extra_json`` and with it the tags.
+    """
     clauses: List[str] = []
     params: List[Any] = []
     if since:
@@ -361,7 +402,33 @@ def _window_sql(since: Optional[str], until: Optional[str]) -> Tuple[str, List[A
     if until:
         clauses.append("(p.pub_date <= ? OR p.pub_date = '')")
         params.append(until)
+    if updated_since:
+        clauses.append("p.updated_at >= ?")
+        params.append(updated_since)
+    return clauses, params
+
+
+def _window_sql(since: Optional[str], until: Optional[str], updated_since: Optional[str] = None) -> Tuple[str, List[Any]]:
+    clauses, params = _window_clauses(since, until, updated_since)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def _iter_chunks(store: Store, columns: str, clauses: List[str], params: List[Any], chunk_size: int) -> Iterable[List[Tuple[Any, ...]]]:
+    """Yield ``papers`` rows in ``rowid`` order, ``chunk_size`` at a time, so a multi-year corpus is never
+    held in memory at once and the caller can UPDATE + commit between chunks on the shared connection."""
+    where = "".join(" AND " + c for c in clauses)
+    last = -1
+    while True:
+        rows = store.conn.execute(
+            f"SELECT p.rowid, {columns} FROM papers p WHERE p.rowid > ?{where} ORDER BY p.rowid LIMIT ?",
+            [last, *params, chunk_size],
+        ).fetchall()
+        if not rows:
+            return
+        yield rows
+        last = rows[-1][0]
+        if len(rows) < chunk_size:
+            return
 
 
 def paper_language(title: str, abstract: str) -> str:
@@ -373,38 +440,50 @@ def paper_language(title: str, abstract: str) -> str:
     return detect_language(f"{title or ''}\n{abstract or ''}")
 
 
-def tag_store(store: Store, since: Optional[str] = None, until: Optional[str] = None, commit_every: int = 500) -> Dict[str, Any]:
+def tag_store(
+    store: Store,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    updated_since: Optional[str] = None,
+    chunk_size: int = 5000,
+) -> Dict[str, Any]:
     """Write ``lang`` and ``countries`` into ``papers.extra_json`` for every paper in the window.
 
     Idempotent: tags are recomputed from title / abstract / authors / affiliations each time, never
-    from the previous tags. Returns the histograms so a run can report them.
+    from the previous tags. Other keys in ``extra_json`` are preserved. Rows are processed in
+    ``chunk_size`` rowid chunks with a commit after each, so memory stays flat on a large corpus.
+
+    Tags are VOLATILE: ``Store.upsert_paper`` replaces the whole ``extra_json`` on re-ingest, so a
+    paper fetched again by a later run loses them until it is tagged again. Pass
+    ``updated_since=<run start timestamp>`` after each ingest to re-tag exactly the rows that run
+    touched, regardless of publication date (``histograms()`` reports how many rows are untagged).
+    Returns the histograms so a run can report them.
     """
     ensure_schema(store)
-    where, params = _window_sql(since, until)
-    cur = store.conn.execute(f"SELECT p.id, p.title, p.abstract, p.authors_json, p.affiliations_json, p.extra_json FROM papers p{where}", params)
+    clauses, params = _window_clauses(since, until, updated_since)
     langs: Counter = Counter()
     countries: Counter = Counter()
     n = tagged = with_country = 0
-    for pid, title, abstract, authors_json, affs_json, extra_json in cur.fetchall():
-        n += 1
-        extra = _loads(extra_json, {}) or {}
-        if not isinstance(extra, dict):
-            extra = {}
-        lang = paper_language(title or "", abstract or "")
-        codes = country_of({"authors_json": authors_json, "affiliations_json": affs_json, "extra_json": extra})
-        extra["lang"] = lang
-        extra["countries"] = codes
-        store.conn.execute("UPDATE papers SET extra_json=? WHERE id=?", (json.dumps(extra, ensure_ascii=False, default=str), pid))
-        tagged += 1
-        langs[lang] += 1
-        if codes:
-            with_country += 1
-            for c in codes:
-                countries[c] += 1
-        else:
-            countries["??"] += 1
-        if tagged % commit_every == 0:
-            store.conn.commit()
+    for rows in _iter_chunks(store, "p.id, p.title, p.abstract, p.authors_json, p.affiliations_json, p.extra_json", clauses, params, chunk_size):
+        for _rowid, pid, title, abstract, authors_json, affs_json, extra_json in rows:
+            n += 1
+            extra = _loads(extra_json, {}) or {}
+            if not isinstance(extra, dict):
+                extra = {}
+            lang = paper_language(title or "", abstract or "")
+            codes = country_of({"authors_json": authors_json, "affiliations_json": affs_json, "extra_json": extra})
+            extra["lang"] = lang
+            extra["countries"] = codes
+            store.conn.execute("UPDATE papers SET extra_json=? WHERE id=?", (json.dumps(extra, ensure_ascii=False, default=str), pid))
+            tagged += 1
+            langs[lang] += 1
+            if codes:
+                with_country += 1
+                for c in codes:
+                    countries[c] += 1
+            else:
+                countries["??"] += 1
+        store.conn.commit()
     store.conn.commit()
     return {
         "papers": n,
@@ -415,33 +494,39 @@ def tag_store(store: Store, since: Optional[str] = None, until: Optional[str] = 
     }
 
 
-def histograms(store: Store, since: Optional[str] = None, until: Optional[str] = None) -> Dict[str, Any]:
+def histograms(store: Store, since: Optional[str] = None, until: Optional[str] = None, chunk_size: int = 5000) -> Dict[str, Any]:
     """Language and country distributions of already-tagged papers in a window (for dashboards/trends).
-    ``countries`` counts a paper once per distinct country; ``primary_countries`` counts only the first."""
-    where, params = _window_sql(since, until)
-    cur = store.conn.execute(f"SELECT p.extra_json FROM papers p{where}", params)
+
+    Read-only. ``countries`` counts a paper once per distinct country; ``primary_countries`` counts
+    only the first. ``untagged`` is the number of papers in the window with no ``lang`` tag - after a
+    re-ingest that is the count of rows whose tags were overwritten; when it is > 0 the other numbers
+    under-count and ``tag_store`` should be run again.
+    """
+    clauses, params = _window_clauses(since, until)
     langs: Counter = Counter()
     countries: Counter = Counter()
     primary: Counter = Counter()
     n = tagged = 0
-    for (extra_json,) in cur.fetchall():
-        n += 1
-        extra = _loads(extra_json, {}) or {}
-        if not isinstance(extra, dict) or "lang" not in extra:
-            continue
-        tagged += 1
-        langs[extra.get("lang") or "other"] += 1
-        codes = [c for c in (extra.get("countries") or []) if isinstance(c, str)]
-        if codes:
-            primary[codes[0]] += 1
-            for c in codes:
-                countries[c] += 1
-        else:
-            countries["??"] += 1
-            primary["??"] += 1
+    for rows in _iter_chunks(store, "p.extra_json", clauses, params, chunk_size):
+        for _rowid, extra_json in rows:
+            n += 1
+            extra = _loads(extra_json, {}) or {}
+            if not isinstance(extra, dict) or "lang" not in extra:
+                continue
+            tagged += 1
+            langs[extra.get("lang") or "other"] += 1
+            codes = [c for c in (extra.get("countries") or []) if isinstance(c, str)]
+            if codes:
+                primary[codes[0]] += 1
+                for c in codes:
+                    countries[c] += 1
+            else:
+                countries["??"] += 1
+                primary["??"] += 1
     return {
         "papers": n,
         "tagged": tagged,
+        "untagged": n - tagged,
         "languages": dict(langs.most_common()),
         "countries": dict(countries.most_common()),
         "primary_countries": dict(primary.most_common()),
@@ -532,6 +617,8 @@ def translation_candidates(store: Store, since: Optional[str] = None, until: Opt
 
 
 def save_translation(store: Store, paper_id: str, lang: str, title_en: str, abstract_en: str, model: str) -> None:
+    """Insert or replace one row of ``translations`` (not committed; callers commit). Safe on a fresh store."""
+    ensure_schema(store)
     store.conn.execute(
         "INSERT OR REPLACE INTO translations (paper_id, lang, title_en, abstract_en, model, created_at) VALUES (?,?,?,?,?,?)",
         (paper_id, lang, title_en, abstract_en, model, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
@@ -546,23 +633,41 @@ def translate_titles(
     api_key: str = "",
     client: Any = None,
     use_batch: bool = True,
-    poll_seconds: int = 30,
-    max_wait_seconds: int = 3600,
+    poll_seconds: float = 30.0,
+    max_wait_seconds: float = 3600.0,
     max_items: int = 1000,
     abstract_chars: int = 6000,
-    max_tokens: int = 4096,
+    max_tokens: int = 16000,
+    effort: Optional[str] = "low",
 ) -> Dict[str, Any]:
     """Translate non-English titles + abstracts into English with Claude and store them in ``translations``.
 
     Runs ONLY when an API key is available (``api_key`` argument or ``ANTHROPIC_API_KEY``) or a
     ``client`` is injected; otherwise returns ``{"status": "skipped"}`` without importing the SDK.
-    All candidates go into one Message Batches request (50% price, async, polled until ``ended``);
-    ``use_batch=False`` scores synchronously for a handful of papers. Refusals, truncations and
-    non-JSON answers are counted and skipped, never raised.
+    All candidates go into one Message Batches request (50% price, async, polled on a wall-clock
+    deadline of ``max_wait_seconds``); ``use_batch=False`` translates synchronously for a handful of
+    papers.
+
+    ``max_tokens`` is generous (16,000) because on current models thinking tokens count against it
+    and a long abstract plus reasoning can otherwise stop with ``max_tokens``; ``effort="low"`` keeps
+    that reasoning short (translation does not need it). Pass ``effort=None`` for a model that does
+    not accept ``output_config.effort``.
+
+    Never raises for API, network or model failures. Check ``report["status"]``:
+    ``ok`` | ``skipped`` (no key) | ``incomplete`` (batch not ``ended`` before the deadline; nothing
+    stored) | ``error`` (SDK/API exception: ``report["error"]`` has ``ExceptionType: message``;
+    whatever was saved before it is kept). Per-paper outcomes are counted in ``translated``,
+    ``refused_or_invalid`` (refusal or non-JSON), ``truncated`` (``stop_reason == "max_tokens"``) and
+    ``errored`` (``result.type`` errored/canceled/expired). The one thing that does raise is a
+    configuration error: an API key is set but the optional ``anthropic`` package is not installed
+    (``RuntimeError`` with the pip hint), so a misconfigured deployment is loud rather than silent.
     """
     ensure_schema(store)
     key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    report: Dict[str, Any] = {"status": "ok", "model": model, "candidates": 0, "submitted": 0, "translated": 0, "refused_or_invalid": 0, "errored": 0}
+    report: Dict[str, Any] = {
+        "status": "ok", "model": model, "candidates": 0, "submitted": 0,
+        "translated": 0, "refused_or_invalid": 0, "truncated": 0, "errored": 0,
+    }
     if client is None and not key:
         report.update(status="skipped", reason="ANTHROPIC_API_KEY not set")
         return report
@@ -575,10 +680,21 @@ def translate_titles(
             import anthropic
         except ImportError as exc:
             raise RuntimeError("translation needs the Anthropic SDK: pip install 'lit-radar[llm]' (or pip install anthropic)") from exc
-        client = anthropic.Anthropic(api_key=key)
+        try:
+            client = anthropic.Anthropic(api_key=key)
+        except Exception as exc:  # noqa: BLE001 - bad client configuration must not abort the caller's run
+            log.warning("translation client could not be created: %s", exc)
+            report.update(status="error", error=f"{type(exc).__name__}: {exc}")
+            return report
 
-    system = [{"type": "text", "text": SYSTEM_TRANSLATE, "cache_control": {"type": "ephemeral"}}]
-    output_config = {"format": {"type": "json_schema", "schema": TRANSLATION_SCHEMA}}
+    # Batches outlive the default 5-minute cache, so the batch path asks for the 1-hour TTL (the docs'
+    # recommendation). Note: the rubric is far below the minimum cacheable prefix, so caching is a
+    # no-op until the system prompt grows - it is kept for parity with rank/llm.py.
+    cache = {"type": "ephemeral", "ttl": "1h"} if use_batch else {"type": "ephemeral"}
+    system = [{"type": "text", "text": SYSTEM_TRANSLATE, "cache_control": cache}]
+    output_config: Dict[str, Any] = {"format": {"type": "json_schema", "schema": TRANSLATION_SCHEMA}}
+    if effort:
+        output_config["effort"] = effort
 
     def params_for(it: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -589,7 +705,11 @@ def translate_titles(
             "output_config": output_config,
         }
 
-    def record(it: Dict[str, Any], parsed: Optional[Dict[str, Any]]) -> None:
+    def record(it: Dict[str, Any], message: Any) -> None:
+        if getattr(message, "stop_reason", None) == "max_tokens":
+            report["truncated"] += 1  # visible separately: a paper that truncates every run needs a bigger max_tokens
+            return
+        parsed = _parse_translation(message)
         if parsed is None:
             report["refused_or_invalid"] += 1
             return
@@ -607,7 +727,7 @@ def translate_titles(
                 log.warning("translation failed for %s: %s", it["id"], exc)
                 report["errored"] += 1
                 continue
-            record(it, _parse_translation(msg))
+            record(it, msg)
             report["submitted"] += 1
         store.conn.commit()
         return report
@@ -618,33 +738,36 @@ def translate_titles(
         cid = f"tr-{i}"
         by_custom[cid] = it
         requests.append(_typed_request(cid, params_for(it)))
-    batch = client.messages.batches.create(requests=requests)
-    report["submitted"] = len(requests)
-    report["batch_id"] = getattr(batch, "id", None)
-    log.info("submitted translation batch %s with %d requests", report["batch_id"], len(requests))
-    waited = 0
-    status = getattr(batch, "processing_status", None)
-    while status != "ended" and waited < max_wait_seconds:
-        time.sleep(poll_seconds)
-        waited += poll_seconds
-        batch = client.messages.batches.retrieve(batch.id)
+    try:
+        batch = client.messages.batches.create(requests=requests)
+        report["submitted"] = len(requests)
+        report["batch_id"] = getattr(batch, "id", None)
+        log.info("submitted translation batch %s with %d requests", report["batch_id"], len(requests))
+        start = time.monotonic()
+        deadline = start + max(float(max_wait_seconds), 0.0)
         status = getattr(batch, "processing_status", None)
-        if poll_seconds <= 0 and waited >= max_wait_seconds:
-            break
-    if status != "ended":
-        log.warning("translation batch %s still %s after %ss; nothing stored", report["batch_id"], status, waited)
-        report.update(status="incomplete", processing_status=status)
-        return report
-    for res in client.messages.batches.results(batch.id):
-        it = by_custom.get(getattr(res, "custom_id", ""))
-        if it is None:
-            continue
-        result = getattr(res, "result", None)
-        if getattr(result, "type", None) == "succeeded":
-            record(it, _parse_translation(getattr(result, "message", None)))
+        while status != "ended" and time.monotonic() < deadline:
+            time.sleep(max(float(poll_seconds), 0.0))
+            batch = client.messages.batches.retrieve(batch.id)
+            status = getattr(batch, "processing_status", None)
+        report["waited_seconds"] = round(time.monotonic() - start)
+        if status != "ended":
+            log.warning("translation batch %s still %s after %ss; nothing stored", report["batch_id"], status, report["waited_seconds"])
+            report.update(status="incomplete", processing_status=status)
         else:
-            report["errored"] += 1
-    store.conn.commit()
+            for res in client.messages.batches.results(batch.id):
+                it = by_custom.get(getattr(res, "custom_id", ""))
+                if it is None:
+                    continue
+                result = getattr(res, "result", None)
+                if getattr(result, "type", None) == "succeeded":
+                    record(it, getattr(result, "message", None))
+                else:
+                    report["errored"] += 1
+    except Exception as exc:  # noqa: BLE001 - a 401/429/529/network error must not abort the caller's run
+        log.warning("translation batch failed: %s", exc)
+        report.update(status="error", error=f"{type(exc).__name__}: {exc}")
+    store.conn.commit()  # outside the try: rows saved before a failure are kept
     return report
 
 
