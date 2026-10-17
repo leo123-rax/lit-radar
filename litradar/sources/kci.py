@@ -18,6 +18,9 @@ oai_kci record: journalInfo{journal-name, pissn, eissn, publisher-name, pub-year
   articleInfo@article-id (ART...){article-categories, title-group/article-title@lang=original|english,
   author-name/author{name, affiliation}, abstract-group/abstract@lang=original|english, language, fpage, lpage,
   doi (as http://dx.doi.org/...), uci, citation-count, url, verified}
+  <language> carries the Korean NAME of the language, not a code: 한국어 on 200/200 records sampled on 2026-10-17
+  (영어 = English, 일본어, 중국어, ... are the other values KCI uses). `KCI_LANG` maps those names to ISO 639-1;
+  an unmapped or empty value falls back to the script of the native title (`script_lang.detect_script_lang`).
 oai_dc record: dc:title@lang, dc:creator "name(affiliation); ...", dc:subject (category), dc:identifier@type
   (journalInfo with issn/eissn attributes, artiId, citedCnt, doi, uci), dc:publisher, dc:date YYYY-MM, dc:url.
 
@@ -47,7 +50,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from ..http import Http
 from ..models import Author, Paper, normalize_doi
-from .script_lang import detect_script_lang
+from .script_lang import detect_script_lang, fold_text
 
 log = logging.getLogger(__name__)
 OAI = "https://open.kci.go.kr/oai/request"
@@ -61,6 +64,12 @@ NS = {
 MIN_INTERVAL = 1.0
 PAGE_SIZE = 100  # observed; not configurable
 _CREATOR_RE = re.compile(r"^(?P<name>[^()]+?)\s*(?:\((?P<aff>[^)]*)\))?\s*$")
+_ISO2_RE = re.compile(r"^[a-z]{2}$")
+# KCI writes the language as its Korean name (<language>한국어</language>); map the names KCI uses to ISO 639-1.
+KCI_LANG = {
+    "한국어": "ko", "영어": "en", "일본어": "ja", "중국어": "zh", "독일어": "de", "프랑스어": "fr",
+    "스페인어": "es", "러시아어": "ru", "korean": "ko", "english": "en",
+}
 
 
 def _pace(http: Http) -> None:
@@ -240,6 +249,15 @@ def list_records(
         params = {"verb": "ListRecords", "set": set_spec, "metadataPrefix": metadata_prefix, "resumptionToken": token}
 
 
+def language_code(raw: str, native_title: str) -> str:
+    """ISO 639-1 code for a KCI <language> value (a Korean language name, or occasionally a code); falls back to
+    the script of `native_title` (Hangul -> ko, kana -> ja, Han-only -> ko for this source, Latin -> en)."""
+    raw = (raw or "").strip()
+    low = raw.lower()
+    code = KCI_LANG.get(raw) or KCI_LANG.get(low) or (low if _ISO2_RE.match(low) else "")
+    return code or detect_script_lang(native_title, default="en", han="ko")
+
+
 def _date(year: str, mon: str) -> str:
     if not (year or "").isdigit() or len(year) != 4:
         return ""
@@ -252,7 +270,7 @@ def record_to_paper(r: Dict[str, Any]) -> Paper:
     title_en, title_orig = r.get("title_english") or "", r.get("title_original") or ""
     title = title_en or title_orig
     native = title_orig or title_en
-    lang = (r.get("language") or "").lower()[:2] or detect_script_lang(native, default="en", han="zh")
+    lang = language_code(r.get("language") or "", native)
     authors = [Author(name=a["name"], affiliation=a.get("affiliation", "")) for a in (r.get("authors") or []) if a.get("name")]
     affs = list(dict.fromkeys(a.affiliation for a in authors if a.affiliation))
     native_id = r.get("article_id") or r.get("identifier") or r.get("uci") or ""
@@ -274,6 +292,7 @@ def record_to_paper(r: Dict[str, Any]) -> Paper:
         topics=list(r.get("categories") or []),
         extra={
             "lang": lang,
+            "language_raw": (r.get("language") or "").strip(),
             "country": "KR",
             "title_native": native,
             "title_en": title_en,
@@ -304,13 +323,14 @@ def fetch(
 ) -> Iterator[Paper]:
     """Yield KCI articles processed in [since, until] that pass the local filters.
 
-    `keywords` (case-insensitive substrings of title + abstract, any language), `categories` (KCI subject
-    strings such as 의학 or 생물학), `min_pub_year` (default: window year - 1) drop the back-catalogue noise
-    described in the module docstring. `stats` receives counters: records, kept.
+    `keywords` (case- and accent-insensitive substrings of title + abstract, any language; see
+    `script_lang.fold_text`), `categories` (KCI subject strings such as 의학 or 생물학), `min_pub_year`
+    (default: window year - 1) drop the back-catalogue noise described in the module docstring.
+    `stats` receives counters: records, kept.
     """
     _pace(http)
     min_year = int(since[:4]) - 1 if min_pub_year is None else int(min_pub_year)
-    kws = [k.lower() for k in keywords if k]
+    kws = [fold_text(k) for k in keywords if k]
     cats = {c for c in categories if c}
     counters = stats if stats is not None else {}
     counters.setdefault("records", 0)
@@ -323,7 +343,7 @@ def fetch(
         if cats and not (set(r.get("categories") or []) & cats):
             continue
         if kws:
-            hay = " ".join([r.get("title_original") or "", r.get("title_english") or "", r.get("abstract_english") or "", r.get("abstract_original") or ""]).lower()
+            hay = fold_text(" ".join([r.get("title_original") or "", r.get("title_english") or "", r.get("abstract_english") or "", r.get("abstract_original") or ""]))
             if not any(k in hay for k in kws):
                 continue
         counters["kept"] += 1

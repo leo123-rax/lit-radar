@@ -44,12 +44,19 @@ Terms that matter for a persistent corpus (verified on the terms page, 2026-10-1
 Window strategy: the API filters by publication YEAR only, so `fetch` queries pubyearfrom = window
 year - 1 (volumes lag their online release) through the window's end year, pages through the hits,
 and keeps entries whose `updated` date falls inside [start, end].
+
+Error handling: ERR_003 (concurrent-access limit) arrives as an HTTP 200 body, so the Http client's
+retry/backoff never sees it; `search` sleeps RETRY_BACKOFF seconds (doubling, RETRY_MAX attempts) and
+re-requests the same page before giving the query up. Every query that ends on a non-OK status is
+counted in stats["errors"], and a query whose totalResults exceeds max_records is logged and counted
+in stats["truncated"].
 """
 from __future__ import annotations
 
 import html
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
@@ -68,9 +75,13 @@ NS = {
 }
 MAX_COUNT = 1000
 MIN_INTERVAL = 1.0  # seconds between requests; the API has a concurrent-access limit (ERR_003)
+RETRY_BACKOFF = 5.0  # seconds to wait after ERR_003 before re-requesting the same page (doubles each time)
+RETRY_MAX = 2  # re-requests per page on ERR_003 before the query is abandoned
 STATUS_OK = "0"
 STATUS_OVER_CAP = "WARN_002"  # more than 1,000 hits: not an error, page with `start`
 STATUS_NO_RESULTS = "ERR_001"  # zero hits, or `start` beyond the last hit
+STATUS_BUSY = "ERR_003"  # concurrent-access limit, delivered in an HTTP 200 body
+_sleep = time.sleep  # indirection so tests can stub the backoff
 SEARCH_FIELDS = ("abst", "text", "article", "keyword", "author", "affil", "material", "issn", "cdjournal")
 _TAG_RE = re.compile(r"<[^>]+>")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
@@ -153,24 +164,46 @@ def search_page(http: Http, params: Dict[str, Any], start: int = 1, count: int =
     return parse_feed(http.get_text(API, params=q))
 
 
-def search(http: Http, params: Dict[str, Any], max_records: int = 5000) -> Iterator[Dict[str, Any]]:
-    """Page through an article search (`params` = search fields + pubyearfrom/pubyearto)."""
+def search(http: Http, params: Dict[str, Any], max_records: int = 5000, stats: Optional[Dict[str, int]] = None) -> Iterator[Dict[str, Any]]:
+    """Page through an article search (`params` = search fields + pubyearfrom/pubyearto).
+
+    ERR_003 (concurrent-access limit) is retried on the same page after RETRY_BACKOFF s (doubling), up to
+    RETRY_MAX times. `stats` receives counters: errors (queries abandoned on a non-OK status, HTTP failures
+    and unparsable bodies included), truncated (queries with more hits than max_records).
+    """
+    counters = stats if stats is not None else {}
+    counters.setdefault("errors", 0)
+    counters.setdefault("truncated", 0)
     start = 1
+    retries = 0
+    backoff = RETRY_BACKOFF
     while start <= max_records:
         want = min(MAX_COUNT, max_records - start + 1)
         page = search_page(http, params, start=start, count=want)
         status = page["status"]
         if status == STATUS_NO_RESULTS:
             return
+        if status == STATUS_BUSY and retries < RETRY_MAX:
+            retries += 1
+            log.info("J-STAGE: ERR_003 (concurrent-access limit) for %s start=%d; retry %d/%d in %.0fs", params, start, retries, RETRY_MAX, backoff)
+            _sleep(backoff)
+            backoff *= 2
+            continue
         if status not in (STATUS_OK, STATUS_OVER_CAP):
-            log.warning("J-STAGE: status %s %s for %s (start=%d)", status, page["message"], params, start)
+            counters["errors"] += 1
+            log.warning("J-STAGE: status %s %s for %s (start=%d); query abandoned", status, page["message"], params, start)
             return
+        retries = 0
+        backoff = RETRY_BACKOFF
         entries = page["entries"]
+        total = page["total"]
+        if start == 1 and total > max_records:
+            counters["truncated"] += 1
+            log.warning("J-STAGE: %d hits for %s but max_records=%d; only the first %d are scanned", total, params, max_records, max_records)
         yield from entries
         if not entries:
             return
         start += len(entries)
-        total = page["total"]
         if total:
             if start > total:  # totalResults is authoritative; a short page before the end still has more behind it
                 return
@@ -248,7 +281,8 @@ def fetch(
 
     `field` is the search field for `terms` (abst, text, article, keyword, author, affil, material).
     `journals` are J-STAGE journal codes (cdjournal), `issns` are XXXX-XXXX strings; each is one query.
-    `stats` (optional dict) receives counters: queries, entries, in_window, papers.
+    `stats` (optional dict) receives counters: queries, entries, in_window, papers, errors (queries abandoned
+    on a non-OK status), truncated (queries with more hits than max_records).
     """
     if field not in SEARCH_FIELDS:
         raise ValueError(f"field must be one of {SEARCH_FIELDS}")
@@ -264,10 +298,12 @@ def fetch(
     counters.setdefault("entries", 0)
     counters.setdefault("in_window", 0)
     counters.setdefault("papers", 0)
+    counters.setdefault("errors", 0)
+    counters.setdefault("truncated", 0)
     for q in queries:
         counters["queries"] += 1
         n_all = n_in = 0
-        for e in search(http, q, max_records=max_records):
+        for e in search(http, q, max_records=max_records, stats=counters):
             n_all += 1
             upd = (e.get("updated") or "")[:10]
             if not (start <= upd <= end):

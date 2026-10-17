@@ -1,8 +1,16 @@
 """SciELO (Latin America, Spain, Portugal, South Africa) via the ArticleMeta REST API.
 
 Verified live on 2026-10-17. API root: https://articlemeta.scielo.org/ ("Articles Metadata API").
-The ArticleMeta project documentation linked from https://scielo.readthedocs.io/en/latest/ (Developer APIs ->
-ArticleMeta RESTful API) returned HTTP 404 that day, so every call below was established by live requests.
+Official specification (reStructuredText, Portuguese) in the project repository:
+  https://github.com/scieloorg/articles_meta/blob/master/docs/source/api/article_identifiers.rst
+      (limit max 1,000; from / until ISO dates filtering processing_date, defaults 1500-01-01 / today; offset)
+  https://github.com/scieloorg/articles_meta/blob/master/docs/source/api/article.rst
+      (format: JSON by default, plus xmldoaj, xmlpubmed, xmlcrossref, xmlrsps, xmlwos; body=true adds full text)
+  https://github.com/scieloorg/articles_meta/blob/master/docs/source/api/journal.rst
+      (issn required, collection optional; the response is a JSON LIST of journal records)
+The rendered copy at scielo.readthedocs.io/projects/articlemeta answered HTTP 404 on 2026-10-17; use the
+repository files above. Everything not covered there (collections list, response sizes, `format=opac`) was
+established by live requests.
 
 Base: https://articlemeta.scielo.org/api/v1
   GET /collection/identifiers/
@@ -17,8 +25,11 @@ Base: https://articlemeta.scielo.org/api/v1
          30-day totals on 2026-10-17: all collections 4,186; scl 2,055; sza 650; arg 360; col 208; chl 164;
          per 131; esp 31; mex/cub/ven 0.
   GET /article/?collection=scl&code=S2317-15372026000101013&format=opac
-      -> one document as JSON (~25 KB). format=json or xylose add `citations` (~170 KB); xmlrsps is JATS/SPS XML
-         (~32 KB); xmlwos and xmlcrossref are deposit XML. An unknown code answers HTTP 200 with body `null`.
+      -> one document as JSON (~25 KB). `opac` is NOT in the official format list (observed to work on 2026-10-17;
+         it is the documented JSON minus `citations`, ~7x smaller for a well-cited article), so `article()` retries
+         once with the documented format=json when an opac call yields nothing. format=json or xylose add
+         `citations` (~170 KB); xmlrsps is JATS/SPS XML (~32 KB); xmlwos and xmlcrossref are deposit XML.
+         An unknown code answers HTTP 200 with body `null`.
   GET /journal/?collection=scl&issn=2317-1537   -> journal record (v100 title, v441 subject areas, v350 languages,
          v310 country, v435 ISSNs). GET /journal/identifiers/?collection=scl -> 427 journals in scl.
 
@@ -43,7 +54,11 @@ a bare ListIdentifiers (500 headers/page) but HTTP 500 to any from/until filter.
 
 Window strategy: there is no server-side search, so `fetch` lists identifiers by processing_date, looks the journal up
 once per ISSN (derived from the PID) to keep only the configured subject areas, fetches each remaining article and
-applies the keyword filter locally. Expect roughly 150-500 article fetches per week for the life-science areas.
+applies the keyword filter locally (case- and accent-insensitive, over every title, every abstract and the author
+keywords in all languages, so "genom" matches "genômica" and "genómica"). Expect roughly 150-500 article fetches
+per week for the life-science areas. When `max_articles` is reached the sweep stops at once (no further identifier
+pages or journal lookups) and `stats["capped"]` reports how many identifiers of the started collection sweep(s)
+were left unfetched, from meta.total.
 """
 from __future__ import annotations
 
@@ -53,6 +68,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..http import Http
 from ..models import Author, Paper, normalize_doi
+from .script_lang import fold_text
 
 log = logging.getLogger(__name__)
 BASE = "https://articlemeta.scielo.org/api/v1"
@@ -76,8 +92,23 @@ def collections(http: Http) -> List[Dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-def identifiers(http: Http, since: str, until: str, collection: Optional[str] = None, max_records: int = 50000) -> Iterator[Dict[str, Any]]:
-    """Page through /article/identifiers/ (processing_date in [since, until]); omit `collection` for all."""
+def identifiers(
+    http: Http,
+    since: str,
+    until: str,
+    collection: Optional[str] = None,
+    max_records: int = 50000,
+    stats: Optional[Dict[str, int]] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Page through /article/identifiers/ (processing_date in [since, until]); omit `collection` for all.
+
+    A page that fails (HTTP error, blocked host, non-JSON or non-dict body) ends the sweep: it is logged as a
+    warning and counted in `stats["identifier_errors"]` so a truncated run is visible. `stats["identifiers_total"]`
+    accumulates meta.total of each sweep started.
+    """
+    counters = stats if stats is not None else {}
+    counters.setdefault("identifier_errors", 0)
+    counters.setdefault("identifiers_total", 0)
     offset = 0
     while offset < max_records:
         params: Dict[str, Any] = {"from": since, "until": until, "limit": min(PAGE_LIMIT, max_records - offset), "offset": offset}
@@ -85,17 +116,27 @@ def identifiers(http: Http, since: str, until: str, collection: Optional[str] = 
             params["collection"] = collection
         data = http.get_json(f"{BASE}/article/identifiers/", params=params)
         if not isinstance(data, dict):
+            counters["identifier_errors"] += 1
+            log.warning("SciELO: identifier page failed (collection=%s from=%s until=%s offset=%d): %s; sweep truncated",
+                        collection or "all", since, until, offset, "no response" if data is None else f"unexpected body {type(data).__name__}")
             break
         objs = data.get("objects") or []
-        yield from objs
         total = int((data.get("meta") or {}).get("total") or 0)
+        if offset == 0:
+            counters["identifiers_total"] += total
+        yield from objs
         offset += len(objs)
         if not objs or offset >= total:
             break
 
 
 def article(http: Http, collection: str, code: str, fmt: str = "opac") -> Optional[Dict[str, Any]]:
+    """One document. `format=opac` is undocumented (the documented JSON without `citations`); when it yields no
+    document the call is retried once with the documented default `format=json` before the article counts as missing."""
     data = http.get_json(f"{BASE}/article/", params={"collection": collection, "code": code, "format": fmt})
+    if not isinstance(data, dict) and fmt != "json":
+        log.info("SciELO: format=%s returned no document for %s/%s; retrying with format=json", fmt, collection, code)
+        data = http.get_json(f"{BASE}/article/", params={"collection": collection, "code": code, "format": "json"})
     return data if isinstance(data, dict) else None
 
 
@@ -233,6 +274,7 @@ def to_paper(doc: Dict[str, Any]) -> Paper:
             "title_native": native,
             "title_en": titles.get("en", ""),
             "titles": titles,
+            "abstracts": abstracts,
             "abstract_langs": sorted(abstracts),
             "keywords": keywords,
             "subject_areas": areas,
@@ -264,19 +306,27 @@ def fetch(
     stats: Optional[Dict[str, int]] = None,
 ) -> Iterator[Paper]:
     """Yield SciELO articles processed in [since, until] whose journal is in `subject_areas` (None/empty = all)
-    and whose title, abstract or keywords contain any of `keywords` (empty = all). One request per identifier
-    page, one per distinct journal ISSN, one per article; `max_articles` caps the article fetches.
-    `stats` receives counters: identifiers, skipped_subject, fetched, missing, kept, capped."""
+    and whose titles, abstracts or keywords (any language, case- and accent-insensitive) contain any of
+    `keywords` (empty = all). One request per identifier page, one per distinct journal ISSN, one per article;
+    `max_articles` caps the article fetches and stops the sweep (no further identifier pages or journal lookups).
+    `stats` receives counters: identifiers, identifiers_total, identifier_errors, skipped_subject, fetched,
+    missing, kept, capped (identifiers of the started sweep(s) left unfetched, from meta.total)."""
     _pace(http)
     areas = {a for a in (subject_areas or ()) if a}
-    kws = [k.lower() for k in keywords if k]
+    kws = [fold_text(k) for k in keywords if k]
     counters = stats if stats is not None else {}
-    for k in ("identifiers", "skipped_subject", "fetched", "missing", "kept", "capped"):
+    for k in ("identifiers", "identifiers_total", "identifier_errors", "skipped_subject", "fetched", "missing", "kept", "capped"):
         counters.setdefault(k, 0)
     journal_cache: Dict[Tuple[str, str], Optional[List[str]]] = {}
+    capped = False
     for col in (list(collections) if collections else [None]):
-        for ident in identifiers(http, since, until, collection=col):
+        for ident in identifiers(http, since, until, collection=col, stats=counters):
             counters["identifiers"] += 1
+            if counters["fetched"] >= max_articles:
+                # this identifier and everything behind it in the started sweep(s) stay unfetched
+                counters["capped"] = max(counters["identifiers_total"] - counters["identifiers"] + 1, 1)
+                capped = True
+                break
             code = ident.get("code") or ""
             c = ident.get("collection") or col or ""
             if not code or not c:
@@ -291,9 +341,6 @@ def fetch(
                 if known is not None and not (set(known) & areas):
                     counters["skipped_subject"] += 1
                     continue
-            if counters["fetched"] >= max_articles:
-                counters["capped"] += 1
-                continue
             counters["fetched"] += 1
             doc = article(http, c, code, fmt=fmt)
             if not doc:
@@ -301,11 +348,21 @@ def fetch(
                 continue
             p = to_paper(doc)
             if kws:
-                hay = " ".join([p.title, p.abstract] + list(p.extra.get("titles", {}).values()) + p.extra.get("keywords", [])).lower()
+                hay = fold_text(" ".join(
+                    [p.title, p.abstract]
+                    + list(p.extra.get("titles", {}).values())
+                    + list(p.extra.get("abstracts", {}).values())
+                    + list(p.extra.get("keywords", []))
+                ))
                 if not any(k in hay for k in kws):
                     continue
             counters["kept"] += 1
             yield p
-    if counters["capped"]:
-        log.warning("SciELO: %d identifiers not fetched (max_articles=%d)", counters["capped"], max_articles)
+        if capped:
+            break
+    if capped:
+        log.warning("SciELO: max_articles=%d reached after %d identifiers; %d identifiers of the started sweep(s) not fetched"
+                    " (collections not yet started are not counted)", max_articles, counters["identifiers"] - 1, counters["capped"])
+    if counters["identifier_errors"]:
+        log.warning("SciELO: %d identifier page(s) failed; the window was only partly swept", counters["identifier_errors"])
     log.info("SciELO %s..%s: %s", since, until, dict(counters))

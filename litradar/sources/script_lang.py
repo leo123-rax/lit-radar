@@ -8,6 +8,7 @@ default because Portuguese / Spanish / English cannot be told apart safely from 
 from __future__ import annotations
 
 import re
+import unicodedata
 
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
 KANA = re.compile(r"[぀-ヿㇰ-ㇿｦ-ﾟ]")
@@ -15,6 +16,7 @@ HAN = re.compile(r"[一-鿿㐀-䶿豈-﫿]")
 CYRILLIC = re.compile(r"[Ѐ-ӿ]")
 ARABIC = re.compile(r"[؀-ۿ]")
 THAI = re.compile(r"[฀-๿]")
+_LATIN_MARKS = re.compile(r"[\u0300-\u036f]")  # combining diacritical marks (Latin, Greek, Cyrillic accents)
 
 
 def detect_script_lang(text: str, default: str = "en", han: str = "zh") -> str:
@@ -38,3 +40,17 @@ def detect_script_lang(text: str, default: str = "en", han: str = "zh") -> str:
     if THAI.search(text):
         return "th"
     return default
+
+
+def fold_text(text: str) -> str:
+    """Case- and accent-insensitive form of `text` for substring keyword matching.
+
+    NFKD-decompose, drop the Latin combining marks (U+0300-U+036F), recompose (NFC) and casefold, so
+    "genômica", "Genómica" and "GENOMICA" all become "genomica" and "São" becomes "sao". Hangul syllables
+    and kana with dakuten recompose unchanged (their marks are outside the stripped range), and fullwidth
+    Latin letters fold to ASCII. Apply it to both the keywords and the haystack.
+    """
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return unicodedata.normalize("NFC", _LATIN_MARKS.sub("", decomposed)).casefold()

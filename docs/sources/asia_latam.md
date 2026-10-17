@@ -13,8 +13,11 @@ Everything below that is not marked as quoted from documentation was established
 | KCI Open API (keyword search) | Korea | not implemented | `https://open.kci.go.kr/po/openapi/openApiSearch.kci?apiCode=articleSearch` | title / author / journal | | needs a key issued by KCI; schema unverifiable without one |
 | KoreaMed / KoreaMed Synapse | Korea (KAMJE journals) | not implemented | | | | no API, RSS or OAI found; the journals are in PubMed / Europe PMC / Crossref |
 
-`litradar/sources/script_lang.py` is a tiny shared helper that guesses `extra["lang"]` from the writing system
-(Hangul, kana, Han, Cyrillic, ...) when a source does not state the language.
+`litradar/sources/script_lang.py` is a tiny shared helper: `detect_script_lang` guesses `extra["lang"]` from the
+writing system (Hangul, kana, Han, Cyrillic, ...) when a source does not state the language, and `fold_text`
+gives the case- and accent-insensitive form used by every local keyword filter (NFKD, drop the Latin combining
+marks U+0300-U+036F, NFC, casefold: `genômica`, `Genómica` and `GENOMICA` all match `genom`; Hangul and kana are
+left unchanged).
 
 Every adapter yields `Paper` objects with `source` (`jstage` / `scielo` / `kci`), the English title when the
 source has one (the gazetteer and ranker are English), `extra["title_native"]` with the native-script title,
@@ -73,6 +76,13 @@ year_slack=1)` runs one query per term / journal code / ISSN with `pubyearfrom =
 `[start, end]`, and de-duplicates by DOI. `jstage.hit_count(http, params)` sizes a query with one request.
 Requests are paced at 1 per second (`MIN_INTERVAL`); the API has a concurrency limit (`ERR_003`).
 
+Errors: `ERR_003` arrives in an HTTP 200 body, so the shared client's retry/backoff never sees it; `search` waits
+`RETRY_BACKOFF` (5 s, doubling) and re-requests the **same** page up to `RETRY_MAX` (2) times before abandoning
+the query. Any query that ends on another non-OK status (parameter errors, HTTP failure, unparsable body) is
+abandoned with a warning. The `stats` dict passed to `fetch` reports `queries`, `entries`, `in_window`, `papers`,
+`errors` (abandoned queries) and `truncated` (queries whose `totalResults` exceeded `max_records`, also logged
+with both numbers), so a run report can show partial coverage; the adapter itself never raises.
+
 ### Terms that matter for a persistent corpus
 
 Quoted from the terms page (2026-10-17):
@@ -94,15 +104,25 @@ for laptop runs, for a pointer-only mode (keep DOI + URL and re-fetch titles on 
 `abst` search for `genome` OR `genomics`, publication years 2025-2026: 529 hits scanned in 2 queries, 54 entries
 released inside the window, **52 unique papers** (all 52 with a DOI; English title available for 33, Japanese-only
 for 19). 8 requests, 14 s. Hit counts for the same years: `abst:genome` 466, `abst:genomics` 63, `text:genome` 3,029,
-`text:genomics` 1,529, `article:genome` 153, `article:genomics` 19.
+`text:genomics` 1,529, `article:genome` 153, `article:genomics` 19. Re-run the same day after the review fixes
+(`max_records=1000`): the same 52 papers, `stats` `{queries 2, entries 529, in_window 54, papers 52, errors 0,
+truncated 0}`, 2 requests, 0 failures, 10.6 s.
 
 ---
 
 ## SciELO via ArticleMeta (Latin America, Spain, Portugal, South Africa)
 
-* API root: <https://articlemeta.scielo.org/> ("Articles Metadata API"). The ArticleMeta project documentation
-  linked from <https://scielo.readthedocs.io/en/latest/> (Developer APIs -> ArticleMeta RESTful API) answered
-  HTTP 404 on 2026-10-17, so the behaviour below comes from live calls.
+* API root: <https://articlemeta.scielo.org/> ("Articles Metadata API").
+* Official specification (reStructuredText, Portuguese) in the project repository `scieloorg/articles_meta`:
+  * <https://github.com/scieloorg/articles_meta/blob/master/docs/source/api/article_identifiers.rst>: `limit`
+    max 1,000; `from` / `until` ISO dates (defaults 1500-01-01 / today) filtering the processing date; `offset`.
+  * <https://github.com/scieloorg/articles_meta/blob/master/docs/source/api/article.rst>: `format` JSON by default,
+    plus `xmldoaj`, `xmlpubmed`, `xmlcrossref`, `xmlrsps`, `xmlwos`; `body=true` adds the HTML full text.
+  * <https://github.com/scieloorg/articles_meta/blob/master/docs/source/api/journal.rst>: `issn` required,
+    `collection` optional; the response is a JSON **list** of journal records.
+  The rendered copy (scielo.readthedocs.io, project `articlemeta`) answered HTTP 404 on 2026-10-17; use the
+  repository files. Whatever is not covered there (collection list, response sizes, `format=opac`) comes from
+  live calls.
 
 ### Endpoints verified
 
@@ -110,7 +130,7 @@ for 19). 8 requests, 14 s. Hit counts for the same years: `abst:genome` 466, `ab
 |---|---|
 | `GET /api/v1/collection/identifiers/` | 36 collections `[{code, acron, name{en,...}, status, type, is_active}]`: scl Brazil, arg, chl, col, cub, ecu, per, pry, ury, bol, cri, dom, mex, ven, wid West Indies, esp Spain, prt Portugal, sza South Africa, spa Public Health, plus books, preprints, data and several "diffusion" magazines |
 | `GET /api/v1/article/identifiers/?collection=scl&from=2026-09-17&until=2026-10-17&limit=1000&offset=0` | `{"meta": {"limit", "offset", "filter", "total"}, "objects": [{"code", "collection", "processing_date", "doi"}]}`; `limit` is capped at 1,000 (`limit=5000` answers `limit: 1000`); omit `collection` to sweep every collection; `from`/`until` filter **processing_date**, not publication date |
-| `GET /api/v1/article/?collection=scl&code=S2317-15372026000101013&format=opac` | one document, ~25 KB JSON. `format=json` / `xylose` add `citations` (~170 KB); `xmlrsps` JATS/SPS XML (~32 KB); `xmlwos`, `xmlcrossref` deposit XML. Unknown code: HTTP 200, body `null` |
+| `GET /api/v1/article/?collection=scl&code=S2317-15372026000101013&format=opac` | one document, ~25 KB JSON. **`opac` is not in the documented format list** (observed to work on 2026-10-17: the documented JSON without `citations`, ~7x smaller for a well-cited article); the adapter retries once with the documented `format=json` when an `opac` call yields nothing. `format=json` / `xylose` add `citations` (~170 KB); `xmlrsps` JATS/SPS XML (~32 KB); `xmlwos`, `xmlcrossref` deposit XML. Unknown code: HTTP 200, body `null` |
 | `GET /api/v1/journal/?collection=scl&issn=2317-1537` | journal record with `v100` title, `v441` subject areas, `v350` languages, `v310` country, `v435` ISSNs |
 | `GET /api/v1/journal/identifiers/?collection=scl` | 427 journals in scl |
 
@@ -135,18 +155,25 @@ categories, `v350` languages, `v310` country, `v690` site host.
 `scielo.fetch(http, since, until, collections=None, subject_areas=("Health Sciences", "Biological Sciences",
 "Agricultural Sciences"), keywords=[...], max_articles=2000)`:
 
-1. lists identifiers by processing date (all collections unless `collections` is given);
-2. looks each journal up once per ISSN and skips articles whose journal has none of the configured subject areas
+1. lists identifiers by processing date (all collections unless `collections` is given). A failed identifier
+   page (HTTP error, blocked host, non-JSON body) ends that sweep with a warning and is counted in
+   `stats["identifier_errors"]`, so a partly swept window is visible in the run report instead of silent;
+2. stops as soon as `max_articles` article fetches have been made: no further identifier pages and no further
+   journal lookups; `stats["capped"]` = identifiers of the started sweep(s) left unfetched, computed from
+   `meta.total` (collections not yet started are not counted);
+3. looks each journal up once per ISSN and skips articles whose journal has none of the configured subject areas
    (journals the API does not know are kept);
-3. fetches each remaining article (`format=opac`) and keeps it when any keyword appears in a title, abstract or
-   keyword list, in any language (empty `keywords` keeps everything);
-4. `pub_date` = online date (`v223` / `v265 real`) > issue date (`v65`) > processing date > year, recorded in
+4. fetches each remaining article (`format=opac`, falling back to `format=json`) and keeps it when any keyword
+   appears in **any** title, **any** abstract (all languages, kept in `extra["abstracts"]`) or the author keyword
+   list, matched case- and accent-insensitively via `fold_text` (empty `keywords` keeps everything);
+5. `pub_date` = online date (`v223` / `v265 real`) > issue date (`v65`) > processing date > year, recorded in
    `extra["pub_date_basis"]`; `extra["processing_date"]` says when SciELO loaded the record.
 
 Funding agencies land in `sections["funding"]`, acknowledgements in `sections["ack"]`, subject areas and WoS
 categories in `topics`. Requests are paced at 4 per second; the service states no limits. Budget: one request per
 1,000 identifiers, one per distinct journal, one per article fetched (expect 150-500 articles per week for the
-life-science areas across all collections).
+life-science areas across all collections). `stats` keys: `identifiers`, `identifiers_total`, `identifier_errors`,
+`skipped_subject`, `fetched`, `missing`, `kept`, `capped`.
 
 SciELO lag is real: records enter ArticleMeta weeks to months after online publication, so a paper processed this
 week may carry a `pub_date` from several months ago and fall outside a strict publication-date digest window.
@@ -169,6 +196,12 @@ identifiers were not fetched); 0 missing documents; **11 articles matched `genom
 online-publication field, 10 of them inside the window). Extrapolating the hit rate to the 2,339 eligible identifiers
 gives roughly 29 genomics papers for the month (estimate, not measured). 1,274 requests, 0 failures, 347 s at
 4 requests per second.
+
+Re-run the same day after the review fixes (`collections=["scl", "col", "mex"]`, life-science areas, `keywords=["genom"]`,
+`max_articles=250`): 434 identifiers consumed of the 2,055 in `scl` before the cap, 183 skipped by subject area,
+250 fetched, 0 missing, **6 kept** (all English-titled, all with a DOI, all 6 with `pub_date` inside the window),
+`capped` 1,622 (= 2,055 - 434 + 1; the `col` and `mex` sweeps never started, so they are not counted),
+`identifier_errors` 0; 358 requests, 0 failures, 98 s. No `format=json` retry was needed.
 
 ---
 
@@ -197,6 +230,18 @@ gives roughly 29 genomics papers for the month (estimate, not measured). 1,274 r
 `dc:creator` "name(affiliation); ...", `dc:subject`, `dc:identifier@type=journalInfo|artiId|citedCnt|doi|uci`,
 `dc:date YYYY-MM`, `dc:url`); the adapter parses both.
 
+`<language>` holds the **Korean name of the language, not a code**: `한국어` on 100/100 records of the 2026-10-10..17
+window re-sampled on 2026-10-17 (`영어` English, `일본어`, `중국어`, ... are the other values KCI uses). `kci.KCI_LANG`
+maps those names (and English names) to ISO 639-1; a bare two-letter code is accepted as-is; anything else, or an
+empty element, falls back to the script of the native title (Hangul -> `ko`, kana -> `ja`, Han-only -> `ko` for this
+source). The raw value is kept in `extra["language_raw"]`. (An earlier revision sliced the first two characters
+of the raw value and produced `한국` for every live record.)
+
+Licence: the OAI guide page says attribution and **no commercial use** (「출처표시 ... 영리목적으로 사용불가능
+합니다」), while KCI's data-services page (`openDataPackGuide.kci?datasetBean.dtstTyCd=00`) shows the 공공누리
+제1유형 badge (attribution; 「영리 목적으로 이용할 수 있습니다」). The two pages disagree (both re-read 2026-10-17);
+this document and the adapter quote the stricter OAI page. Either way a source credit is required (wiring step 5).
+
 Limits observed on 2026-10-17 (the adapter is defensive about each):
 
 * **Datestamp = processing date.** A bulk re-processing on 2026-10-05 re-stamped a large part of the back
@@ -215,6 +260,10 @@ Limits observed on 2026-10-17 (the adapter is defensive about each):
 While the re-stamped back catalogue dominates the datestamp index, this source yields few or no current papers
 per run; raising `max_pages` buys more records at 100 per request (about 1 s each) without any guarantee of reaching
 2026 publications. Day-by-day windows do not help, since the datestamp is the re-processing day.
+
+`kci.fetch(http, since, until, keywords=[...], categories=[...], min_pub_year=None, max_pages=10)` matches
+`keywords` against both titles and both abstracts case- and accent-insensitively (`fold_text`), so `genom` matches
+`Genômica` and `전장유전체` matches itself; `stats` reports `records` and `kept`.
 
 ### KCI Open API (documented, not implemented)
 
@@ -243,6 +292,11 @@ Keyword `genom` / `유전체` matched **0** of the 500 in any year. `kci.fetch(.
 (2025) and the same keywords kept **0** papers. A 7-day window (3 pages, 300 records) showed the same 2011-2016
 back-catalogue profile. 13 requests, 0 failures, 142 s. In other words the endpoint, the harvest and the parsing all
 work, but the current datestamp index carries no recent Korean genomics literature to count.
+
+Re-run the same day after the language fix (2 pages, 200 records, `min_pub_year=2000`): `<language>` values 한국어
+195, 영어 4, empty 1 -> `extra["lang"]` `ko` 195, `en` 5 (the empty one has a Latin-script title); publication
+years 2004-2016; the default filters (`min_pub_year` 2025, keywords `genom` / `유전체`) kept 0 of 200. 4 requests,
+0 failures, 41 s.
 
 ---
 
@@ -317,13 +371,24 @@ work, but the current datestamp index carries no recent Korean genomics literatu
    (`api.jstage.jst.go.jp` 1.0 s, `articlemeta.scielo.org` 0.25 s, `open.kci.go.kr` 1.0 s).
 4. `docs/SOURCES.md`: add three rows to "Papers and preprints" pointing here; `litradar/cli.py` `--sources` help
    string: append `jstage,scielo,kci`.
-5. Digest: nothing to change; `Paper.extra["lang"]` / `["country"]` are available for a language or country
-   breakdown when the renderer grows one.
+5. `litradar/digest/render.py` (required by the sources' terms, not optional): after the paper sections, append an
+   attribution footer built from the sources actually rendered:
+   * when any rendered paper has `source == "jstage"`: `Powered by J-STAGE` linking to <https://www.jstage.jst.go.jp/>
+     (J-STAGE terms Article 9: the credit with a link must appear wherever API data is displayed);
+   * when any rendered paper has `source == "kci"`: `Source: KCI (Korea Citation Index), National Research Foundation
+     of Korea` linking to <https://www.kci.go.kr/> (출처표시, source attribution, required by the OAI guide page);
+   * SciELO states no credit requirement; a `Source: SciELO` line is courteous.
+   `Paper.extra["lang"]` / `["country"]` (JP / KR / BR ...) are available for a language or country breakdown when
+   the renderer grows one.
 
 ## Tests
 
 `tests/test_sources_asia_latam.py` (offline, canned payloads in `tests/fixtures/jstage_articles.xml`,
-`kci_oai_kci.xml`, `scielo_article_opac.json`): normal records, empty results (`ERR_001`, `noRecordsMatch`, empty
-identifier pages), malformed payloads (non-XML, `None`, non-dict JSON, `null` article), pagination stop
-(J-STAGE `start`/`totalResults`, SciELO `offset`/`total`, KCI repeated pages and tokens, `max_pages`), window and
-keyword filters, de-duplication, language detection.
+`kci_oai_kci.xml` with `<language>한국어</language>` as the server sends it, `scielo_article_opac.json`): normal
+records, empty results (`ERR_001`, `noRecordsMatch`, empty identifier pages), malformed payloads (non-XML, `None`,
+non-dict JSON, `null` article with the `format=json` retry), pagination stop (J-STAGE `start`/`totalResults` and
+`max_records` truncation count, SciELO `offset`/`total`, identifier-page failure counted mid-sweep, `max_articles`
+stopping before further pages or journal lookups, KCI repeated pages and tokens, `max_pages`), J-STAGE `ERR_003`
+retry on the same page then abandonment (stubbed sleep), list- and dict-shaped `/journal/` payloads, window /
+keyword / category / subject-area filters with accent-insensitive keywords over every title and abstract,
+de-duplication, KCI language-name mapping and script fallback, `fold_text`.
