@@ -51,70 +51,70 @@ _Science advances, 2026-10-16 · score 6.1_
 
 <sub>Instruments: Beckman Coulter NGS reagents, Bioanalyzer, DIA-NN, FragPipe, IDT oligonucleotides, Leica STELLARIS, Lipofectamine, NEBNext, NanoDrop, NextSeq 2000, Nextera, Nikon AX, Orbitrap Astral, QIAGEN automation, QIAGEN extraction kits, QuantStudio, Qubit, Vanquish Neo, bioimage analysis open-source software, nanoElute, ÄKTA · Companies: Agilent Technologies, Bio-Rad Laboratories, Eppendorf, Howard Hughes Medical Institute, Illumina, Merck KGaA / MilliporeSigma, New England Biolabs, QIAGEN, Roche, Thermo Fisher Scientific · Signals: journal tier B; 5 platform(s); 16 lab tool(s); 10 company mention(s); company-affiliated author</sub>
 
-**8. [Allosteric disulfide control of ligand binding and endocytosis of KIR2DL4, the natural killer cell receptor for HLA-G](https://europepmc.org/article/PMC/PMC13661046)**  
-_eLife, 2026-10-16 · score 6.1_  
-
-<sub>Instruments: Biacore, Bio-Rad CFX, CytoFLEX, HyPerforma, Lipofectamine, Merck Millipore, Orbitrap, QIAGEN extraction kits, TotalSeq, Vanquish Neo, Zeiss LSM, ÄKTA · Companies: AstraZeneca, Bio-Rad Laboratories, Carl Zeiss, Danaher, Merck KGaA / MilliporeSigma, QIAGEN, Revvity, Roche, STEMCELL Technologies, Takara Bio, Thermo Fisher Scientific · Signals: journal tier B; 3 platform(s); 9 lab tool(s); 11 company mention(s); company-affiliated author</sub>
-
-**9. [Spatial Transcriptomics Reveals Region-Specific Host Responses in Amoebic Gill Disease of Atlantic Salmon](https://www.biorxiv.org/content/10.64898/2026.10.09.756816v1)**  
+**8. [Spatial Transcriptomics Reveals Region-Specific Host Responses in Amoebic Gill Disease of Atlantic Salmon](https://www.biorxiv.org/content/10.64898/2026.10.09.756816v1)**  
 _biorxiv (preprint), 2026-10-12 · score 5.8_  
 
 Amoebic gill disease (AGD), caused by the parasite Neoparamoeba perurans, is a major welfare and economic burden for the Atlantic salmon aquaculture industry. However, the spatial organisation of immune functions within the gill, the site of infection, remains poorly resolved. Here, we present the first spatial transcriptomic atlas of the Atlantic salmon gill affected by AGD, generated using 10x Genomics Visium on fo…  
 
 <sub>Instruments: Chromium Single Cell 3', Evident / Olympus microscopy, NovaSeq X, QIAGEN extraction kits, Visium, single-cell analysis open-source software · Companies: 10x Genomics, Agilent Technologies, Illumina, Merck KGaA / MilliporeSigma, QIAGEN · Signals: preprint; 3 platform(s); 3 lab tool(s); 5 company mention(s); watchlist: spatial transcriptomics; 4 novelty cue(s)</sub>
 
-**10. [Spatiotemporal Heterogeneity of HPV Integration Architectures Drive Oncogenic Features of Oropharyngeal Cancer](https://www.biorxiv.org/content/10.64898/2026.10.03.756294v1)**  
+**9. [Spatiotemporal Heterogeneity of HPV Integration Architectures Drive Oncogenic Features of Oropharyngeal Cancer](https://www.biorxiv.org/content/10.64898/2026.10.03.756294v1)**  
 _biorxiv (preprint), 2026-10-10 · score 5.8_  
 
 Viral integration is common in human papillomavirus-positive oropharyngeal squamous cell carcinoma (HPV+ OPSCC), but its structural and clinical significance remains unclear. We integrated targeted capture sequencing of 197 HPV+ OPSCCs with long-read nanopore sequencing of 17 tumors and models to characterize HPV-host rearrangements. We developed a novel quantitative informatics framework that classifies integration…  
 
 <sub>Instruments: Beckman Coulter NGS reagents, Bio-Rad ddPCR, Bioanalyzer, GridION, HiSeq, Nextera, NovaSeq, Oxford Nanopore sequencing, QIAGEN extraction kits · Companies: Bio-Rad Laboratories, Illumina, Oxford Nanopore Technologies, QIAGEN · Signals: preprint; 4 platform(s); 5 lab tool(s); 4 company mention(s); watchlist: long-read; 2 novelty cue(s)</sub>
 
-**11. [Amira: detection of single and multi-copy antimicrobial resistance genes directly from long reads using gene-space de Bruijn graphs](https://doi.org/10.1186/s13059-026-04301-w)**  
+**10. [Amira: detection of single and multi-copy antimicrobial resistance genes directly from long reads using gene-space de Bruijn graphs](https://doi.org/10.1186/s13059-026-04301-w)**  
 _Genome Biology, 2026-10-17 · score 5.7_  
 
 Abstract Accurate detection of antimicrobial resistance (AMR) genes is essential for AMR surveillance and genotypic prediction. Current approaches typically either depend on a correct genome assembly or use k-mers directly from the reads. However AMR genes are often multicopy and are enriched at repeat loci where genome assemblers tend to fail, and k-mer methods struggle to distinguish different copies. We present Am…  
 
 <sub>Companies: EMBL · Signals: journal tier A; 1 company mention(s); tracked author; 1 novelty cue(s)</sub>
 
-**12. [Somatic epimutations cap genetic determinism in the human diploid chromatin epigenome](https://www.cell.com/cell/fulltext/S0092-8674(26)01137-2?rss=yes)**  
+**11. [Somatic epimutations cap genetic determinism in the human diploid chromatin epigenome](https://www.cell.com/cell/fulltext/S0092-8674(26)01137-2?rss=yes)**  
 _Cell, 2026-10-15 · score 5.7_  
 
 FIRE is a long-read Fiber-seq method that resolves chromatin accessibility along individual DNA molecules on each parental chromosome, enabling a comprehensive assessment of the diploid epigenome. FIRE reveals that the HLA locus harbors the densest haplotype-selective chromatin in immune cells and resolves regulatory principles of escape from X inactivation. It also uncovers pervasive somatic epimutations, mitoticall…  
 
 <sub>Signals: journal tier A; watchlist: long-read; tracked author</sub>
 
-**13. [Spatially resolved tumor-microenvironment architecture defines therapeutic response in unresectable hepatoblastoma](https://www.biorxiv.org/content/10.64898/2026.10.10.758234v1)**  
+**12. [Spatially resolved tumor-microenvironment architecture defines therapeutic response in unresectable hepatoblastoma](https://www.biorxiv.org/content/10.64898/2026.10.10.758234v1)**  
 _biorxiv (preprint), 2026-10-13 · score 5.5_  
 
 Background: Hepatoblastoma exhibits variable therapeutic response that is not fully explained by current risk stratification. While prior studies have characterized tumor composition, the role of spatial organization in determining outcome, particularly in unresectable disease requiring transplantation under immunosuppression, remains unclear. Methods: We integrated spatial transcriptomics using the 10x Genomics Visi…  
 
 <sub>Instruments: Chromium Single Cell 3', CosMx, NovaSeq 6000, Visium, single-cell analysis open-source software · Companies: 10x Genomics, Bruker, Illumina · Signals: preprint; 4 platform(s); 1 lab tool(s); 3 company mention(s); watchlist: single-cell, spatial transcriptomics</sub>
 
-**14. [Vitamin D binding protein in ventral CA3 of the hippocampus drives stress-induced depression](https://europepmc.org/article/PMC/PMC13666054)**  
+**13. [Vitamin D binding protein in ventral CA3 of the hippocampus drives stress-induced depression](https://europepmc.org/article/PMC/PMC13666054)**  
 _Science advances, 2026-10-16 · score 5.4_  
 
-<sub>Instruments: Beckman Coulter NGS reagents, Evident / Olympus microscopy, GENEWIZ, HyPerforma, JEOL CRYO ARM, Leica STELLARIS, Lipofectamine, NEBNext, NovaSeq, RNAscope, TruSeq, bioimage analysis open-source software · Companies: Abcam, Azenta Life Sciences, Bio-Techne, Cell Signaling Technology, Danaher, Illumina, JEOL, New England Biolabs, Thermo Fisher Scientific · Signals: journal tier B; 4 platform(s); 8 lab tool(s); 9 company mention(s)</sub>
+<sub>Instruments: Beckman Coulter NGS reagents, Evident / Olympus microscopy, GENEWIZ, HyPerforma, JEOL JEM transmission electron microscopes, Leica STELLARIS, Lipofectamine, NEBNext, NovaSeq, RNAscope, TruSeq, bioimage analysis open-source software · Companies: Abcam, Azenta Life Sciences, Bio-Techne, Cell Signaling Technology, Danaher, Illumina, JEOL, New England Biolabs, Thermo Fisher Scientific · Signals: journal tier B; 3 platform(s); 9 lab tool(s); 9 company mention(s)</sub>
 
-**15. [Macrophage- or neutrophil-expressed UPP1 drives tumor growth and immune suppression in the tumor microenvironment](https://europepmc.org/article/PMC/PMC13665938)**  
+**14. [Macrophage- or neutrophil-expressed UPP1 drives tumor growth and immune suppression in the tumor microenvironment](https://europepmc.org/article/PMC/PMC13665938)**  
 _Science advances, 2026-10-16 · score 5.4_  
 
-<sub>Instruments: BD FACS, Biomark, Chromium, Chromium Single Cell 3', Corning cell culture, CyTOF, Evident / Olympus microscopy, GenScript gene synthesis, Lipofectamine, NEBNext, NanoDrop, NovaSeq 6000, Seahorse XF, Sony cell sorters, TotalSeq, Tsingke, Visiopharm, Waters mass spectrometry, ZenoTOF, bioimage analysis open-source software, single-cell analysis open-source software · Companies: 10x Genomics, Abcam, Agilent Technologies, Bio-Techne, Cell Signaling Technology, Danaher, GenScript, Illumina, Isomorphic Labs, Merck KGaA / MilliporeSigma, New England Biolabs, Revvity, Roche, Standard BioTools, Thermo Fisher Scientific, Waters Corporation · Signals: journal tier B; 8 platform(s); 13 lab tool(s); 16 company mention(s)</sub>
+<sub>Instruments: BD FACS, Biomark, Chromium, Chromium Single Cell 3', Corning cell culture, CyTOF, Evident / Olympus microscopy, GenScript gene synthesis, Lipofectamine, NEBNext, NanoDrop, NovaSeq 6000, Seahorse XF, Sony cell sorters, Tsingke, Visiopharm, Waters mass spectrometry, ZenoTOF, bioimage analysis open-source software, single-cell analysis open-source software · Companies: 10x Genomics, Abcam, Agilent Technologies, Bio-Techne, Cell Signaling Technology, Danaher, GenScript, Illumina, Isomorphic Labs, Merck KGaA / MilliporeSigma, New England Biolabs, Revvity, Roche, Standard BioTools, Thermo Fisher Scientific, Waters Corporation · Signals: journal tier B; 7 platform(s); 13 lab tool(s); 16 company mention(s)</sub>
 
-**16. [Mitochondrial carbonic anhydrase–VB inhibition rescues brain endothelial stress and memory in Alzheimer’s disease models](https://europepmc.org/article/PMC/PMC13665925)**  
+**15. [Mitochondrial carbonic anhydrase–VB inhibition rescues brain endothelial stress and memory in Alzheimer’s disease models](https://europepmc.org/article/PMC/PMC13665925)**  
 _Science advances, 2026-10-16 · score 5.4_  
 
 <sub>Instruments: BD FACS, Bruker NMR, HyPerforma, ImageXpress, Indica Labs HALO, LI-COR Odyssey, Meso Scale Discovery, NanoDrop, Nikon AX, Nucleofector, QIAGEN extraction kits, QuantStudio, Synthego, bioimage analysis open-source software · Companies: Abcam, Agilent Technologies, Avantor, Bio-Rad Laboratories, Bio-Techne, Bruker, Danaher, Eppendorf, Lonza, Merck KGaA / MilliporeSigma, QIAGEN, Roche, Thermo Fisher Scientific · Signals: journal tier B; 3 platform(s); 11 lab tool(s); 13 company mention(s)</sub>
 
-**17. [Local control of Cre-regulated genetic modeling in vivo using wireless implantable optoelectronics](https://europepmc.org/article/PMC/PMC13665946)**  
+**16. [Local control of Cre-regulated genetic modeling in vivo using wireless implantable optoelectronics](https://europepmc.org/article/PMC/PMC13665946)**  
 _Science advances, 2026-10-16 · score 5.4_  
 
 <sub>Instruments: Andor Dragonfly, Bruker microscopy, CytoFLEX, Evident / Olympus microscopy, Leica STELLARIS, NovaSeq X, Polyplus jetPEI, Visium, Visium HD, Zeiss LSM, bioimage analysis open-source software, single-cell analysis open-source software · Companies: 10x Genomics, Abcam, Bruker, Carl Zeiss, Corning Life Sciences, Danaher, Evident (Olympus), Illumina, Merck KGaA / MilliporeSigma, Oxford Instruments, Thermo Fisher Scientific · Signals: journal tier B; 4 platform(s); 8 lab tool(s); 11 company mention(s)</sub>
 
-**18. [Product-stabilized filamentation by human glutamine synthetase allosterically tunes metabolic activity](https://europepmc.org/article/PMC/PMC13657631)**  
+**17. [Product-stabilized filamentation by human glutamine synthetase allosterically tunes metabolic activity](https://europepmc.org/article/PMC/PMC13657631)**  
 _eLife, 2026-10-16 · score 5.4_  
 
 <sub>Instruments: Falcon direct electron detector, Gatan K3, Lipofectamine, Quantifoil, Talos, Tecan Fluent, Titan Krios, Vitrobot, cryo-EM open-source processing software, cryoSPARC, ÄKTA · Companies: Danaher, Gatan, Howard Hughes Medical Institute, Merck KGaA / MilliporeSigma, Profluent Bio, Promega, Roche, Tecan, Thermo Fisher Scientific · Signals: journal tier B; 6 platform(s); 5 lab tool(s); 9 company mention(s)</sub>
+
+**18. [Allosteric disulfide control of ligand binding and endocytosis of KIR2DL4, the natural killer cell receptor for HLA-G](https://europepmc.org/article/PMC/PMC13661046)**  
+_eLife, 2026-10-16 · score 5.4_  
+
+<sub>Instruments: Biacore, Bio-Rad CFX, CytoFLEX, HyPerforma, Lipofectamine, Merck Millipore, Orbitrap, QIAGEN extraction kits, Vanquish Neo, Zeiss LSM, ÄKTA · Companies: AstraZeneca, Bio-Rad Laboratories, Carl Zeiss, Danaher, Merck KGaA / MilliporeSigma, QIAGEN, Revvity, Roche, STEMCELL Technologies, Takara Bio, Thermo Fisher Scientific · Signals: journal tier B; 2 platform(s); 9 lab tool(s); 11 company mention(s); company-affiliated author</sub>
 
 **19. [Anisomycin-induced ribosome collisions follow a dose-dependent positional rule, distinct from the UV-induced collision landscape](https://www.biorxiv.org/content/10.64898/2026.10.12.758323v1)**  
 _biorxiv (preprint), 2026-10-14 · score 5.4_  
@@ -146,7 +146,7 @@ _Nucleic acids research, 2026-10-13 · score 5.4_
 **24. [Development of CRISPR/Cas13-based analytical tools to study RNA–protein interactions](https://europepmc.org/article/PMC/PMC13657679)**  
 _Nucleic acids research, 2026-10-13 · score 5.4_  
 
-<sub>Instruments: BD FACS, BMG CLARIOstar, CytoFLEX, Evident / Olympus microscopy, GeneArt, HyPerforma, IonOpticks Aurora, LGC Biosearch Technologies, Lipofectamine, Nikon AX, Orbitrap, Orbitrap Tribrid, Proteome Discoverer, QuantStudio, TotalSeq, Vanquish Neo, Yokogawa CellVoyager, bioimage analysis open-source software · Companies: BD (Becton Dickinson), Bio-Rad Laboratories, Broad Institute, Danaher, Isomorphic Labs, New England Biolabs, Promega, Revvity, Thermo Fisher Scientific · Signals: journal tier B; 7 platform(s); 11 lab tool(s); 9 company mention(s)</sub>
+<sub>Instruments: BD FACS, BMG CLARIOstar, CytoFLEX, Evident / Olympus microscopy, GeneArt, HyPerforma, IonOpticks Aurora, LGC Biosearch Technologies, Lipofectamine, Nikon AX, Orbitrap, Orbitrap Tribrid, Proteome Discoverer, QuantStudio, Vanquish Neo, Yokogawa CellVoyager, bioimage analysis open-source software · Companies: BD (Becton Dickinson), Bio-Rad Laboratories, Broad Institute, Danaher, Isomorphic Labs, New England Biolabs, Promega, Revvity, Thermo Fisher Scientific · Signals: journal tier B; 6 platform(s); 11 lab tool(s); 9 company mention(s)</sub>
 
 **25. [CircACVR2A(2–4) regulates stem cell pluripotency by uncoupling CDK-activating kinase functions](https://europepmc.org/article/PMC/PMC13659242)**  
 _Nucleic acids research, 2026-10-13 · score 5.4_  
@@ -166,13 +166,12 @@ Sequencers, single-cell and spatial systems, proteomics, cryo-EM, arrays, synthe
 | Oxford Nanopore sequencing | Oxford Nanopore Technologies | ONT.L | 26 | [Targeted long-read eukaryotic profiling of human stool by broad-range](https://europepmc.org/article/PMC/PMC13664300) |
 | HiSeq | Illumina | ILMN | 25 | [Assessing the threat of artemisinin resistance: seasonal and ecologica](https://europepmc.org/article/PMC/PMC13649500) |
 | Vanquish Neo | Thermo Fisher Scientific | TMO | 25 | [Lactylation‐Mediated HER2 Stabilization Promotes Trastuzumab Resistanc](https://europepmc.org/article/PMC/PMC13655267) |
-| TotalSeq | Revvity | RVTY | 23 | [T cell engagers convert acute tumor killing into endogenous vaccinatio](https://www.biorxiv.org/content/10.64898/2026.10.06.756695v1) |
 | MiSeq | Illumina | ILMN | 22 | [Application of microalgae reduces the incidence of bacterial wilt in f](https://europepmc.org/article/PMC/PMC13661983) |
 | Orbitrap Exploris | Thermo Fisher Scientific | TMO | 22 | [δ13C Determination of Benzoic Acid by High-Resolution Orbitrap MS: How](https://europepmc.org/article/PMC/PMC13651617) |
-| JEOL CRYO ARM | JEOL | 6951.T | 19 | [Green photodeposition of Au/TiO2 nanocomposites for wide-range photoca](https://europepmc.org/article/PMC/PMC13664701) |
 | ZenoTOF | Danaher | DHR | 18 | [Liquid chromatography-tandem mass spectrometry analysis of pyrrolizidi](https://europepmc.org/article/PMC/PMC13664721) |
 | Visium | 10x Genomics | TXG | 17 | [STARgrid: an open-source pipeline from Visium HD sequencing reads to c](https://www.biorxiv.org/content/10.64898/2026.10.09.757882v1) |
 | NovaSeq X | Illumina | ILMN | 15 | [DUF4004 protein BacR (YhbD) of Bacillus subtilis is a regulator of bac](https://europepmc.org/article/PMC/PMC13649987) |
+| Chromium Single Cell 3' | 10x Genomics | TXG | 14 | [STARgrid: an open-source pipeline from Visium HD sequencing reads to c](https://www.biorxiv.org/content/10.64898/2026.10.09.757882v1) |
 
 ### Lab infrastructure and consumables named
 
@@ -202,9 +201,9 @@ Library prep, QC, PCR, automation, imaging, cytometry and bioprocess products. U
 | Nikon AX | Nikon | 7731.T | 22 |
 | TruSeq | Illumina | ILMN | 22 |
 | Merck Millipore | Merck KGaA | MRK.DE | 21 |
+| JEOL JEM transmission electron microscopes | JEOL | 6951.T | 19 |
 | ImageXpress | Danaher | DHR | 16 |
 | Malvern Panalytical | Spectris | SXS.L | 15 |
-| Beckman Coulter NGS reagents | Danaher | DHR | 15 |
 
 ## Instruments behind newly public sequencing data (NCBI SRA + ENA)
 
@@ -441,4 +440,4 @@ Records pulled per source: rss.journals 597, rss.subjects 107.
 
 Unique papers after de-duplication: 704 (0 new to the database). Full text parsed: bioRxiv 0 (failed 0), Europe PMC 0 (failed 0). LLM-scored: 0.  
 
-Database totals: 3562 papers, 3989 entity mentions, 123164 archive records, 504 news items. Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. Only metadata, abstracts and open-licensed full text are stored; subscription content is linked, never copied.
+Database totals: 3562 papers, 3967 entity mentions, 123164 archive records, 504 news items. Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. Only metadata, abstracts and open-licensed full text are stored; subscription content is linked, never copied.
