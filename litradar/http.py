@@ -28,6 +28,7 @@ DEFAULT_MIN_INTERVAL = {
     "api.crossref.org": 0.2,
     "www.ebi.ac.uk": 0.2,
     "api.semanticscholar.org": 1.0,  # 1 req/s without a key
+    "api.cellxgene.cziscience.com": 1.0,  # no published limit; the weekly pull is a single ~10 MB request
 }
 
 
