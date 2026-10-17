@@ -8,8 +8,8 @@
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats                                              database totals and last runs
   litradar check-config                                       validate YAML files and report duplicates
-  litradar show     <id|name|ticker|"First Last"> [--since 365d] [--json]   entity dossier from the store
-  litradar watch    add|remove|list <term> | run [--since 7d] [--json]      free-text / entity / author watchlist
+  litradar show     <id|name|ticker|"First Last"> [--since 365d] [--until DATE|Nd] [--json]   entity dossier from the store
+  litradar watch    add|remove|list <term> | run [--since 7d] [--until DATE|Nd] [--json]      free-text / entity / author watchlist
 """
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ import argparse
 import json
 import logging
 import re
+import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -37,6 +38,21 @@ def _parse_since(s: Optional[str]) -> Optional[str]:
     if m:
         return (datetime.now(timezone.utc).date() - timedelta(days=int(m.group(1)))).isoformat()
     return s
+
+
+def _dated_window(since_arg: Optional[str], until_arg: Optional[str], default_since: str) -> tuple:
+    """Resolve --since / --until for `show` and `watch run`: each is YYYY-MM-DD or Nd (N days before today);
+    --until defaults to today. Raises ValueError on anything else or when since is after until."""
+    since = _parse_since(since_arg) or _parse_since(default_since)
+    until = _parse_since(until_arg) or datetime.now(timezone.utc).date().isoformat()
+    for flag, value in (("--since", since), ("--until", until)):
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"bad {flag} {value!r}: use YYYY-MM-DD or Nd (e.g. 30d)") from None
+    if since > until:
+        raise ValueError(f"--since {since} is after --until {until}")
+    return since, until
 
 
 def _window(args) -> tuple:
@@ -182,11 +198,14 @@ def _entity_context(settings: Settings) -> tuple:
 
 
 def cmd_show(args) -> int:
+    try:
+        since, until = _dated_window(args.since, args.until, "365d")
+    except ValueError as exc:
+        print(f"litradar show: error: {exc}", file=sys.stderr)
+        return 2
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
     instruments, companies, subgroups = _entity_context(settings)
-    since = _parse_since(args.since) or _parse_since("365d")
-    until = args.until or datetime.now(timezone.utc).date().isoformat()
     res = entities.resolve(store, args.query, instruments, companies, subgroups)
     if res.kind == "unknown":
         if args.json:
@@ -202,20 +221,35 @@ def cmd_show(args) -> int:
 
 
 def cmd_watch(args) -> int:
+    if args.action == "run":
+        try:
+            since, until = _dated_window(args.since, args.until, "7d")
+        except ValueError as exc:
+            print(f"litradar watch run: error: {exc}", file=sys.stderr)
+            return 2
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
     as_json = bool(getattr(args, "json", False))
     if args.action == "add":
         instruments, companies, subgroups = _entity_context(settings)
-        row = entities.watch_add(store, args.term, kind=args.kind, instruments=instruments, companies=companies, subgroups=subgroups)
+        try:
+            row = entities.watch_add(store, args.term, kind=args.kind, instruments=instruments, companies=companies, subgroups=subgroups)
+        except (ValueError, sqlite3.OperationalError) as exc:
+            print(f"watch: {exc}")
+            return 1
         if as_json:
             print(json.dumps(row, indent=1, ensure_ascii=False))
         else:
             verb = "added" if row.get("created") else "already present"
-            print(f"{verb}: {row['term']!r} as {row['kind']}" + (f" ({row['resolved']['kind']} {row['resolved']['id']})" if row.get("resolved") else ""))
+            res = row.get("resolved")
+            print(f"{verb}: {row['term']!r} as {row['kind']}" + (f" ({res['kind']} {res['id'] or res['name']}, by {res['matched_by']})" if res else ""))
         return 0
     if args.action == "remove":
-        ok = entities.watch_remove(store, args.term)
+        try:
+            ok = entities.watch_remove(store, args.term)
+        except (ValueError, sqlite3.OperationalError) as exc:
+            print(f"watch: {exc}")
+            return 1
         print(json.dumps({"term": args.term, "removed": ok}) if as_json else (f"removed {args.term!r}" if ok else f"{args.term!r} was not on the watchlist"))
         return 0 if ok else 1
     if args.action == "list":
@@ -229,8 +263,6 @@ def cmd_watch(args) -> int:
                 print(f"{r['kind']:8} {r['added_at'][:10]}  {r['term']}")
         return 0
     instruments, companies, subgroups = _entity_context(settings)
-    since = _parse_since(args.since) or _parse_since("7d")
-    until = args.until or datetime.now(timezone.utc).date().isoformat()
     rep = entities.watch_run(store, since, until, limit=args.limit, instruments=instruments, companies=companies, subgroups=subgroups)
     print(json.dumps(rep, indent=1, default=str, ensure_ascii=False) if as_json else entities.render_watch_report(rep))
     return 0
@@ -296,7 +328,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("show", help="entity dossier: instrument / company id, name, alias, ticker, or an author's 'First Last'")
     p.add_argument("query")
     p.add_argument("--since", default="365d", help="YYYY-MM-DD or Nd (default 365d)")
-    p.add_argument("--until", help="YYYY-MM-DD (default today)")
+    p.add_argument("--until", help="YYYY-MM-DD or Nd (default today)")
     p.add_argument("--limit", type=int, default=15, help="rows per list (recent papers, co-mentions, news)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_show)
@@ -314,8 +346,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     w.add_argument("--json", action="store_true")
     w = wsub.add_parser("run", help="report matches for every watched term in the window")
     w.add_argument("--since", default="7d", help="YYYY-MM-DD or Nd (default 7d)")
-    w.add_argument("--until", help="YYYY-MM-DD (default today)")
-    w.add_argument("--limit", type=int, default=20)
+    w.add_argument("--until", help="YYYY-MM-DD or Nd (default today)")
+    w.add_argument("--limit", type=int, default=20, help="rows shown per term (the match count is never capped)")
     w.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_watch)
 

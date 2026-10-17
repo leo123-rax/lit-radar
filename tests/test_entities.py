@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import stat
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -31,9 +32,9 @@ SUBGROUPS = [
 ]
 
 
-def _paper(i, pub_date, authors=(), title=None, kind="preprint", journal="biorxiv", first_seen=None):
+def _paper(i, pub_date, authors=(), title=None, kind="preprint", journal="biorxiv", first_seen=None, source="biorxiv"):
     return Paper(
-        id=f"doi:10.1000/e{i}", source="biorxiv", kind=kind, title=title or f"Paper {i} on long-read genome assembly",
+        id=f"doi:10.1000/e{i}", source=source, kind=kind, title=title or f"Paper {i} on long-read genome assembly",
         doi=f"10.1000/e{i}", abstract=f"Abstract {i} mentions methylation and ctDNA." if i % 2 else f"Abstract {i} about spatial maps.",
         journal=journal, pub_date=pub_date, url=f"https://example.org/{i}",
         authors=[Author(name=a) for a in authors], sections={"methods": f"Sequenced on a PacBio Revio instrument ({i})."},
@@ -66,6 +67,10 @@ def _seed(tmp_path):
     # a paper with a CJK title and an undated paper (first_seen only)
     st.upsert_paper(_paper(20, "2026-10-13", authors=["Wang, L."], title="甲基化 ctDNA 检测 in plasma"))
     st.upsert_paper(_paper(21, "", authors=["Undated, U."], title="Undated feed item mentioning Xenium"))
+    # author-name forms from other sources: Europe PMC "Surname I", a CJK-only name, romanised surname-first order
+    st.upsert_paper(_paper(30, "2026-07-15", authors=["Zhang F", "Doe J"], kind="article", journal="Example Journal", source="europepmc"))
+    st.upsert_paper(_paper(32, "2026-10-14", authors=["张锋", "Wang, L."], kind="article", journal="Example Journal", source="openalex"))
+    st.upsert_paper(_paper(33, "2026-06-20", authors=["Zhang Feng", "Li Wei"], kind="article", journal="Example Journal", source="openalex"))
     # archive records: Revio unmatched by id (as SRA writes it), Sequel-like rows matched, Illumina rows by ticker
     recs = [ArchiveRecord("sra", f"SRX{i}", f"SRP{i % 3}", "Revio", "PACBIO_SMRT", "WGS", "2026-10-1" + str(i % 7), "c", "t", "Homo sapiens", "", "", "") for i in range(5)]
     recs += [ArchiveRecord("sra", f"SRXI{i}", "SRP9", "Illumina NovaSeq X Plus", "ILLUMINA", "WGS", "2026-09-15", "c", "t", "Homo sapiens", "ilmn-novaseq-x", "Illumina", "ILMN") for i in range(3)]
@@ -100,12 +105,32 @@ def test_name_keys_and_matching():
     assert entities.name_key("Alexander van Oudenaarden") == ("alexander", "oudenaarden")
     assert entities.name_key("Müller, Jörg") == ("jorg", "muller")
     assert entities.name_key("") is None and entities.name_key(", ") is None
+    # PubMed / Europe PMC trailing-initials form, leading initials, all-caps surnames
+    assert entities.name_key("Krokidis M") == ("m", "krokidis")
+    assert entities.name_key("Zhang FJ") == ("f", "zhang")
+    assert entities.name_key("van der Berg J") == ("j", "berg")
+    assert entities.name_key("Wenjin Gu") == ("wenjin", "gu")
+    assert entities.name_key("F.J. Zhang") == ("f", "zhang") and entities.name_key("FJ Zhang") == ("f", "zhang")
+    assert entities.name_key("WANG J") == ("j", "wang") and entities.name_key("Evan E. Eichler") == ("evan", "eichler")
+    # non-Latin names: exact compact key; a Latin name with a CJK gloss keys on the Latin part
+    assert entities.name_key("张锋") == ("*", "张锋") and entities.name_key("张 锋") == ("*", "张锋")
+    assert entities.name_key("Иванов, А.") == ("*", "ИвановА")
+    assert entities.name_key("Wenxin Hu (胡文欣)") == ("wenxin", "hu")
     k = entities.name_key("Feng Zhang")
     assert entities.names_match(k, entities.name_key("Zhang, F."))
     assert entities.names_match(k, entities.name_key("Zhang, Feng"))
+    assert entities.names_match(k, entities.name_key("Zhang F"))  # Europe PMC form
+    assert entities.names_match(entities.name_key("Zhang Feng"), k)  # romanised surname-first order, both parts spelled out
+    assert not entities.names_match(entities.name_key("Zhang F"), entities.name_key("Feng Z"))  # initials never swap
     assert not entities.names_match(k, entities.name_key("Fan Zhang"))  # a full first name must agree
     assert not entities.names_match(k, entities.name_key("Zhang"))  # surname-only on one side never matches
     assert not entities.names_match(k, None)
+    assert entities.names_match(entities.name_key("张锋"), entities.name_key("张 锋"))
+    assert not entities.names_match(entities.name_key("张锋"), k)
+    assert entities._name_matches(entities.name_key("胡文欣"), "Wenxin Hu (胡文欣)")
+    assert entities._name_matches(entities.name_key("Wenxin Hu"), "Wenxin Hu (胡文欣)")
+    assert not entities._name_matches(entities.name_key("胡文"), "Wenxin Hu (胡文欣)")  # no CJK substring matching
+    assert entities._like_needle(("*", "张锋")) == "张" and entities._like_needle(("feng", "zhang")) == "zhang"
 
 
 # ---------------------------------------------------------------------------------- resolution
@@ -177,6 +202,9 @@ def test_instrument_dossier(tmp_path):
     text = entities.render_dossier(d)
     assert "Revio  [instrument pacb-revio]  matched by id" in text and "matched by model_name" in text
     assert "Pacific Biosciences (2), Illumina (1)" in text
+    assert "trend: last 30 days 3 vs prior 30 days 1 (+200.0%)" in text
+    assert d["papers_out_of_range"] == 0 and d["archive"]["experiments_out_of_range"] == 0
+    assert not st.conn.in_transaction  # the scratch-table work must not leave a transaction open on the caller's connection
     json.dumps(d)  # serialisable
 
 
@@ -245,7 +273,7 @@ def test_malformed_rows_do_not_crash(tmp_path):
     st.commit()
     res = entities.resolve(st, "Feng Zhang", INSTRUMENTS, COMPANIES, SUBGROUPS)
     d = entities.dossier(st, res, "2026-01-01", "2026-10-17")
-    assert {p["id"] for p in d["recent_papers"]} == {"doi:10.1000/e3", "doi:10.1000/e4"}
+    assert {p["id"] for p in d["recent_papers"]} == {"doi:10.1000/e3", "doi:10.1000/e4", "doi:10.1000/e30", "doi:10.1000/e33"}
     res = entities.resolve(st, "illumina", INSTRUMENTS, COMPANIES)
     d = entities.dossier(st, res, "2026-01-01", "2026-10-17", instruments=INSTRUMENTS)
     assert d["news"] == []
@@ -306,7 +334,103 @@ def test_watch_run_reports_matches_per_kind(tmp_path):
     assert "empty watchlist" in entities.render_watch_report({"since": "a", "until": "b", "terms": [], "total_matches": 0})
 
 
-def test_read_only_database_keeps_show_working(tmp_path):
+def test_europepmc_name_form_is_found(tmp_path):
+    """Europe PMC stores authors as "Surname I"; a Western-order query must still find those papers."""
+    st = _seed(tmp_path)
+    res = entities.resolve(st, "Feng Zhang", INSTRUMENTS, COMPANIES, SUBGROUPS)
+    d = entities.dossier(st, res, "2026-07-01", "2026-07-31", subgroups=SUBGROUPS)
+    assert d["papers_total"] == 1 and d["recent_papers"][0]["id"] == "doi:10.1000/e30" and d["recent_papers"][0]["snippet"] == "author: Zhang F"
+    for q in ("Zhang F", "F. Zhang", "Zhang, Feng", "Feng Zhang"):
+        assert entities.resolve(st, q, INSTRUMENTS, COMPANIES).kind == "person", q
+    # a name that exists only in author lists, stored in three forms
+    r = entities.resolve(st, "J. Doe", INSTRUMENTS, COMPANIES)
+    d = entities.dossier(st, r, "2026-01-01", "2026-12-31")
+    assert {p["id"] for p in d["recent_papers"]} == {"doi:10.1000/e1", "doi:10.1000/e4", "doi:10.1000/e30"}
+    entities.watch_add(st, "Feng Zhang", kind="author")
+    rep = entities.watch_run(st, "2026-07-01", "2026-07-31")
+    assert rep["terms"][0]["matches"] == 1 and rep["terms"][0]["items"][0]["id"] == "doi:10.1000/e30"
+
+
+def test_cjk_author_and_romanised_order(tmp_path):
+    st = _seed(tmp_path)
+    r = entities.resolve(st, "张锋", INSTRUMENTS, COMPANIES, SUBGROUPS)
+    assert r.kind == "person" and r.matched_by == "authors" and r.identity["name_variants"] == ["张锋"]
+    d = entities.dossier(st, r, "2026-10-01", "2026-10-17")
+    assert d["papers_total"] == 1 and d["recent_papers"][0]["id"] == "doi:10.1000/e32" and d["recent_papers"][0]["snippet"] == "author: 张锋"
+    assert "张锋  [person]  matched by authors" in entities.render_dossier(d)
+    a = entities.watch_add(st, "张锋", instruments=INSTRUMENTS, companies=COMPANIES, subgroups=SUBGROUPS)
+    assert a["kind"] == "author" and a["term"] == "张锋"
+    rep = entities.watch_run(st, "2026-10-01", "2026-10-17")
+    assert rep["terms"][0]["matches"] == 1 and [i["id"] for i in rep["terms"][0]["items"]] == ["doi:10.1000/e32"]
+    # romanised surname-first order: "Zhang Feng" finds the tracked "Feng Zhang" and the stored "Zhang Feng"
+    r = entities.resolve(st, "Zhang Feng", INSTRUMENTS, COMPANIES, SUBGROUPS)
+    assert r.kind == "person" and r.identity["tracked"]
+    d = entities.dossier(st, r, "2026-06-01", "2026-10-17", subgroups=SUBGROUPS)
+    assert {p["id"] for p in d["recent_papers"]} == {"doi:10.1000/e4", "doi:10.1000/e33"}  # "Zhang, F." / "Zhang F" (initials) do not swap
+    r = entities.resolve(st, "Feng Zhang", INSTRUMENTS, COMPANIES, SUBGROUPS)
+    d = entities.dossier(st, r, "2026-06-01", "2026-10-17", subgroups=SUBGROUPS)
+    assert {p["id"] for p in d["recent_papers"]} == {"doi:10.1000/e1", "doi:10.1000/e4", "doi:10.1000/e30", "doi:10.1000/e33"}
+
+
+def test_trend_is_measured_inside_the_window_only(tmp_path):
+    st = _seed(tmp_path)
+    res = entities.resolve(st, "pacb-revio", INSTRUMENTS, COMPANIES)
+    d = entities.dossier(st, res, "2026-10-11", "2026-10-17", instruments=INSTRUMENTS)
+    t = d["trend"]
+    assert t["recent_30d"] == 1 and t["recent_from"] == "2026-10-11" and t["recent_days"] == 7
+    assert t["prior_30d"] is None and t["change_pct"] is None and "before the window" in t["note"]
+    assert "trend: last 7 days 1 vs prior 30 days n/a (window starts 2026-10-11)" in entities.render_dossier(d)
+    assert not st.conn.in_transaction
+    # a 60-day window measures both periods
+    d = entities.dossier(st, res, "2026-08-19", "2026-10-17", instruments=INSTRUMENTS)
+    assert d["trend"]["prior_30d"] == 1 and d["trend"]["recent_30d"] == 3 and d["trend"]["recent_days"] == 30
+
+
+def test_out_of_window_months_are_counted_not_plotted(tmp_path):
+    st = _seed(tmp_path)
+    st.replace_mentions("doi:10.1000/e21", [Mention("doi:10.1000/e21", "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "title", 1, "x")])
+    st.conn.execute("UPDATE papers SET first_seen='2026-11-03T00:00:00Z' WHERE id='doi:10.1000/e21'")  # undated, first seen after --until
+    st.upsert_archive_records([ArchiveRecord("sra", "SRXX1", "SRPX", "Xenium", "OTHER", "OTHER", "2026-1-5", "c", "t", "x", "txg-xenium", "10x Genomics", "TXG")])  # malformed date
+    st.commit()
+    res = entities.resolve(st, "txg-xenium", INSTRUMENTS, COMPANIES)
+    d = entities.dossier(st, res, "2026-01-01", "2026-10-17", instruments=INSTRUMENTS)
+    assert d["papers_total"] == 1 and d["papers_out_of_range"] == 1 and sum(m["papers"] for m in d["papers_per_month"]) == 0
+    assert [m["month"] for m in d["papers_per_month"]] == entities.month_range("2026-01-01", "2026-10-17")
+    assert d["archive"]["experiments_total"] == 1 and d["archive"]["experiments_out_of_range"] == 1
+    assert sum(m["experiments"] for m in d["archive"]["per_month"]) == 0 and len(d["archive"]["per_month"]) == 10
+    text = entities.render_dossier(d)
+    assert "1 paper(s) dated outside the window months" in text and "1 experiment(s) carry a first_public outside" in text
+    series, spark, extra = entities._zero_filled(["2026-08", "2026-09"], {"2026-09": 2, "2027-01": 5}, "papers")
+    assert [x["papers"] for x in series] == [0, 2] and spark == "_@" and extra == 5
+
+
+def test_watch_run_counts_every_match_and_shows_the_newest(tmp_path):
+    st = Store(tmp_path / "w.sqlite")
+    days = [(date(2026, 9, 1) + timedelta(days=i)).isoformat() for i in range(25)]
+    for i, d in enumerate(days):
+        st.upsert_paper(_paper(100 + i, d, authors=["Doe J"], title=f"Zebrafish 斑马鱼 study {i}"))
+        st.replace_mentions(f"doi:10.1000/e{100 + i}", [Mention(f"doi:10.1000/e{100 + i}", "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "methods", 1, "x")])
+    st.commit()
+    entities.watch_add(st, "zebrafish", kind="term")
+    entities.watch_add(st, "斑马鱼", kind="term")
+    entities.watch_add(st, "txg-xenium", kind="entity", instruments=INSTRUMENTS, companies=COMPANIES)
+    entities.watch_add(st, "Doe J", kind="author")
+    rep = entities.watch_run(st, "2026-09-01", "2026-09-30", limit=10, instruments=INSTRUMENTS, companies=COMPANIES)
+    newest = sorted(days[15:], reverse=True)
+    for t in rep["terms"]:
+        assert t["matches"] == 25 and t["shown"] == 10 and len(t["items"]) == 10, t["term"]
+        assert [i["pub_date"] for i in t["items"]] == newest, t["term"]
+    assert rep["total_matches"] == 100
+    text = entities.render_watch_report(rep)
+    assert "## zebrafish (term): 25 matches (showing 10)" in text and "## txg-xenium (entity -> txg-xenium): 25 matches (showing 10)" in text
+    # a wider limit shows everything and drops the suffix
+    rep = entities.watch_run(st, "2026-09-01", "2026-09-30", limit=50)
+    assert all(t["matches"] == t["shown"] == 25 for t in rep["terms"]) and "(showing" not in entities.render_watch_report(rep)
+
+
+def test_read_only_database_keeps_show_working(tmp_path, monkeypatch, capsys):
+    from litradar import cli
+
     st = _seed(tmp_path)
     st.close()
     path = tmp_path / "e.sqlite"
@@ -322,8 +446,17 @@ def test_read_only_database_keeps_show_working(tmp_path):
         entities.watch_add(ro, "anything")
     res = entities.resolve(ro, "pacb-revio", INSTRUMENTS, COMPANIES)
     d = entities.dossier(ro, res, "2026-07-01", "2026-10-17", instruments=INSTRUMENTS)  # TEMP tables are fine read-only
-    assert d["papers_total"] == 5
+    assert d["papers_total"] == 5 and not ro.conn.in_transaction
     ro.conn.close()
+    # the CLI turns the read-only error into one line and exit 1, and `show` still works
+    monkeypatch.setenv("LITRADAR_DB", str(path))
+    assert cli.main(["watch", "add", "foo"]) == 1
+    assert "read-only" in capsys.readouterr().out
+    assert cli.main(["watch", "remove", "foo"]) == 1
+    assert "read-only" in capsys.readouterr().out
+    assert cli.main(["watch", "list"]) == 0 and "watchlist is empty" in capsys.readouterr().out
+    assert cli.main(["show", "pacb-revio", "--since", "2026-07-01", "--until", "2026-10-17"]) == 0
+    assert "5 papers" in capsys.readouterr().out
     for p in (path, tmp_path / "e.sqlite-wal", tmp_path / "e.sqlite-shm"):
         if p.exists():
             os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
@@ -356,3 +489,27 @@ def test_cli_show_and_watch(tmp_path, monkeypatch, capsys):
     assert cli.main(["watch", "remove", "pacb-revio"]) == 0
     assert cli.main(["watch", "remove", "pacb-revio"]) == 1
     capsys.readouterr()
+
+
+def test_cli_errors_are_messages_not_tracebacks(tmp_path, monkeypatch, capsys):
+    from litradar import cli
+
+    st = _seed(tmp_path)
+    st.close()
+    monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "e.sqlite"))
+    assert cli.main(["watch", "add", "   "]) == 1
+    assert "watch: empty watch term" in capsys.readouterr().out
+    # --since / --until: YYYY-MM-DD or Nd, validated, exit 2 like an argparse error
+    assert cli.main(["show", "illumina", "--until", "garbage"]) == 2
+    assert "bad --until 'garbage'" in capsys.readouterr().err
+    assert cli.main(["show", "illumina", "--since", "2026-13-01"]) == 2
+    assert "bad --since '2026-13-01'" in capsys.readouterr().err
+    assert cli.main(["show", "illumina", "--since", "2026-10-17", "--until", "2026-10-01"]) == 2
+    assert "is after --until" in capsys.readouterr().err
+    assert cli.main(["watch", "run", "--since", "7x"]) == 2
+    assert "bad --since '7x'" in capsys.readouterr().err
+    assert cli.main(["show", "illumina", "--until", "30d", "--json"]) == 0  # Nd works for --until too (N days before today)
+    d = json.loads(capsys.readouterr().out)
+    assert d["window"]["until"] == (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()
+    assert cli.main(["watch", "run", "--since", "2026-10-01", "--until", "2026-10-17"]) == 0
+    assert "empty watchlist" in capsys.readouterr().out

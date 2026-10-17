@@ -29,7 +29,15 @@ What a dossier contains
 * company: archive experiments for the vendor (by ticker, else vendor name), that vendor's instruments
   seen in the window ("portfolio"), and news items tagged with the company id;
 * person: tracked-author hits with the subgroup and how the match was made (openalex_id or name),
-  plus papers whose author list matches the name (see `name_key` for the matching rule).
+  plus papers whose author list matches the name (see `name_key` for the matching rule: Western
+  "First Last" / "Last, First", PubMed-style "Last FI" as Europe PMC stores it, leading initials
+  "F.I. Last", romanised East Asian names in either order when both parts are spelled out, and
+  CJK / other non-Latin names matched exactly, including against a CJK gloss such as "Wenxin Hu (胡文欣)").
+
+Counts are never capped by --limit: `watch run` reports `matches` (the full count in the window) and
+`shown` (the rows printed, newest first); the dossier's trend is measured only inside the window and
+says n/a when the prior 30-day period lies outside it; months outside the window are summed into
+`papers_out_of_range` / `experiments_out_of_range` instead of being drawn on the sparkline.
 
 Resolution order for the query string: gazetteer id -> canonical name -> alias -> company ticker ->
 an entity id that exists only in the mentions table (e.g. `unlisted:<slug>` institutions) -> a person
@@ -64,6 +72,8 @@ WATCH_KINDS = ("term", "entity", "author")
 ENTITY_KINDS = ("instrument", "company")
 SPARK_LEVELS = "_.:-=+*#%@"  # zero, then nine ascending levels
 CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
+_CJK_RUN = re.compile(CJK_RE.pattern + "+")
+_INITIALS = re.compile(r"[A-Z](?:[.\-]?[A-Z]){0,3}\.?")  # "M", "FJ", "E.E.", "J-P": an initials token
 _SCRATCH = "_litradar_entity_papers"
 # same window rule as litradar/store.py: published inside the window, or undated and first seen since `since`
 _WINDOW = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND substr(p.first_seen, 1, 10) >= ?))"
@@ -92,6 +102,28 @@ def _fold(s: str) -> str:
 
 def _words(s: str) -> List[str]:
     return re.findall(r"[a-z]+", _fold(s))
+
+
+def _compact(s: str) -> str:
+    """NFKC-normalised text with spaces and name punctuation removed: the key for non-Latin names."""
+    return re.sub(r"[\s,.\-·・()（）]+", "", unicodedata.normalize("NFKC", s or ""))
+
+
+def _script_keys(name: str) -> set:
+    """Compact non-Latin forms present in a stored name: each CJK run and all runs joined, so
+    "Wenxin Hu (胡文欣)" yields {"胡文欣"} and "张 锋" yields {"张", "锋", "张锋"}."""
+    s = unicodedata.normalize("NFKC", name or "")
+    runs = _CJK_RUN.findall(s)
+    keys = set(runs)
+    if len(runs) > 1:
+        keys.add("".join(runs))
+    if not _words(s):
+        keys.add(_compact(s))
+    return {k for k in keys if k}
+
+
+def _initials_like(token: str) -> bool:
+    return bool(_INITIALS.fullmatch(token))
 
 
 def month_range(since: str, until: str) -> List[str]:
@@ -128,35 +160,78 @@ def sparkline(values: Sequence[int], levels: str = SPARK_LEVELS) -> str:
 def name_key(name: str) -> Optional[Tuple[str, str]]:
     """Reduce a person name to (first, last), ASCII-folded and lower-cased.
 
-    "Feng Zhang" -> ("feng", "zhang"); "Zhang, F." -> ("f", "zhang"); "van Oudenaarden, A." -> ("a", "oudenaarden");
-    "Alexander van Oudenaarden" -> ("alexander", "oudenaarden"). Returns None for empty strings.
+    Western forms: "Feng Zhang" -> ("feng", "zhang"); "Zhang, F." -> ("f", "zhang"); "Alexander van Oudenaarden"
+    -> ("alexander", "oudenaarden"). PubMed / Europe PMC form with trailing initials: "Krokidis M" -> ("m", "krokidis"),
+    "Zhang FJ" -> ("f", "zhang"), "van der Berg J" -> ("j", "berg"); leading initials "F.J. Zhang" -> ("f", "zhang").
+    A Latin name with a CJK gloss, "Wenxin Hu (胡文欣)", keys on the Latin part (the gloss is matched by
+    `_name_matches`). Names without Latin letters (CJK, Cyrillic, ...) return ("*", compact form), e.g.
+    "张锋" -> ("*", "张锋"), and match exactly only. Returns None for empty strings.
     """
     raw = (name or "").strip()
     if not raw:
         return None
+    if not _words(raw):
+        key = _compact(raw)
+        return ("*", key) if key else None
+    if CJK_RE.search(raw):
+        raw = re.sub(r"[()（）]", " ", _CJK_RUN.sub(" ", raw)).strip()
     if "," in raw:
         last_part, first_part = raw.split(",", 1)
         last_tokens, first_tokens = _words(last_part), _words(first_part)
     else:
-        tokens = _words(raw)
-        last_tokens, first_tokens = tokens[-1:], tokens[:-1]
+        tokens = raw.split()
+        head_init, tail_init = _initials_like(tokens[0]), _initials_like(tokens[-1])
+        if len(tokens) >= 2 and tail_init and (not head_init or len(tokens[-1]) <= len(tokens[0])):
+            # "Surname I" / "Surname IJ" (PubMed, Europe PMC): the trailing token is initials
+            last_tokens, first_tokens = _words(" ".join(tokens[:-1])), [tokens[-1][0].lower()]
+        elif len(tokens) >= 2 and head_init and not tail_init:
+            # "IJ Surname": leading initials
+            last_tokens, first_tokens = _words(" ".join(tokens[1:])), [tokens[0][0].lower()]
+        else:
+            words = _words(raw)
+            last_tokens, first_tokens = words[-1:], words[:-1]
     if not last_tokens:
         return None
     return (first_tokens[0] if first_tokens else "", last_tokens[-1])
 
 
 def names_match(a: Optional[Tuple[str, str]], b: Optional[Tuple[str, str]]) -> bool:
-    """Same surname and compatible first name (equal, or one side is an initial that agrees)."""
-    if not a or not b or a[1] != b[1]:
+    """Same surname and compatible first name (equal, or one side is an initial that agrees).
+
+    Non-Latin keys ("*", compact) match exactly only. Two spelled-out names also match with the order
+    swapped ("Zhang Feng" vs "Feng Zhang"), because romanised East Asian names occur in both orders;
+    initials never swap, so "Zhang F" does not match "Feng Z".
+    """
+    if not a or not b:
         return False
-    fa, fb = a[0], b[0]
-    if fa == fb:
+    if a[0] == "*" or b[0] == "*":
+        return a == b
+    fa, la = a
+    fb, lb = b
+    if la == lb:
+        if fa == fb:
+            return True
+        if not fa or not fb:
+            return False
+        if len(fa) == 1 or len(fb) == 1:
+            return fa[0] == fb[0]
+        return False
+    return len(fa) > 1 and len(fb) > 1 and fa == lb and la == fb
+
+
+def _name_matches(key: Optional[Tuple[str, str]], name: str) -> bool:
+    """Does a query key match a stored display name? Adds the CJK-gloss rule to `names_match`."""
+    if not key or not name:
+        return False
+    if names_match(key, name_key(name)):
         return True
-    if not fa or not fb:
-        return False
-    if len(fa) == 1 or len(fb) == 1:
-        return fa[0] == fb[0]
-    return False
+    return key[0] == "*" and key[1] in _script_keys(name)
+
+
+def _like_needle(key: Tuple[str, str]) -> str:
+    """SQL LIKE pre-filter for authors_json: the folded surname, or the first character of a non-Latin key
+    (SQLite LIKE is exact on non-ASCII text, so a single character is the safe narrowing)."""
+    return key[1][:1] if key[0] == "*" else key[1]
 
 
 def _authors_match(authors_json: Optional[str], key: Tuple[str, str]) -> Optional[str]:
@@ -169,7 +244,7 @@ def _authors_match(authors_json: Optional[str], key: Tuple[str, str]) -> Optiona
         return None
     for a in authors:
         name = a.get("name") if isinstance(a, dict) else (a if isinstance(a, str) else "")
-        if name and names_match(key, name_key(name)):
+        if name and _name_matches(key, str(name)):
             return str(name)
     return None
 
@@ -259,19 +334,19 @@ def _suggest(store: Store, query: str, instruments: Optional[Gazetteer], compani
 def _resolve_person(store: Store, query: str, subgroups: Optional[Sequence[Dict[str, Any]]]) -> Optional[Resolution]:
     key = name_key(query)
     if not key or not key[0]:
-        return None  # a person needs a first and a last name; surname-only queries are too ambiguous
+        return None  # a person needs a first and a last name (or a full non-Latin name); surname-only queries are too ambiguous
     identity: Dict[str, Any] = {"name": query, "tracked": False, "subgroups": [], "name_variants": []}
     display = query
     for g in subgroups or []:
         for a in g.get("tracked_authors") or []:
             cfg_name = str(a.get("name") or "")
-            if cfg_name and names_match(key, name_key(cfg_name)):
+            if cfg_name and _name_matches(key, cfg_name):
                 identity["tracked"] = True
                 identity["subgroups"].append({"subgroup": g.get("id"), "institution": a.get("institution", ""), "openalex_id": a.get("openalex_id", "")})
                 if cfg_name not in identity["name_variants"]:
                     identity["name_variants"].append(cfg_name)
                 display = cfg_name
-    hit_names = [r[0] for r in store.conn.execute("SELECT DISTINCT author_name FROM tracked_author_hits") if names_match(key, name_key(r[0]))]
+    hit_names = [r[0] for r in store.conn.execute("SELECT DISTINCT author_name FROM tracked_author_hits") if _name_matches(key, r[0] or "")]
     for n in hit_names:
         if n not in identity["name_variants"]:
             identity["name_variants"].append(n)
@@ -280,7 +355,7 @@ def _resolve_person(store: Store, query: str, subgroups: Optional[Sequence[Dict[
         if not identity["tracked"] and hit_names:
             display = hit_names[0]
         return Resolution(query=query, kind="person", entity_id="", name=display, matched_by="tracked_author", identity=identity)
-    cur = store.conn.execute("SELECT authors_json FROM papers WHERE authors_json LIKE ? LIMIT 20000", (f"%{key[1]}%",))
+    cur = store.conn.execute("SELECT authors_json FROM papers WHERE authors_json LIKE ? LIMIT 20000", (f"%{_like_needle(key)}%",))
     for (aj,) in cur:
         hit = _authors_match(aj, key)
         if hit:
@@ -340,7 +415,7 @@ def _person_papers(store: Store, res: Resolution, since: str, until: str) -> Dic
     if not key:
         return out
     cur = store.conn.execute(
-        f"SELECT p.id, p.authors_json FROM papers p WHERE {_WINDOW} AND p.authors_json LIKE ?", (since, until, since, f"%{key[1]}%")
+        f"SELECT p.id, p.authors_json FROM papers p WHERE {_WINDOW} AND p.authors_json LIKE ?", (since, until, since, f"%{_like_needle(key)}%")
     )
     for pid, aj in cur:
         hit = _authors_match(aj, key)
@@ -359,37 +434,56 @@ def _person_papers(store: Store, res: Resolution, since: str, until: str) -> Dic
     return out
 
 
-def _zero_filled(months: List[str], counts: Dict[str, int], key: str) -> Tuple[List[Dict[str, Any]], str]:
-    all_months = sorted(set(months) | set(counts))
-    series = [{"month": m, key: int(counts.get(m, 0))} for m in all_months]
-    return series, sparkline([s[key] for s in series])
+def _zero_filled(months: List[str], counts: Dict[str, int], key: str) -> Tuple[List[Dict[str, Any]], str, int]:
+    """Series over exactly the window months plus the sum of rows whose month falls outside them
+    (undated items first seen after `until`, or malformed dates), so totals still reconcile."""
+    series = [{"month": m, key: int(counts.get(m, 0))} for m in months]
+    out_of_range = sum(int(v) for m, v in counts.items() if m not in months)
+    return series, sparkline([s[key] for s in series]), out_of_range
 
 
-def _trend(conn: sqlite3.Connection, until: str) -> Dict[str, Any]:
+def _iso_date(s: str) -> Optional[date]:
     try:
-        end = date.fromisoformat(until[:10])
+        return date.fromisoformat((s or "")[:10])
     except ValueError:
-        end = datetime.now(timezone.utc).date()
-    r0, r1 = (end - timedelta(days=29)).isoformat(), end.isoformat()
-    p0, p1 = (end - timedelta(days=59)).isoformat(), (end - timedelta(days=30)).isoformat()
+        return None
+
+
+def _trend(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, Any]:
+    """Papers in the last 30 days of the window vs the 30 days before, measured only inside [since, until]:
+    the recent period is clipped to `since` (recent_days says how long it really is) and the prior period is
+    reported as None, with a note, when it would start before the window."""
+    end = _iso_date(until) or datetime.now(timezone.utc).date()
+    start = _iso_date(since)
+    r0, r1 = end - timedelta(days=29), end
+    p0, p1 = end - timedelta(days=59), end - timedelta(days=30)
+    if start and start > r0:
+        r0 = min(start, r1)
     sql = f"SELECT COUNT(*) FROM {_SCRATCH} e JOIN papers p ON p.id = e.paper_id WHERE ({_EFFECTIVE_DATE}) BETWEEN ? AND ?"
-    recent = conn.execute(sql, (r0, r1)).fetchone()[0]
-    prior = conn.execute(sql, (p0, p1)).fetchone()[0]
-    change = round(100.0 * (recent - prior) / prior, 1) if prior else None
-    return {"recent_30d": recent, "prior_30d": prior, "change_pct": change, "recent_from": r0, "prior_from": p0}
+    recent = conn.execute(sql, (r0.isoformat(), r1.isoformat())).fetchone()[0]
+    out: Dict[str, Any] = {"recent_30d": recent, "prior_30d": None, "change_pct": None, "recent_from": r0.isoformat(),
+                           "recent_days": (r1 - r0).days + 1, "prior_from": p0.isoformat(), "prior_to": p1.isoformat()}
+    if start and p0 < start:
+        out["note"] = f"prior period would start before the window ({since}); widen --since to at least 60 days to measure a trend"
+        return out
+    prior = conn.execute(sql, (p0.isoformat(), p1.isoformat())).fetchone()[0]
+    out["prior_30d"] = prior
+    out["change_pct"] = round(100.0 * (recent - prior) / prior, 1) if prior else None
+    return out
 
 
 def _archive_series(conn: sqlite3.Connection, where: str, params: Sequence[Any], since: str, until: str, months: List[str]) -> Dict[str, Any]:
     base = f"FROM archive_records WHERE {where} AND first_public >= ? AND first_public <= ?"
     p = (*params, since, until)
     per_month = {r[0]: (r[1], r[2]) for r in conn.execute(f"SELECT substr(first_public, 1, 7) AS m, COUNT(*), COUNT(DISTINCT study_accession) {base} GROUP BY m", p)}
-    all_months = sorted(set(months) | set(per_month))
-    series = [{"month": m, "experiments": per_month.get(m, (0, 0))[0], "studies": per_month.get(m, (0, 0))[1]} for m in all_months]
+    series = [{"month": m, "experiments": per_month.get(m, (0, 0))[0], "studies": per_month.get(m, (0, 0))[1]} for m in months]
     models = _rows(conn.execute(
         f"SELECT instrument_model, GROUP_CONCAT(DISTINCT archive) AS archives, COUNT(*) AS experiments, COUNT(DISTINCT study_accession) AS studies "
         f"{base} GROUP BY instrument_model ORDER BY experiments DESC LIMIT 12", p))
-    total = sum(s["experiments"] for s in series)
-    return {"experiments_total": total, "per_month": series, "sparkline": sparkline([s["experiments"] for s in series]), "models": models}
+    total = sum(v[0] for v in per_month.values())
+    out_of_range = sum(v[0] for m, v in per_month.items() if m not in months)
+    return {"experiments_total": total, "experiments_out_of_range": out_of_range, "per_month": series,
+            "sparkline": sparkline([s["experiments"] for s in series]), "models": models}
 
 
 def _archive_for_instrument(conn: sqlite3.Connection, res: Resolution, since: str, until: str, months: List[str]) -> Dict[str, Any]:
@@ -482,12 +576,13 @@ def dossier(store: Store, res: Resolution, since: str, until: Optional[str] = No
         out["papers_total"] = 0
         return out
     months = month_range(since, until)
+    owns_transaction = not conn.in_transaction  # a caller mid-transaction keeps control of its own commit
     _fill_scratch(store, res, since, until, subgroups)
     try:
         out["papers_total"] = conn.execute(f"SELECT COUNT(*) FROM {_SCRATCH}").fetchone()[0]
         per_month = {r[0]: r[1] for r in conn.execute(f"SELECT {_MONTH} AS m, COUNT(*) FROM {_SCRATCH} e JOIN papers p ON p.id = e.paper_id GROUP BY m")}
-        out["papers_per_month"], out["sparkline"] = _zero_filled(months, per_month, "papers")
-        out["trend"] = _trend(conn, until)
+        out["papers_per_month"], out["sparkline"], out["papers_out_of_range"] = _zero_filled(months, per_month, "papers")
+        out["trend"] = _trend(conn, since, until)
         if res.kind in ENTITY_KINDS:
             out["sections"] = _rows(conn.execute(
                 f"SELECT m.section, COUNT(DISTINCT m.paper_id) AS papers, SUM(m.count) AS mentions FROM {_SCRATCH} e "
@@ -527,6 +622,8 @@ def dossier(store: Store, res: Resolution, since: str, until: Optional[str] = No
             out["tracked_hits"] = _tracked_hits(conn, res.identity.get("hit_names") or [], since, until, limit)
     finally:
         conn.execute(f"DROP TABLE IF EXISTS temp.{_SCRATCH}")
+        if owns_transaction:
+            conn.commit()  # the scratch INSERT opened an implicit transaction; do not leave it pinning a WAL snapshot
     return out
 
 
@@ -587,7 +684,11 @@ def render_dossier(d: Dict[str, Any]) -> str:
         lines.append(f"  {pm[0]['month']} .. {pm[-1]['month']}   {d['sparkline']}   (max {max(s['papers'] for s in pm)}/month)")
     t = d.get("trend") or {}
     chg = f" ({t['change_pct']:+.1f}%)" if t.get("change_pct") is not None else ""
-    lines.append(f"  trend: last 30 days {t.get('recent_30d', 0)} vs prior 30 days {t.get('prior_30d', 0)}{chg}")
+    prior = f"prior 30 days {t['prior_30d']}" if t.get("prior_30d") is not None else f"prior 30 days n/a (window starts {w.get('since')})"
+    lines.append(f"  trend: last {t.get('recent_days', 30)} days {t.get('recent_30d', 0)} vs {prior}{chg}")
+    if d.get("papers_out_of_range"):
+        lines.append(f"  note: {d['papers_out_of_range']} paper(s) dated outside the window months (undated items first seen after --until, "
+                     "or malformed dates) are in the total but not in the series")
 
     recent = d.get("recent_papers") or []
     lines.append("")
@@ -621,6 +722,8 @@ def render_dossier(d: Dict[str, Any]) -> str:
         lines.append(f"Public sequencing data (SRA/ENA experiments, matched by {a.get('matched_by')}) · {a.get('experiments_total', 0)} experiments")
         if a.get("note"):
             lines.append(f"  note: {a['note']}")
+        if a.get("experiments_out_of_range"):
+            lines.append(f"  note: {a['experiments_out_of_range']} experiment(s) carry a first_public outside the window months and are in the total only")
         if a.get("per_month"):
             lines.append(f"  {a['per_month'][0]['month']} .. {a['per_month'][-1]['month']}   {a['sparkline']}   (max {max(s['experiments'] for s in a['per_month'])}/month)")
         for m in a.get("models") or []:
@@ -655,8 +758,11 @@ def ensure_watchlist_schema(store: Store) -> bool:
         store.conn.executescript(WATCHLIST_SCHEMA)
         store.conn.commit()
         return True
-    except sqlite3.OperationalError:
-        return False
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "readonly" in msg or "read-only" in msg:
+            return False
+        raise  # e.g. "database is locked" while a run is writing: not a read-only database, say so
 
 
 def watch_list(store: Store) -> List[Dict[str, Any]]:
@@ -708,78 +814,99 @@ def watch_remove(store: Store, term: str) -> bool:
     return cur.rowcount > 0
 
 
-def _substring_matches(store: Store, term: str, since: str, until: str, limit: int) -> List[Dict[str, Any]]:
-    """Exact substring search over the FTS content columns (used for CJK terms that FTS cannot tokenise)."""
-    cur = store.conn.execute(
-        "SELECT p.id, p.pub_date, p.title, p.journal, p.source, p.kind, p.url, "
-        "CASE WHEN instr(f.title, ?) > 0 THEN 'title' WHEN instr(f.abstract, ?) > 0 THEN 'abstract' "
-        "     WHEN instr(f.methods, ?) > 0 THEN 'methods' ELSE 'body' END AS section "
+_ITEM_COLS = "p.id, p.pub_date, p.title, p.journal, p.source, p.kind, p.url"
+
+
+def _substring_matches(store: Store, term: str, since: str, until: str, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+    """Exact substring search over the FTS content columns (used for CJK terms that FTS cannot tokenise).
+    Returns the newest `limit` rows and the total count in the window."""
+    where = (
         "FROM papers_fts f JOIN papers p ON p.id = f.id "
-        f"WHERE (instr(f.title, ?) > 0 OR instr(f.abstract, ?) > 0 OR instr(f.methods, ?) > 0 OR instr(f.body, ?) > 0) AND {_WINDOW} "
-        f"ORDER BY ({_EFFECTIVE_DATE}) DESC LIMIT ?",
-        (term, term, term, term, term, term, term, since, until, since, limit),
+        f"WHERE (instr(f.title, ?) > 0 OR instr(f.abstract, ?) > 0 OR instr(f.methods, ?) > 0 OR instr(f.body, ?) > 0) AND {_WINDOW}"
+    )
+    params = (term, term, term, term, since, until, since)
+    total = store.conn.execute(f"SELECT COUNT(*) {where}", params).fetchone()[0]
+    cur = store.conn.execute(
+        f"SELECT {_ITEM_COLS}, CASE WHEN instr(f.title, ?) > 0 THEN 'title' WHEN instr(f.abstract, ?) > 0 THEN 'abstract' "
+        f"WHEN instr(f.methods, ?) > 0 THEN 'methods' ELSE 'body' END AS section {where} ORDER BY ({_EFFECTIVE_DATE}) DESC LIMIT ?",
+        (term, term, term, *params, limit),
     )
     rows = _rows(cur)
     for r in rows:
         r["snippet"] = f"substring match in {r.pop('section')}"
-    return rows
+    return rows, total
 
 
-def _fts_matches(store: Store, term: str, since: str, until: str, limit: int) -> List[Dict[str, Any]]:
+def _fts_matches(store: Store, term: str, since: str, until: str, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+    """Newest `limit` papers in the window matching an FTS5 query, plus the total count (not capped by `limit`).
+    Text that is not valid FTS5 syntax falls back to a phrase query, exactly as Store.search does."""
     if CJK_RE.search(term):
         return _substring_matches(store, term, since, until, limit)
-    rows = store.search(term, since=since, limit=limit * 3)
-    rows = [r for r in rows if not r.get("pub_date") or r["pub_date"] <= until]
-    rows.sort(key=lambda r: r.get("pub_date") or "9999", reverse=True)
-    return rows[:limit]
+    sql_from = f"FROM papers_fts JOIN papers p ON p.id = papers_fts.id WHERE papers_fts MATCH ? AND {_WINDOW}"
+    select = f"SELECT {_ITEM_COLS}, snippet(papers_fts, -1, '[', ']', ' … ', 18) AS snippet {sql_from} ORDER BY ({_EFFECTIVE_DATE}) DESC LIMIT ?"
+
+    def run(fts_query: str) -> Tuple[List[Dict[str, Any]], int]:
+        params = (fts_query, since, until, since)
+        total = store.conn.execute(f"SELECT COUNT(*) {sql_from}", params).fetchone()[0]
+        return _rows(store.conn.execute(select, (*params, limit))), total
+
+    try:
+        return run(term)
+    except sqlite3.OperationalError:
+        return run('"' + term.replace('"', " ") + '"')
 
 
-def _entity_matches(store: Store, kind: str, entity_id: str, since: str, until: str, limit: int) -> List[Dict[str, Any]]:
+def _entity_matches(store: Store, kind: str, entity_id: str, since: str, until: str, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+    where = f"FROM mentions m JOIN papers p ON p.id = m.paper_id WHERE m.kind = ? AND m.entity_id = ? AND {_WINDOW}"
+    params = (kind, entity_id, since, until, since)
+    total = store.conn.execute(f"SELECT COUNT(DISTINCT p.id) {where}", params).fetchone()[0]
     rows = _rows(store.conn.execute(
-        "SELECT p.id, p.pub_date, p.title, p.journal, p.source, p.kind, p.url, GROUP_CONCAT(DISTINCT m.section) AS sections, MIN(m.snippet) AS snippet "
-        f"FROM mentions m JOIN papers p ON p.id = m.paper_id WHERE m.kind = ? AND m.entity_id = ? AND {_WINDOW} "
-        f"GROUP BY p.id ORDER BY ({_EFFECTIVE_DATE}) DESC LIMIT ?",
-        (kind, entity_id, since, until, since, limit)))
-    return rows
+        f"SELECT {_ITEM_COLS}, GROUP_CONCAT(DISTINCT m.section) AS sections, MIN(m.snippet) AS snippet {where} "
+        f"GROUP BY p.id ORDER BY ({_EFFECTIVE_DATE}) DESC LIMIT ?", (*params, limit)))
+    return rows, total
 
 
 def watch_run(store: Store, since: str, until: Optional[str] = None, limit: int = 20, instruments: Optional[Gazetteer] = None,
               companies: Optional[Gazetteer] = None, subgroups: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Evaluate every watchlist term over [since, until] and return the matches per term."""
+    """Evaluate every watchlist term over [since, until]. Per term: `matches` is the full count in the window,
+    `items` the newest `limit` of them (`shown` = len(items))."""
     until = until or _today()
     report: Dict[str, Any] = {"since": since, "until": until, "terms": [], "total_matches": 0}
     for row in watch_list(store):
         term, kind = row["term"], row["kind"]
-        entry: Dict[str, Any] = {"term": term, "kind": kind, "added_at": row["added_at"], "matches": 0, "items": []}
+        entry: Dict[str, Any] = {"term": term, "kind": kind, "added_at": row["added_at"], "matches": 0, "shown": 0, "items": []}
+        total = 0
         try:
             if kind == "entity":
                 res = resolve(store, term, instruments, companies, subgroups)
                 if res.kind in ENTITY_KINDS:
                     entry["resolved"] = {"kind": res.kind, "id": res.entity_id, "name": res.name}
-                    entry["items"] = _entity_matches(store, res.kind, res.entity_id, since, until, limit)
+                    entry["items"], total = _entity_matches(store, res.kind, res.entity_id, since, until, limit)
                 else:
                     entry["note"] = "entity id not found in gazetteers or mentions; searched as free text"
-                    entry["items"] = _fts_matches(store, term, since, until, limit)
+                    entry["items"], total = _fts_matches(store, term, since, until, limit)
             elif kind == "author":
                 res = resolve(store, term, instruments, companies, subgroups)
                 if res.kind != "person":
                     res = Resolution(query=term, kind="person", name=term, matched_by="authors", identity={"hit_names": []})
                 found = _person_papers(store, res, since, until)
-                items = []
+                total = len(found)
+                items: List[Dict[str, Any]] = []
                 for chunk in _chunks(list(found)):
                     marks = ",".join("?" for _ in chunk)
                     items += _rows(store.conn.execute(
-                        f"SELECT p.id, p.pub_date, p.title, p.journal, p.source, p.kind, p.url FROM papers p WHERE p.id IN ({marks})", tuple(chunk)))
+                        f"SELECT {_ITEM_COLS}, ({_EFFECTIVE_DATE}) AS effective_date FROM papers p WHERE p.id IN ({marks})", tuple(chunk)))
+                items.sort(key=lambda r: (r.pop("effective_date", "") or "", r["id"]), reverse=True)
                 for it in items:
                     it["snippet"] = f"author: {found.get(it['id'], '')}"
-                items.sort(key=lambda r: r.get("pub_date") or "9999", reverse=True)
                 entry["items"] = items[:limit]
             else:
-                entry["items"] = _fts_matches(store, term, since, until, limit)
+                entry["items"], total = _fts_matches(store, term, since, until, limit)
         except sqlite3.OperationalError as exc:
             entry["error"] = str(exc)
-        entry["matches"] = len(entry["items"])
-        report["total_matches"] += entry["matches"]
+        entry["matches"] = total
+        entry["shown"] = len(entry["items"])
+        report["total_matches"] += total
         report["terms"].append(entry)
     return report
 
@@ -794,7 +921,9 @@ def render_watch_report(rep: Dict[str, Any]) -> str:
             label += f" -> {t['resolved']['id']}"
         label += ")"
         lines.append("")
-        lines.append(f"## {label}: {t['matches']} matches" + (f"  [{t['error']}]" if t.get("error") else ""))
+        shown = t.get("shown", len(t.get("items") or []))
+        more = f" (showing {shown})" if shown < t["matches"] else ""
+        lines.append(f"## {label}: {t['matches']} matches{more}" + (f"  [{t['error']}]" if t.get("error") else ""))
         if t.get("note"):
             lines.append(f"  note: {t['note']}")
         for it in t.get("items") or []:
