@@ -1,0 +1,205 @@
+# Journals pulled weekly by ISSN (Crossref + Europe PMC + OpenAlex) and/or RSS table of contents.
+# tier: A = must-read for life-science tools / dx / biotech innovation; B = important; C = monitor.
+# Personal subscriptions are for READING the items the digest links to; the pipeline never logs in.
+journals:
+  - name: Nature
+    publisher: Springer Nature
+    issn: ["0028-0836", "1476-4687"]
+    tier: A
+    rss: https://www.nature.com/nature.rss
+  - name: Nature Methods
+    publisher: Springer Nature
+    issn: ["1548-7091", "1548-7105"]
+    tier: A
+    rss: https://www.nature.com/nmeth.rss
+  - name: Nature Biotechnology
+    publisher: Springer Nature
+    issn: ["1087-0156", "1546-1696"]
+    tier: A
+    rss: https://www.nature.com/nbt.rss
+  - name: Nature Genetics
+    publisher: Springer Nature
+    issn: ["1061-4036", "1546-1718"]
+    tier: A
+    rss: https://www.nature.com/ng.rss
+  - name: Nature Medicine
+    publisher: Springer Nature
+    issn: ["1078-8956", "1546-170X"]
+    tier: A
+    rss: https://www.nature.com/nm.rss
+  - name: Nature Communications
+    publisher: Springer Nature
+    issn: ["2041-1723"]
+    tier: B
+    rss: https://www.nature.com/ncomms.rss
+  - name: Nature Cancer
+    publisher: Springer Nature
+    issn: ["2662-1347"]
+    tier: B
+    rss: https://www.nature.com/natcancer.rss
+  - name: Nature Reviews Genetics
+    publisher: Springer Nature
+    issn: ["1471-0056", "1471-0064"]
+    tier: C
+    rss: https://www.nature.com/nrg.rss
+  - name: Science
+    publisher: AAAS
+    issn: ["0036-8075", "1095-9203"]
+    tier: A
+    rss: https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science
+  - name: Science Translational Medicine
+    publisher: AAAS
+    issn: ["1946-6234", "1946-6242"]
+    tier: B
+    rss: https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=stm
+  - name: Science Advances
+    publisher: AAAS
+    issn: ["2375-2548"]
+    tier: B
+    rss: https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=sciadv
+  - name: Cell
+    publisher: Cell Press (Elsevier)
+    issn: ["0092-8674", "1097-4172"]
+    tier: A
+    rss: https://www.cell.com/cell/current.rss
+  - name: Cancer Cell
+    publisher: Cell Press (Elsevier)
+    issn: ["1535-6108", "1878-3686"]
+    tier: B
+    rss: https://www.cell.com/cancer-cell/current.rss
+  - name: Cell Systems
+    publisher: Cell Press (Elsevier)
+    issn: ["2405-4712", "2405-4720"]
+    tier: B
+    rss: https://www.cell.com/cell-systems/current.rss
+  - name: Cell Genomics
+    publisher: Cell Press (Elsevier)
+    issn: ["2666-979X"]
+    tier: B
+    rss: https://www.cell.com/cell-genomics/current.rss
+  - name: Molecular Cell
+    publisher: Cell Press (Elsevier)
+    issn: ["1097-2765", "1097-4164"]
+    tier: B
+    rss: https://www.cell.com/molecular-cell/current.rss
+  - name: Cell Reports Methods
+    publisher: Cell Press (Elsevier)
+    issn: ["2667-2375"]
+    tier: B
+    rss: https://www.cell.com/cell-reports-methods/current.rss
+  - name: Cell Stem Cell
+    publisher: Cell Press (Elsevier)
+    issn: ["1934-5909", "1875-9777"]
+    tier: C
+    rss: https://www.cell.com/cell-stem-cell/current.rss
+  - name: New England Journal of Medicine
+    publisher: Massachusetts Medical Society
+    issn: ["0028-4793", "1533-4406"]
+    tier: A
+    rss: https://www.nejm.org/action/showFeed?jc=nejm&type=etoc&feed=rss
+  - name: The Lancet
+    publisher: Elsevier
+    issn: ["0140-6736", "1474-547X"]
+    tier: B
+    rss: https://www.thelancet.com/rssfeed/lancet_current.xml
+  - name: The Lancet Oncology
+    publisher: Elsevier
+    issn: ["1470-2045", "1474-5488"]
+    tier: B
+    rss: https://www.thelancet.com/rssfeed/lanonc_current.xml
+  - name: JAMA
+    publisher: American Medical Association
+    issn: ["0098-7484", "1538-3598"]
+    tier: B
+    rss: https://jamanetwork.com/rss/site_3/67.xml
+  - name: Genome Biology
+    publisher: BMC (Springer Nature), open access
+    issn: ["1474-760X"]
+    tier: A
+    rss: https://genomebiology.biomedcentral.com/articles/most-recent/rss.xml
+  - name: Genome Research
+    publisher: Cold Spring Harbor Laboratory Press
+    issn: ["1088-9051", "1549-5469"]
+    tier: B
+    rss: https://genome.cshlp.org/rss/current.xml
+  - name: Nucleic Acids Research
+    publisher: Oxford University Press, open access
+    issn: ["0305-1048", "1362-4962"]
+    tier: B
+    rss: https://academic.oup.com/rss/site_5127/3091.xml
+  - name: eLife
+    publisher: eLife Sciences, open access
+    issn: ["2050-084X"]
+    tier: B
+    rss: https://elifesciences.org/rss/recent.xml
+  - name: PNAS
+    publisher: National Academy of Sciences
+    issn: ["0027-8424", "1091-6490"]
+    tier: B
+    rss: https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas
+  - name: PLOS Biology
+    publisher: PLOS, open access
+    issn: ["1544-9173", "1545-7885"]
+    tier: C
+    rss: https://journals.plos.org/plosbiology/feed/atom
+  - name: Cancer Discovery
+    publisher: AACR
+    issn: ["2159-8274", "2159-8290"]
+    tier: B
+    rss: https://aacrjournals.org/rss/site_1000003/1000003.xml
+  - name: Clinical Cancer Research
+    publisher: AACR
+    issn: ["1078-0432", "1557-3265"]
+    tier: B
+    rss: https://aacrjournals.org/rss/site_1000006/1000006.xml
+  - name: Journal of Clinical Oncology
+    publisher: ASCO
+    issn: ["0732-183X", "1527-7755"]
+    tier: B
+    rss: https://ascopubs.org/action/showFeed?type=etoc&feed=rss&jc=jco
+  - name: Annals of Oncology
+    publisher: Elsevier (ESMO)
+    issn: ["0923-7534", "1569-8041"]
+    tier: C
+    rss: https://www.annalsofoncology.org/current.rss
+  - name: Blood
+    publisher: American Society of Hematology
+    issn: ["0006-4971", "1528-0020"]
+    tier: C
+    rss: https://ashpublications.org/rss/site_1000001/1000001.xml
+  - name: Journal of Molecular Diagnostics
+    publisher: Elsevier (AMP)
+    issn: ["1525-1578", "1943-7811"]
+    tier: B
+    rss: https://www.jmdjournal.org/current.rss
+  - name: Clinical Chemistry
+    publisher: Oxford University Press (ADLM)
+    issn: ["0009-9147", "1530-8561"]
+    tier: B
+    rss: https://academic.oup.com/rss/site_6421/4051.xml
+  - name: Nature Reviews Drug Discovery
+    publisher: Springer Nature
+    issn: ["1474-1776", "1474-1784"]
+    tier: C
+    rss: https://www.nature.com/nrd.rss
+  - name: Trends in Biotechnology
+    publisher: Cell Press (Elsevier)
+    issn: ["0167-7799", "1879-3096"]
+    tier: C
+    rss: https://www.cell.com/trends/biotechnology/current.rss
+
+# Publisher subject feeds (cross-journal). Items dedupe against the ISSN pulls by DOI.
+subject_feeds:
+  - {name: "Nature portfolio: genomics", url: "https://www.nature.com/subjects/genomics.rss"}
+  - {name: "Nature portfolio: DNA sequencing", url: "https://www.nature.com/subjects/dna-sequencing.rss"}
+  - {name: "Nature portfolio: next-generation sequencing", url: "https://www.nature.com/subjects/next-generation-sequencing.rss"}
+  - {name: "Nature portfolio: transcriptomics", url: "https://www.nature.com/subjects/transcriptomics.rss"}
+  - {name: "Nature portfolio: proteomics", url: "https://www.nature.com/subjects/proteomics.rss"}
+  - {name: "Nature portfolio: biotechnology", url: "https://www.nature.com/subjects/biotechnology.rss"}
+  - {name: "Nature portfolio: cancer genomics", url: "https://www.nature.com/subjects/cancer-genomics.rss"}
+  - {name: "Nature portfolio: CRISPR-Cas9 genome editing", url: "https://www.nature.com/subjects/crispr-cas9-genome-editing.rss"}
+  - {name: "Nature portfolio: cryoelectron microscopy", url: "https://www.nature.com/subjects/cryoelectron-microscopy.rss"}
+  - {name: "Nature portfolio: synthetic biology", url: "https://www.nature.com/subjects/synthetic-biology.rss"}
+  - {name: "Nature portfolio: machine learning", url: "https://www.nature.com/subjects/machine-learning.rss"}
+  - {name: "Nature portfolio: diagnostic markers", url: "https://www.nature.com/subjects/diagnostic-markers.rss"}
+  - {name: "Nature news", url: "https://www.nature.com/nature/articles?type=news.rss"}

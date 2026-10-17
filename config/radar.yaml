@@ -1,0 +1,125 @@
+# lit-radar main configuration. Everything here is safe to commit; secrets go in .env.
+
+window_days: 7          # default look-back for `litradar run`
+timezone: UTC
+
+sources:
+  biorxiv:
+    enabled: true
+    servers: [biorxiv, medrxiv]
+    # bioRxiv subject categories to keep (lower-case, as the API spells them). Empty = all.
+    categories:
+      - genomics
+      - genetics
+      - bioinformatics
+      - systems biology
+      - synthetic biology
+      - cancer biology
+      - cell biology
+      - molecular biology
+      - biochemistry
+      - bioengineering
+      - immunology
+      - microbiology
+      - pathology
+      - developmental biology
+      - neuroscience
+      - biophysics
+      - evolutionary biology
+      - plant biology
+      - pharmacology and toxicology
+    medrxiv_categories:
+      - oncology
+      - genetic and genomic medicine
+      - pathology
+      - hematology
+      - infectious diseases
+      - health informatics
+    fulltext: true          # download JATS XML to read Methods / funding / competing interests
+    fulltext_max: 600       # cap per run (each is one request; cached on disk afterwards)
+
+  europepmc:
+    enabled: true
+    journals: true          # new articles in config/journals.yaml by ISSN
+    methods_search: true    # open-access papers whose METHODS section names a gazetteer instrument
+    # only these gazetteer categories are used to PULL papers (every category is still annotated)
+    methods_search_categories: [sequencer, single_cell, spatial, proteomics, synthesis, cryo_em, array, cell_engineering]
+    coi_search: true        # open-access papers whose competing-interests / funding sections name a watched company
+    fulltext: true
+    fulltext_max: 400
+    max_records_per_query: 3000
+
+  openalex:
+    enabled: true
+    topics: true            # new works in the OpenAlex topics listed in config/subgroups.yaml
+    company_authors: true   # new works with a company-affiliated author in those topics
+    tracked_authors: true   # new works by the authors listed in config/subgroups.yaml
+    journals: true          # ISSN coverage as a Crossref/Europe PMC backstop
+    max_records_per_query: 2000
+
+  crossref:
+    enabled: true           # per-journal DOI feeds (fast, metadata only)
+
+  arxiv:
+    enabled: true
+    categories: [q-bio.GN, q-bio.QM, q-bio.BM, q-bio.MN, q-bio.CB, q-bio.TO, q-bio.SC]
+
+  sra:
+    enabled: true           # NCBI SRA census of newly public sequencing experiments and the instrument model declared
+    max_records: 150000     # a full week is ~120k experiments (~240 requests); lower this to sample
+
+  ena:
+    enabled: true           # ENA/DDBJ-submitted records (ERX/DRX) appear here before NCBI mirrors them
+    limit: 0                # 0 = all records in the window
+
+  sec:
+    enabled: true           # SEC EDGAR 8-K Atom feed for every watched company with a plain US ticker
+
+  rss:
+    enabled: true           # journal TOCs that lack ISSN coverage, trade press, press wires (config/feeds.yaml)
+
+# Free-text terms that lift a paper's score when they appear in the title/abstract.
+# Edit freely; these describe what you care about, not what the matcher knows.
+watchlist_terms:
+  - single-cell
+  - spatial transcriptomics
+  - spatial proteomics
+  - long-read
+  - telomere-to-telomere
+  - cell-free DNA
+  - ctDNA
+  - minimal residual disease
+  - multi-cancer early detection
+  - proteomics
+  - perturb-seq
+  - CRISPR screen
+  - base editing
+  - prime editing
+  - foundation model
+  - protein design
+  - antibody discovery
+  - cryo-EM
+  - DNA synthesis
+  - DNA data storage
+  - methylation
+  - liquid biopsy
+  - whole-genome sequencing
+  - newborn sequencing
+  - cell atlas
+
+ranking:
+  weights: {}               # override any key from litradar/rank/heuristics.py DEFAULT_WEIGHTS
+  llm:
+    enabled: false          # or pass --llm on the command line
+    min_heuristic: 3.0      # only papers at/above this heuristic score are sent to the model
+    max_items: 300
+    use_batch: true
+    llm_weight: 0.6         # final = 0.4 * heuristic + 0.6 * llm composite
+
+digest:
+  top_n: 25
+  instruments_table_n: 40
+  companies_table_n: 40
+  archive_table_n: 30
+  news_n: 40
+  title: "Science literature radar"

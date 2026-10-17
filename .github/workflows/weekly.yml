@@ -1,0 +1,78 @@
+# Runs the radar every Monday, commits the digest into digests/, and (optionally) e-mails it.
+# Fork this repo, add your keys under Settings -> Secrets and variables -> Actions, and it just runs.
+# Notes: GitHub may delay or skip scheduled runs on busy mornings, and disables schedules on repos
+# with no activity for 60 days; the workflow_dispatch trigger lets you run it by hand any time.
+name: weekly-digest
+on:
+  schedule:
+    - cron: "15 11 * * 1"   # Mondays 11:15 UTC
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "look-back window in days"
+        default: "7"
+      llm:
+        description: "score the shortlist with Claude (needs ANTHROPIC_API_KEY secret)"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: weekly-digest
+  cancel-in-progress: false
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      LITRADAR_CONTACT_EMAIL: ${{ secrets.LITRADAR_CONTACT_EMAIL }}
+      NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+      OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+      SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LITRADAR_LLM_MODEL: ${{ vars.LITRADAR_LLM_MODEL }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+      DIGEST_TO: ${{ secrets.DIGEST_TO }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      LITRADAR_DB: data/radar.sqlite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[llm]" markdown
+      - name: Restore database from the previous run
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/radar.sqlite
+            .cache
+          key: radar-db-${{ github.run_id }}
+          restore-keys: radar-db-
+      - name: Run the radar
+        run: |
+          FLAGS="--days ${{ github.event.inputs.days || '7' }}"
+          if [ "${{ github.event.inputs.llm }}" = "true" ] && [ -n "$ANTHROPIC_API_KEY" ]; then FLAGS="$FLAGS --llm"; fi
+          if [ -n "$SMTP_HOST" ]; then FLAGS="$FLAGS --email"; fi
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then FLAGS="$FLAGS --slack"; fi
+          python -m litradar run $FLAGS
+      - name: Save database for next week
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            data/radar.sqlite
+            .cache
+          key: radar-db-${{ github.run_id }}
+      - name: Commit the digest
+        run: |
+          git config user.name "lit-radar bot"
+          git config user.email "lit-radar-bot@users.noreply.github.com"
+          git add digests/*.md
+          git diff --cached --quiet || git commit -m "digest: $(date -u +%F)"
+          git push

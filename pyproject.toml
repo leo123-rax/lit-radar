@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lit-radar"
+version = "0.1.0"
+description = "Weekly science-literature radar: new papers, the instruments named in their Methods, the researchers behind them, and the companies they touch."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "lit-radar contributors" }]
+keywords = ["bibliometrics", "biorxiv", "europe-pmc", "openalex", "life-science-tools", "digest"]
+dependencies = [
+  "requests>=2.28",
+  "PyYAML>=6.0",
+  "lxml>=4.9",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.60"]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+litradar = "litradar.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["litradar*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "UP006", "UP007", "UP035", "UP045"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

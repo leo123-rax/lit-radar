@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns:xlink="http://www.w3.org/1999/xlink" article-type="research-article">
+  <front>
+    <article-meta>
+      <title-group><article-title>Spatial profiling of tumours with a multiplexed assay</article-title></title-group>
+      <contrib-group>
+        <contrib contrib-type="author"><contrib-id contrib-id-type="orcid">https://orcid.org/0000-0001-2345-6789</contrib-id><name><surname>Doe</surname><given-names>Jane</given-names></name><xref ref-type="aff" rid="a1"/><email>jane.doe@10xgenomics.com</email></contrib>
+        <contrib contrib-type="author"><name><surname>Roe</surname><given-names>Richard</given-names></name><xref ref-type="aff" rid="a2"/></contrib>
+      </contrib-group>
+      <aff id="a1"><label>1</label>10x Genomics, Pleasanton, CA, USA</aff>
+      <aff id="a2"><label>2</label>Department of Genetics, Example University, Boston, MA, USA</aff>
+      <funding-group><award-group><funding-source>National Institutes of Health</funding-source><award-id>R01HG000001</award-id></award-group></funding-group>
+      <author-notes><fn fn-type="conflict"><p>J.D. is an employee of 10x Genomics. R.R. has received research support from Illumina.</p></fn></author-notes>
+    </article-meta>
+  </front>
+  <body>
+    <sec id="s1"><title>Introduction</title><p>Spatial methods are growing.</p></sec>
+    <sec id="s2" sec-type="methods"><title>Materials and Methods</title>
+      <sec id="s2a"><title>Library preparation and sequencing</title><p>Libraries were prepared with the Chromium Next GEM Single Cell 3' v3.1 kit (10x Genomics) and sequenced on a NovaSeq X Plus (Illumina). Spatial data were generated with Xenium In Situ. Chromium was quantified separately as a metal control.</p></sec>
+      <sec id="s2b"><title>Proteomics</title><p>Peptides were analysed on an Orbitrap Astral mass spectrometer coupled to an Evosep One. The G4 quadruplex assay was not used.</p></sec>
+    </sec>
+    <sec id="s3"><title>Results</title><p>We found things.</p></sec>
+    <sec id="s4"><title>Data availability</title><p>Sequencing data are in GEO under GSE000001.</p></sec>
+  </body>
+  <back>
+    <ack><title>Acknowledgements</title><p>We thank Twist Bioscience for probe synthesis.</p></ack>
+  </back>
+</article>

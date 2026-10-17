@@ -1,0 +1,127 @@
+# Researcher subgroups. Each subgroup carries:
+#   openalex_topics   OpenAlex topic ids (T...) used to pull new works and to assign papers to the subgroup.
+#   keywords          free-text terms used when no topic id is available and for assigning papers.
+#   tracked_authors   people whose new papers / preprints you want flagged. Match by OpenAlex author id
+#                     (preferred, unambiguous) or by exact display name.
+# The illustrative seed list below names well-known public researchers in each field. Edit freely.
+subgroups:
+  - id: single_cell
+    name: Single-cell genomics
+    openalex_topics: []
+    keywords: ["single-cell RNA", "scRNA-seq", "single-nucleus", "snRNA-seq", "single-cell multiome", "scATAC", "CITE-seq", "single cell atlas", "cell atlas"]
+    tracked_authors:
+      - {name: "Aviv Regev", openalex_id: "", institution: "Genentech"}
+      - {name: "Sarah A. Teichmann", openalex_id: "", institution: "University of Cambridge"}
+      - {name: "Rahul Satija", openalex_id: "", institution: "New York Genome Center"}
+      - {name: "Fabian J. Theis", openalex_id: "", institution: "Helmholtz Munich"}
+      - {name: "Jay Shendure", openalex_id: "", institution: "University of Washington"}
+      - {name: "Dana Pe'er", openalex_id: "", institution: "Memorial Sloan Kettering"}
+      - {name: "Alexander van Oudenaarden", openalex_id: "", institution: "Hubrecht Institute"}
+      - {name: "Rickard Sandberg", openalex_id: "", institution: "Karolinska Institutet"}
+  - id: spatial
+    name: Spatial biology
+    openalex_topics: []
+    keywords: ["spatial transcriptomics", "spatial proteomics", "in situ sequencing", "multiplexed imaging", "spatial omics", "MERFISH", "imaging mass cytometry", "Visium", "Xenium", "CosMx"]
+    tracked_authors:
+      - {name: "Xiaowei Zhuang", openalex_id: "", institution: "Harvard University"}
+      - {name: "Fei Chen", openalex_id: "", institution: "Broad Institute"}
+      - {name: "Evan Z. Macosko", openalex_id: "", institution: "Broad Institute"}
+      - {name: "Joakim Lundeberg", openalex_id: "", institution: "KTH Royal Institute of Technology"}
+      - {name: "Garry P. Nolan", openalex_id: "", institution: "Stanford University"}
+      - {name: "Long Cai", openalex_id: "", institution: "Caltech"}
+      - {name: "Bernd Bodenmiller", openalex_id: "", institution: "University of Zurich"}
+      - {name: "Rong Fan", openalex_id: "", institution: "Yale University"}
+  - id: long_read
+    name: Long-read sequencing & genome assembly
+    openalex_topics: []
+    keywords: ["long-read sequencing", "nanopore sequencing", "HiFi", "telomere-to-telomere", "pangenome", "structural variant", "genome assembly", "methylation calling"]
+    tracked_authors:
+      - {name: "Adam M. Phillippy", openalex_id: "", institution: "NHGRI"}
+      - {name: "Karen H. Miga", openalex_id: "", institution: "UC Santa Cruz"}
+      - {name: "Evan E. Eichler", openalex_id: "", institution: "University of Washington"}
+      - {name: "Benedict Paten", openalex_id: "", institution: "UC Santa Cruz"}
+      - {name: "Michael C. Schatz", openalex_id: "", institution: "Johns Hopkins University"}
+      - {name: "Fritz J. Sedlazeck", openalex_id: "", institution: "Baylor College of Medicine"}
+      - {name: "Winston Timp", openalex_id: "", institution: "Johns Hopkins University"}
+  - id: proteomics
+    name: Proteomics
+    openalex_topics: []
+    keywords: ["proteomics", "mass spectrometry-based", "plasma proteome", "proteogenomic", "single-cell proteomics", "affinity proteomics", "Olink", "SomaScan", "data-independent acquisition"]
+    tracked_authors:
+      - {name: "Matthias Mann", openalex_id: "", institution: "Max Planck Institute of Biochemistry"}
+      - {name: "Ruedi Aebersold", openalex_id: "", institution: "ETH Zurich"}
+      - {name: "Nikolai Slavov", openalex_id: "", institution: "Northeastern University"}
+      - {name: "Steven A. Carr", openalex_id: "", institution: "Broad Institute"}
+      - {name: "Bernhard Küster", openalex_id: "", institution: "Technical University of Munich"}
+      - {name: "Michael J. MacCoss", openalex_id: "", institution: "University of Washington"}
+      - {name: "Jesper V. Olsen", openalex_id: "", institution: "University of Copenhagen"}
+      - {name: "Claudia Langenberg", openalex_id: "", institution: "Queen Mary University of London"}
+  - id: liquid_biopsy
+    name: Liquid biopsy, MRD & early detection
+    openalex_topics: []
+    keywords: ["cell-free DNA", "circulating tumor DNA", "ctDNA", "minimal residual disease", "molecular residual disease", "multi-cancer early detection", "liquid biopsy", "fragmentomics", "cfDNA methylation"]
+    tracked_authors:
+      - {name: "Victor E. Velculescu", openalex_id: "", institution: "Johns Hopkins University"}
+      - {name: "Nitzan Rosenfeld", openalex_id: "", institution: "University of Cambridge"}
+      - {name: "Maximilian Diehn", openalex_id: "", institution: "Stanford University"}
+      - {name: "Ash A. Alizadeh", openalex_id: "", institution: "Stanford University"}
+      - {name: "Charles Swanton", openalex_id: "", institution: "Francis Crick Institute"}
+      - {name: "Daniel De Carvalho", openalex_id: "", institution: "Princess Margaret Cancer Centre"}
+      - {name: "Luis A. Diaz", openalex_id: "", institution: "Memorial Sloan Kettering"}
+      - {name: "Bert Vogelstein", openalex_id: "", institution: "Johns Hopkins University"}
+  - id: perturbation
+    name: Functional genomics & perturbation screens
+    openalex_topics: []
+    keywords: ["Perturb-seq", "CRISPR screen", "genome-wide screen", "CRISPRi", "CRISPRa", "base editor screen", "pooled screen", "massively parallel reporter"]
+    tracked_authors:
+      - {name: "Jonathan S. Weissman", openalex_id: "", institution: "Whitehead Institute / MIT"}
+      - {name: "Feng Zhang", openalex_id: "", institution: "Broad Institute"}
+      - {name: "David R. Liu", openalex_id: "", institution: "Broad Institute"}
+      - {name: "Jennifer A. Doudna", openalex_id: "", institution: "UC Berkeley"}
+      - {name: "John G. Doench", openalex_id: "", institution: "Broad Institute"}
+      - {name: "Thomas M. Norman", openalex_id: "", institution: "Memorial Sloan Kettering"}
+      - {name: "Luke A. Gilbert", openalex_id: "", institution: "Arc Institute"}
+  - id: ai_bio
+    name: AI for biology & protein design
+    openalex_topics: []
+    keywords: ["protein language model", "foundation model", "protein design", "diffusion model", "structure prediction", "AlphaFold", "virtual cell", "genomic language model", "de novo design", "deep learning"]
+    tracked_authors:
+      - {name: "David Baker", openalex_id: "", institution: "University of Washington"}
+      - {name: "John Jumper", openalex_id: "", institution: "Google DeepMind"}
+      - {name: "Alexander Rives", openalex_id: "", institution: "EvolutionaryScale"}
+      - {name: "Patrick D. Hsu", openalex_id: "", institution: "Arc Institute"}
+      - {name: "Brian L. Hie", openalex_id: "", institution: "Stanford / Arc Institute"}
+      - {name: "Mohammed AlQuraishi", openalex_id: "", institution: "Columbia University"}
+      - {name: "Regina Barzilay", openalex_id: "", institution: "MIT"}
+      - {name: "Bo Wang", openalex_id: "", institution: "University of Toronto"}
+  - id: gene_editing
+    name: Gene editing & delivery
+    openalex_topics: []
+    keywords: ["base editing", "prime editing", "in vivo gene editing", "lipid nanoparticle", "AAV capsid", "epigenome editing", "gene therapy", "CRISPR-Cas"]
+    tracked_authors:
+      - {name: "David R. Liu", openalex_id: "", institution: "Broad Institute"}
+      - {name: "Kiran Musunuru", openalex_id: "", institution: "University of Pennsylvania"}
+      - {name: "Omar O. Abudayyeh", openalex_id: "", institution: "Harvard Medical School"}
+      - {name: "Jonathan S. Gootenberg", openalex_id: "", institution: "Harvard Medical School"}
+      - {name: "Daniel G. Anderson", openalex_id: "", institution: "MIT"}
+      - {name: "Samuel H. Sternberg", openalex_id: "", institution: "Columbia University"}
+  - id: structural_biology
+    name: Structural biology & cryo-EM
+    openalex_topics: []
+    keywords: ["cryo-EM", "cryo-electron microscopy", "cryo-electron tomography", "cryo-ET", "single-particle analysis", "subtomogram averaging"]
+    tracked_authors:
+      - {name: "Sjors H. W. Scheres", openalex_id: "", institution: "MRC Laboratory of Molecular Biology"}
+      - {name: "Yifan Cheng", openalex_id: "", institution: "UCSF"}
+      - {name: "Bridget Carragher", openalex_id: "", institution: "Chan Zuckerberg Imaging Institute"}
+      - {name: "Wolfgang Baumeister", openalex_id: "", institution: "Max Planck Institute of Biochemistry"}
+      - {name: "Julia Mahamid", openalex_id: "", institution: "EMBL Heidelberg"}
+  - id: synthetic_biology
+    name: Synthetic biology & DNA synthesis
+    openalex_topics: []
+    keywords: ["DNA synthesis", "gene synthesis", "DNA data storage", "cell-free expression", "genetic circuit", "synthetic genome", "biofoundry", "enzymatic DNA synthesis"]
+    tracked_authors:
+      - {name: "George M. Church", openalex_id: "", institution: "Harvard Medical School"}
+      - {name: "Jef D. Boeke", openalex_id: "", institution: "NYU Langone"}
+      - {name: "Christopher A. Voigt", openalex_id: "", institution: "MIT"}
+      - {name: "Jason Chin", openalex_id: "", institution: "MRC Laboratory of Molecular Biology"}
+      - {name: "Tom Ellis", openalex_id: "", institution: "Imperial College London"}

@@ -1,0 +1,26 @@
+# Non-journal feeds. kind: news (trade press) | press (press-release wires) | gnews (Google News query)
+# Several trade outlets and investor-relations sites block non-browser clients (HTTP 403), so their
+# headlines are pulled through Google News RSS queries instead (titles + links only). Items are matched
+# against config/companies.yaml and grouped by company in the digest. Google News queries are also
+# generated automatically for every company with watch_news: true in companies.yaml.
+feeds:
+  - {name: STAT News, kind: news, url: "https://www.statnews.com/feed/"}
+  - {name: BioPharma Dive, kind: news, url: "https://www.biopharmadive.com/feeds/news/"}
+  - {name: MedTech Dive, kind: news, url: "https://www.medtechdive.com/feeds/news/"}
+  - {name: GenomeWeb (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:genomeweb.com&hl=en-US&gl=US&ceid=US:en"}
+  - {name: 360Dx (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:360dx.com&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Endpoints News (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:endpts.com&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Fierce Biotech (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:fiercebiotech.com&hl=en-US&gl=US&ceid=US:en"}
+  - {name: The Scientist (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:the-scientist.com&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Nature news (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:nature.com/articles+news&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Science news (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:science.org/content/article&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Drug Discovery News (via Google News), kind: gnews, url: "https://news.google.com/rss/search?q=site:drugdiscoverynews.com&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Sequencing news (Google News), kind: gnews, url: "https://news.google.com/rss/search?q=%22sequencing%22+%28genomics+OR+biotech%29&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Spatial biology news (Google News), kind: gnews, url: "https://news.google.com/rss/search?q=%22spatial+biology%22+OR+%22spatial+transcriptomics%22&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Proteomics news (Google News), kind: gnews, url: "https://news.google.com/rss/search?q=proteomics+%28platform+OR+company+OR+launch%29&hl=en-US&gl=US&ceid=US:en"}
+  - {name: Liquid biopsy news (Google News), kind: gnews, url: "https://news.google.com/rss/search?q=%22liquid+biopsy%22+OR+%22minimal+residual+disease%22+OR+%22multi-cancer%22&hl=en-US&gl=US&ceid=US:en"}
+  - {name: PR Newswire biotechnology, kind: press, url: "https://www.prnewswire.com/rss/health-latest-news/biotechnology-list.rss"}
+  - {name: PR Newswire medical devices, kind: press, url: "https://www.prnewswire.com/rss/health-latest-news/medical-equipment-list.rss"}
+# SEC EDGAR 8-K Atom feeds are generated automatically for every company with a plain US ticker
+# (see sources.sec in radar.yaml); EDGAR requires the contact e-mail in the User-Agent, which the
+# HTTP client sends when LITRADAR_CONTACT_EMAIL is set.
