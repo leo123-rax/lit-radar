@@ -28,6 +28,7 @@ DEFAULT_MIN_INTERVAL = {
     "api.crossref.org": 0.2,
     "www.ebi.ac.uk": 0.2,
     "api.semanticscholar.org": 1.0,  # 1 req/s without a key
+    "clinicaltrials.gov": 1.25,  # API v2 asks for ~50 requests/minute per IP; 1.25 s is ~48/min
 }
 
 
