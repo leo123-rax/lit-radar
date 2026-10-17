@@ -116,12 +116,12 @@ journals:
     publisher: BMC (Springer Nature), open access
     issn: ["1474-760X"]
     tier: A
-    rss: https://genomebiology.biomedcentral.com/articles/most-recent/rss.xml
+    rss: ""   # BMC serves a bot-check page; covered by ISSN pulls
   - name: Genome Research
     publisher: Cold Spring Harbor Laboratory Press
     issn: ["1088-9051", "1549-5469"]
     tier: B
-    rss: https://genome.cshlp.org/rss/current.xml
+    rss: ""   # CSHL rate-limits scripted clients (429); covered by ISSN pulls
   - name: Nucleic Acids Research
     publisher: Oxford University Press, open access
     issn: ["0305-1048", "1362-4962"]
@@ -146,12 +146,12 @@ journals:
     publisher: AACR
     issn: ["2159-8274", "2159-8290"]
     tier: B
-    rss: https://aacrjournals.org/rss/site_1000003/1000003.xml
+    rss: ""   # AACR RSS returns 404; covered by ISSN pulls
   - name: Clinical Cancer Research
     publisher: AACR
     issn: ["1078-0432", "1557-3265"]
     tier: B
-    rss: https://aacrjournals.org/rss/site_1000006/1000006.xml
+    rss: ""   # AACR RSS returns 404; covered by ISSN pulls
   - name: Journal of Clinical Oncology
     publisher: ASCO
     issn: ["0732-183X", "1527-7755"]
@@ -166,7 +166,7 @@ journals:
     publisher: American Society of Hematology
     issn: ["0006-4971", "1528-0020"]
     tier: C
-    rss: https://ashpublications.org/rss/site_1000001/1000001.xml
+    rss: ""   # ASH RSS returns 404; covered by ISSN pulls
   - name: Journal of Molecular Diagnostics
     publisher: Elsevier (AMP)
     issn: ["1525-1578", "1943-7811"]
@@ -176,7 +176,7 @@ journals:
     publisher: Oxford University Press (ADLM)
     issn: ["0009-9147", "1530-8561"]
     tier: B
-    rss: https://academic.oup.com/rss/site_6421/4051.xml
+    rss: ""   # OUP feed id unknown; covered by ISSN pulls
   - name: Nature Reviews Drug Discovery
     publisher: Springer Nature
     issn: ["1474-1776", "1474-1784"]
@@ -197,9 +197,8 @@ subject_feeds:
   - {name: "Nature portfolio: proteomics", url: "https://www.nature.com/subjects/proteomics.rss"}
   - {name: "Nature portfolio: biotechnology", url: "https://www.nature.com/subjects/biotechnology.rss"}
   - {name: "Nature portfolio: cancer genomics", url: "https://www.nature.com/subjects/cancer-genomics.rss"}
-  - {name: "Nature portfolio: CRISPR-Cas9 genome editing", url: "https://www.nature.com/subjects/crispr-cas9-genome-editing.rss"}
+  - {name: "Nature portfolio: genetic engineering", url: "https://www.nature.com/subjects/genetic-engineering.rss"}
   - {name: "Nature portfolio: cryoelectron microscopy", url: "https://www.nature.com/subjects/cryoelectron-microscopy.rss"}
   - {name: "Nature portfolio: synthetic biology", url: "https://www.nature.com/subjects/synthetic-biology.rss"}
   - {name: "Nature portfolio: machine learning", url: "https://www.nature.com/subjects/machine-learning.rss"}
   - {name: "Nature portfolio: diagnostic markers", url: "https://www.nature.com/subjects/diagnostic-markers.rss"}
-  - {name: "Nature news", url: "https://www.nature.com/nature/articles?type=news.rss"}
