@@ -289,9 +289,11 @@ class BrowserHttp(Http):
         headers: Optional[Dict[str, str]] = None,
         cache: bool = False,
         ok_statuses: tuple = (200,),
+        retries: Optional[int] = None,
+        **kwargs: Any,
     ) -> Optional[requests.Response]:
         if not self.browser.allows(url):
-            return super().get(url, params=params, headers=headers, cache=cache, ok_statuses=ok_statuses)
+            return super().get(url, params=params, headers=headers, cache=cache, ok_statuses=ok_statuses, retries=retries, **kwargs)
         full = url + (("&" if "?" in url else "?") + urlencode(params, doseq=True) if params else "")
         cpath = self._cache_path(url, params) if cache else None
         if cpath and cpath.exists():

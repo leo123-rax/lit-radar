@@ -27,11 +27,11 @@ class FakeHttp:
         self.stats["requests"] += 1
         return self.payloads.pop(0) if self.payloads else None
 
-    def get_json(self, url, params=None, cache=False):
+    def get_json(self, url, params=None, cache=False, **kwargs):
         self.calls.append(("GET", url, params))
         return self._next()
 
-    def get_text(self, url, params=None, cache=False):
+    def get_text(self, url, params=None, cache=False, **kwargs):
         self.calls.append(("GET", url, params))
         return self._next()
 
@@ -39,7 +39,7 @@ class FakeHttp:
         self.calls.append(("POST", url, json_body))
         return self._next()
 
-    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,)):
+    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,), **kwargs):
         self.calls.append(("GET", url, params))
         import requests
 

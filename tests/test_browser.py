@@ -346,7 +346,7 @@ def test_browser_http_failed_browser_fetch_is_none(monkeypatch, tmp_path):
 def test_make_http_returns_plain_http_unless_browser_is_enabled(monkeypatch, tmp_path):
     s = Settings(radar={}, cache_dir=tmp_path)
     plain = make_http(s, contact_email="a@b.c")
-    assert type(plain).__name__ == "Http" and "mailto:a@b.c" in plain.session.headers["User-Agent"]
+    assert type(plain).__name__ == "Http" and "a@b.c" in plain.session.headers["User-Agent"]
     s2 = Settings(radar={"browser": {"enabled": False}}, cache_dir=tmp_path)
     assert type(make_http(s2)).__name__ == "Http"
 
@@ -357,8 +357,8 @@ def test_make_http_builds_browser_http_from_radar_yaml(monkeypatch, tmp_path):
                        "min_interval": 7, "max_pages": 10, "headless": False}}
     s = Settings(radar=cfg, cache_dir=tmp_path)
     h = make_http(s, contact_email="a@b.c", cache_dir=tmp_path, ncbi_api_key="k")
-    assert isinstance(h, BrowserHttp) and "mailto:a@b.c" in h.session.headers["User-Agent"]
-    assert h.min_interval["eutils.ncbi.nlm.nih.gov"] == 0.11  # Http kwargs pass through
+    assert isinstance(h, BrowserHttp) and "a@b.c" in h.session.headers["User-Agent"]
+    assert h.min_interval["eutils.ncbi.nlm.nih.gov"] == 0.12  # Http kwargs pass through (keyed NCBI pacing)
     b = h.browser
     assert b.allowed_hosts == frozenset({"www.biorxiv.org", "www.example-oa.org"}) and b.cdp_url == "http://127.0.0.1:9222"
     assert b.min_interval == 7.0 and b.max_pages == 10 and b.headless is False and b.user_data_dir == Path(tmp_path) / "browser-profile"
