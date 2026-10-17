@@ -28,6 +28,7 @@ DEFAULT_MIN_INTERVAL = {
     "api.crossref.org": 0.2,
     "www.ebi.ac.uk": 0.2,
     "api.semanticscholar.org": 1.0,  # 1 req/s without a key
+    "api.fda.gov": 0.25,  # openFDA: 240 req/min per IP or key; 1,000/day anonymous, 120,000/day with a free key
 }
 
 
