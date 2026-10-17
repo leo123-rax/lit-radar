@@ -61,7 +61,20 @@ class Pipeline:
     def __init__(self, settings: Settings, http: Optional[Http] = None, store: Optional[Store] = None) -> None:
         self.settings = settings
         self.cfg = settings.radar or {}
-        self.http = http or Http(contact_email=settings.contact_email, cache_dir=settings.cache_dir, ncbi_api_key=settings.ncbi_api_key)
+        if http is not None:
+            self.http = http
+        else:
+            http_kwargs = dict(contact_email=settings.contact_email, cache_dir=settings.cache_dir, ncbi_api_key=settings.ncbi_api_key)
+            try:
+                from .browser import BrowserUnavailable, make_http
+
+                try:
+                    self.http = make_http(settings, **http_kwargs)  # BrowserHttp when radar.yaml browser.enabled is true
+                except BrowserUnavailable as exc:
+                    log.warning("browser fetcher requested but unavailable (%s); using the plain HTTP client", exc)
+                    self.http = Http(**http_kwargs)
+            except ImportError:
+                self.http = Http(**http_kwargs)
         self.store = store or Store(settings.db_path)
         self.instruments = Gazetteer.from_yaml(settings.yaml("instruments"), "instrument")
         self.companies = Gazetteer.from_yaml(settings.yaml("companies"), "company")
@@ -776,6 +789,7 @@ class Pipeline:
         weights = rcfg.get("weights") or {}
         wl = self.cfg.get("watchlist_terms", [])
         llm_cfg = rcfg.get("llm") or {}
+        priorities = self.cfg.get("priorities") or {}
         shortlist: List[Dict[str, Any]] = []
         n = 0
         for p in papers:
@@ -786,6 +800,11 @@ class Pipeline:
                 {"kind": p.kind, "title": p.title, "abstract": p.abstract, "cited_by_count": p.cited_by_count, "fulltext_available": p.fulltext_available},
                 mentions, self.journal_tier(p), wl, tracked, weights,
             )
+            if priorities:
+                mult = priority_multiplier(p, mentions, p.journal, self.assign_subgroups(p), priorities=priorities)
+                if mult != 1.0:
+                    h = round(min(10.0, h * mult), 2)
+                    reasons += f"; priority x{mult:g}"
             prev = self.store.get_score(p.id)
             llm_prev = None
             if prev and prev.get("llm_json"):
@@ -909,6 +928,28 @@ class Pipeline:
         self.counts["papers.new"] = new
         return new
 
+    def post_process(self, since: str, until: str, started: str) -> None:
+        """Derived layers that read the freshly stored papers: language/country tags and company candidates.
+
+        Each is isolated so a failure never costs the run; both are idempotent and re-runnable from the CLI
+        (`litradar tag`, `litradar candidates refresh`)."""
+        try:
+            from . import i18n
+
+            rep = i18n.tag_store(self.store, updated_since=started)
+            self.counts["i18n.tagged"] = int(rep.get("tagged") or 0)
+        except Exception as exc:  # noqa: BLE001
+            self.errors.append(f"i18n: {exc}")
+            log.exception("language/country tagging failed")
+        try:
+            from . import discovery
+
+            rep = discovery.refresh(self.store, self.companies, since, until)
+            self.counts["candidates"] = int((rep or {}).get("candidates") or (rep or {}).get("total") or 0)
+        except Exception as exc:  # noqa: BLE001
+            self.errors.append(f"discovery: {exc}")
+            log.exception("company discovery failed")
+
     def run(self, since: str, until: str, use_llm: bool = False, fulltext: bool = True, only: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
@@ -932,6 +973,7 @@ class Pipeline:
             if self._enabled("semantic_scholar", only):
                 self.enrich_citations(papers, since)
             self.rank(papers, use_llm=use_llm)
+            self.post_process(since, until, started)
             report = {"since": since, "until": until, "counts": dict(self.counts), "errors": self.errors, "http": dict(getattr(self.http, "stats", {}) or {})}
             self.store.record_run(started, since, until, report)
             return report

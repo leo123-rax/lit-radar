@@ -212,8 +212,29 @@ news:
 
 digest:
   top_n: 25
+  concepts_n: 15            # emerging-concepts rows
+  candidates_n: 15          # companies spotted but not yet tracked
+  trend_weeks: 13           # baseline for the what-changed section
+  trend_top_n: 10
   instruments_table_n: 40
   companies_table_n: 40
   archive_table_n: 30
   news_n: 40
   title: "Science literature radar"
+
+# Optional real-browser fetcher for hosts that block scripted clients but serve open-licensed content
+# (bioRxiv/medRxiv full-text XML). Needs `pip install 'lit-radar[browser]'` and either a running Chrome started
+# with --remote-debugging-port=9222 or a persistent Chromium profile. See docs/browser.md and docs/LEGAL.md.
+browser:
+  enabled: false
+  cdp_url: http://localhost:9222
+  allowed_hosts: [www.biorxiv.org, www.medrxiv.org]
+  min_interval: 5          # seconds between page loads per host
+  max_pages: 150           # per run
+
+# Coverage priorities written by `litradar prioritize` (kind -> {target: weight}); 1.0 = neutral.
+priorities: {}
+
+# Name-only tracked-author matches are capped per name per run (common names); id matches are not.
+tracked_authors:
+  name_match_cap: 5

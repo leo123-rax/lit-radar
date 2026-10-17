@@ -36,10 +36,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, backfill, browser, entities, toolkit, trends
+from . import __version__, backfill, browser, entities, i18n, toolkit, trends
 from . import export as export_mod
-from . import __version__, i18n
 from .config import Settings
+from .coverage import render_coverage_markdown
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
 from .http import Http
@@ -85,7 +85,8 @@ def cmd_run(args) -> int:
     only = args.sources.split(",") if args.sources else None
     pipe = Pipeline(settings)
     report = pipe.run(since, until, use_llm=args.llm, fulltext=not args.no_fulltext, only=only)
-    out = render.render(pipe.store, since, until, settings.radar, run_report=report)
+    out = render.render(pipe.store, since, until, settings.radar, run_report=report, company_types=pipe.company_types)
+    out["markdown"] += "\n" + render_coverage_markdown(pipe.store, since, until, settings)
     out_dir = Path(args.out or settings.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     md_path = out_dir / f"{until}.md"
@@ -100,14 +101,17 @@ def cmd_run(args) -> int:
         top = out["summary"]["top"][:10]
         text = f"*Literature radar {since} to {until}*\n" + "\n".join(f"• <{t['url']}|{t['title']}> ({t['journal']})" for t in top)
         deliver.send_slack(settings, text)
-    return 0 if not report["errors"] else 0  # errors are reported in the digest, not as a failed exit
+    pipe.store.close()
+    return 0  # source errors are reported inside the digest, not as a failed exit
 
 
 def cmd_digest(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     since, until = _window(args)
     store = Store(settings.db_path)
-    out = render.render(store, since, until, settings.radar)
+    company_types = {str(e["id"]): str(e.get("type") or "") for e in (settings.yaml("companies") or {}).get("entries", []) if e.get("id")}
+    out = render.render(store, since, until, settings.radar, company_types=company_types)
+    out["markdown"] += "\n" + render_coverage_markdown(store, since, until, settings)
     out_dir = Path(args.out or settings.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{until}.md").write_text(out["markdown"], encoding="utf-8")
@@ -545,7 +549,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--until")
     p.add_argument("--llm", action="store_true", help="score the shortlist with Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--no-fulltext", action="store_true")
-    p.add_argument("--sources", help="comma-separated subset: biorxiv,europepmc,openalex,crossref,arxiv,rss,ena")
+    p.add_argument("--sources", help="comma-separated subset: biorxiv,europepmc,openalex,crossref,arxiv,rss,ena,sra,geo,pride,cellxgene,nih_reporter,clinicaltrials,openfda,semantic_scholar")
     p.add_argument("--out")
     p.add_argument("--email", action="store_true")
     p.add_argument("--slack", action="store_true")

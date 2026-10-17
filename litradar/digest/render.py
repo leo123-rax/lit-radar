@@ -11,8 +11,16 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from ..concepts import render_concepts_markdown
+from ..discovery import render_candidates_markdown
 from ..rank.heuristics import is_platform
 from ..store import Store
+from ..trends import compute_trends, render_trends_markdown
+
+
+def _trends_section(store: Store, until: str, dcfg: Dict[str, Any]) -> str:
+    trends = compute_trends(store, until, weeks=int(dcfg.get("trend_weeks", 13)))
+    return render_trends_markdown(trends, top_n=int(dcfg.get("trend_top_n", 10)), heading_level=2)
 
 # which `type` values from config/companies.yaml land where in the Companies section
 MAIN_COMPANY_TYPES = ("tools", "diagnostics", "synthesis", "ai_bio")
@@ -343,6 +351,19 @@ def render(
         for n in general[: max(5, news_n - shown)]:
             md.append(f"- {_link(n['title'], n['url'])} <sub>{esc(n.get('feed'))} · {esc(n.get('published') or '')}</sub>")
         md.append("")
+
+    # ---- derived layers: what changed, emerging concepts, companies not yet tracked ----------------
+    for label, builder in (
+        ("trends", lambda: _trends_section(store, until, dcfg)),
+        ("concepts", lambda: render_concepts_markdown(store, since, until, top=int(dcfg.get("concepts_n", 15)))),
+        ("candidates", lambda: render_candidates_markdown(store, since, until, top=int(dcfg.get("candidates_n", 15)))),
+    ):
+        try:
+            section = builder()
+            if section and section.strip():
+                md.append(section.rstrip() + "\n")
+        except Exception as exc:  # noqa: BLE001 - a derived section must never cost the digest
+            md.append(f"## {label.title()}\n\n_section unavailable: {esc(str(exc))[:200]}_\n")
 
     # ---- coverage / methodology
     md.append("## Coverage and method\n")
