@@ -1,0 +1,71 @@
+{
+  "code": "S1234-56782026000100001",
+  "collection": "scl",
+  "doi": "10.1590/1234-5678V10E20260001",
+  "processing_date": "2026-09-30",
+  "publication_date": "2026",
+  "publication_year": "2026",
+  "document_type": "research-article",
+  "created_at": "2026-06-18",
+  "updated_at": "2026-09-30",
+  "version": "xml",
+  "fulltexts": {
+    "pdf": {"en": "http://www.scielo.br/pdf/ejg/v10/1234-5678-ejg-10-e20260001.pdf"},
+    "html": {"en": "http://www.scielo.br/scielo.php?script=sci_arttext&pid=S1234-56782026000100001&tlng=en"}
+  },
+  "article": {
+    "code": "S1234-56782026000100001",
+    "collection": "scl",
+    "processing_date": "2026-09-30",
+    "v10": [
+      {"k": "0000-0001-0000-0001", "n": "Ana Beatriz", "1": "aff1", "s": "Silva", "r": "ND", "_": ""},
+      {"k": "", "n": "Carlos", "1": "aff1 aff2", "s": "Souza", "r": "ND", "_": ""}
+    ],
+    "v12": [
+      {"l": "pt", "_": "Sequenciamento do genoma completo de isolados clínicos"},
+      {"l": "en", "_": "Whole-genome sequencing of clinical isolates"}
+    ],
+    "v30": [{"_": "Ex. J. Genom."}],
+    "v31": [{"_": "10"}],
+    "v35": [{"_": "1234-5678"}],
+    "v40": [{"_": "pt"}],
+    "v58": [{"_": "Example National Research Council"}, {"_": "Example State Foundation"}],
+    "v62": [{"_": "Example Society of Genomics"}],
+    "v65": [{"_": "20260000"}],
+    "v70": [
+      {"c": "Example City", "i": "aff1", "l": "1", "1": "Department of Genetics", "p": "Brazil", "s": "SP", "_": "Example Federal University"},
+      {"c": "Other City", "i": "aff2", "l": "2", "1": "Institute of Biology", "p": "Brazil", "s": "RJ", "_": "Example State University"}
+    ],
+    "v71": [{"_": "oa"}],
+    "v83": [
+      {"a": "RESUMO: Sequenciamos o genoma completo de 40 isolados clínicos.", "l": "pt"},
+      {"a": "ABSTRACT: We sequenced the whole genome of 40 clinical isolates on a short-read platform.", "l": "en"}
+    ],
+    "v85": [
+      {"k": "sequenciamento", "l": "pt", "_": ""},
+      {"k": "whole-genome sequencing", "l": "en", "_": ""}
+    ],
+    "v91": [{"_": "20260930"}],
+    "v100": [{"_": "Example Journal of Genomics"}],
+    "v102": [{"_": "The authors thank the sequencing core facility."}],
+    "v223": [{"_": "20260622"}],
+    "v237": [{"_": "10.1590/1234-5678v10e20260001"}],
+    "v265": [{"k": "real", "s": "xml", "_": "", "v": "20260622"}, {"k": "expected", "s": "xml", "_": "", "v": "202600"}],
+    "v880": [{"_": "S1234-56782026000100001"}],
+    "v992": [{"_": "scl"}]
+  },
+  "title": {
+    "code": "1234-5678",
+    "collection": "scl",
+    "v100": [{"_": "Example Journal of Genomics"}],
+    "v150": [{"_": "Ex. J. Genom."}],
+    "v310": [{"_": "BR"}],
+    "v350": [{"_": "en"}, {"_": "pt"}],
+    "v400": [{"_": "1234-5678"}],
+    "v435": [{"t": "PRINT", "_": "1234-5678"}, {"t": "ONLIN", "_": "8765-4321"}],
+    "v441": [{"_": "Biological Sciences"}],
+    "v480": [{"_": "Example Society of Genomics"}],
+    "v690": [{"_": "www.scielo.br"}],
+    "v854": [{"_": "GENETICS & HEREDITY"}]
+  }
+}
