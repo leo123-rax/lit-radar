@@ -19,6 +19,18 @@ What it reads (every table is optional; a missing table degrades to an empty sec
 Week buckets are ISO weeks keyed by the Monday (UTC). A paper is dated by `pub_date`, falling
 back to the date part of `first_seen` for feeds that carry no publication date.
 
+"Optional" means exactly a missing table or column (`no such table` / `no such column`): those
+queries are skipped, logged and counted in the report. Any other database error - locked file,
+corrupt image, torn WAL copy - is raised, so a broken store fails the build loudly instead of
+publishing an all-zero site.
+
+Movers compare the last four COMPLETE weeks against the four before them. The axis ends with the
+week containing today; unless today is a Sunday that week is still in progress and is left out of
+the comparison, and the page says so. Movers rank every entity, not only those given a card.
+
+Instrument cards are the union of the top-N by papers and the top-N by archive experiments, so a
+sequencer that archives see constantly but papers rarely name by model is not silently dropped.
+
 Country of first affiliation is used when the store can supply it: a `papers.country` column if
 one exists, else `extra_json.country` / `extra_json.countries[0]`. Neither is written by the
 base pipeline, so `countries.html` explains how to enable it rather than inventing a value.
@@ -68,8 +80,40 @@ AUTHOR_SECTIONS = ("affiliations",)
 FUNDING_SECTIONS = ("funding", "coi", "ack")
 SUBJECT_SECTIONS = ("title", "abstract", "methods")
 
+# Archive `instrument_platform` codes (the ENA/SRA controlled vocabulary) -> the vendor as the
+# gazetteer spells it. Used ONLY for records whose model is not in the gazetteer and therefore
+# carry no vendor, so a platform code and the company name do not stand as two stacked series for
+# one vendor. Codes with no gazetteer vendor (GENEMIND, GENAPSYS, ABI_SOLID, LS454, CAPILLARY) are
+# left as they are rather than guessed.
+PLATFORM_VENDORS = {
+    "ILLUMINA": "Illumina",
+    "BGISEQ": "MGI Tech",
+    "DNBSEQ": "MGI Tech",
+    "PACBIO_SMRT": "Pacific Biosciences",
+    "OXFORD_NANOPORE": "Oxford Nanopore Technologies",
+    "ION_TORRENT": "Thermo Fisher Scientific",
+    "ELEMENT": "Element Biosciences",
+    "ULTIMA": "Ultima Genomics",
+}
+
+# Movers compare the last `MOVERS_SPAN` complete weeks against the `MOVERS_SPAN` before them.
+MOVERS_SPAN = 4
+
 
 # ---------------------------------------------------------------------------- sqlite helpers
+class Connection(sqlite3.Connection):
+    """A sqlite3 connection that remembers which *optional* queries were skipped.
+
+    Only a missing table or column is optional (an older store, or an adapter that has not run
+    yet); every other database error - locked, corrupt, torn WAL copy - propagates, so a broken
+    store fails the build instead of publishing an all-zero site.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.skipped_queries: List[str] = []
+
+
 def connect_readonly(db_path: Path) -> Tuple[sqlite3.Connection, Optional[Path]]:
     """Open the store without writing to it.
 
@@ -82,7 +126,7 @@ def connect_readonly(db_path: Path) -> Tuple[sqlite3.Connection, Optional[Path]]
     if not db_path.exists():
         raise FileNotFoundError(f"no database at {db_path}")
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, factory=Connection)
         conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
         return conn, None
     except sqlite3.Error as exc:
@@ -94,7 +138,7 @@ def connect_readonly(db_path: Path) -> Tuple[sqlite3.Connection, Optional[Path]]
         side = Path(str(db_path) + suffix)
         if side.exists():
             shutil.copy2(side, Path(str(copy) + suffix))
-    conn = sqlite3.connect(str(copy))
+    conn = sqlite3.connect(str(copy), factory=Connection)
     return conn, tmp
 
 
@@ -106,15 +150,25 @@ def _tables(conn: sqlite3.Connection) -> set:
 def _columns(conn: sqlite3.Connection, table: str) -> List[str]:
     try:
         return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-    except sqlite3.Error:
+    except sqlite3.OperationalError:
         return []
 
 
+_OPTIONAL_ERRORS = ("no such table", "no such column")
+
+
 def _q(conn: sqlite3.Connection, sql: str, params: Sequence[Any] = ()) -> List[tuple]:
+    """Run a query. A missing table or column empties the section; anything else is an error."""
     try:
         return conn.execute(sql, tuple(params)).fetchall()
-    except sqlite3.Error as exc:  # a store written by an older version, or a missing table
-        log.warning("query failed, section left empty: %s", exc)
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        if not message.startswith(_OPTIONAL_ERRORS):
+            raise
+        log.warning("optional table or column missing, section left empty: %s", message)
+        skipped = getattr(conn, "skipped_queries", None)
+        if skipped is not None:
+            skipped.append(message)
         return []
 
 
@@ -209,9 +263,10 @@ def _archive_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: 
     """Experiments per week by vendor.
 
     Records whose declared model is not in the gazetteer carry no vendor, so the archive's own
-    `instrument_platform` stands in. That field is upper-case ("ILLUMINA") where the gazetteer is
-    mixed-case ("Illumina"), so labels are merged case-insensitively and the mixed-case spelling
-    wins - otherwise one vendor would appear as two stacked series.
+    `instrument_platform` stands in, translated through PLATFORM_VENDORS when the code is a known
+    vendor's. Codes outside that map are upper-case ("GENEMIND") where the gazetteer is mixed-case,
+    so labels are also merged case-insensitively with the mixed-case spelling winning - otherwise
+    one vendor would appear as two stacked series.
     """
     rows = _q(
         conn,
@@ -225,6 +280,7 @@ def _archive_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: 
         w = week_of(d)
         if not w:
             continue
+        vendor = PLATFORM_VENDORS.get(str(vendor).upper(), str(vendor))
         key = str(vendor).lower()
         current = display.get(key)
         if current is None or (current.isupper() and not str(vendor).isupper()):
@@ -234,15 +290,38 @@ def _archive_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: 
     return {"series": _fold_tail(series, MAX_STACK_SERIES)}
 
 
-def _movers(labels: Dict[str, str], weekly: Dict[str, List[int]], weeks: List[str], span: int = 4) -> List[Dict[str, Any]]:
-    """Week-over-week movers: the last `span` complete weeks against the `span` before them."""
-    if len(weeks) < 2:
+def _movers_window(weeks: List[str], today: date, span: int = MOVERS_SPAN) -> Dict[str, Any]:
+    """Which buckets the movers compare.
+
+    The axis ends with the ISO week containing `today`. Unless today is a Sunday that week is still
+    in progress, and counting it as "recent" would undercount every entity against a full previous
+    window; so the trailing bucket is left out and the comparison uses complete weeks only.
+    """
+    offset = 0 if today.weekday() == 6 else 1
+    usable = len(weeks) - offset
+    if usable < 2:
+        return {"span": 0, "offset": offset, "recent": [], "previous": [], "excludes_current_week": bool(offset)}
+    span = max(1, min(span, usable // 2))
+    stop = len(weeks) - offset
+    return {
+        "span": span,
+        "offset": offset,
+        "recent": weeks[stop - span:stop],
+        "previous": weeks[stop - 2 * span:stop - span],
+        "excludes_current_week": bool(offset),
+    }
+
+
+def _movers(labels: Dict[str, str], weekly: Dict[str, List[int]], window: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Week-over-week movers over the buckets `_movers_window` chose."""
+    span, offset = int(window.get("span") or 0), int(window.get("offset") or 0)
+    if span < 1:
         return []
-    span = max(1, min(span, len(weeks) // 2))
     out = []
     for key, vals in weekly.items():
-        recent = sum(vals[-span:])
-        previous = sum(vals[-2 * span:-span])
+        stop = len(vals) - offset
+        recent = sum(vals[stop - span:stop])
+        previous = sum(vals[stop - 2 * span:stop - span])
         if recent == 0 and previous == 0:
             continue
         out.append({
@@ -258,6 +337,11 @@ def _movers(labels: Dict[str, str], weekly: Dict[str, List[int]], weeks: List[st
 
 
 def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> List[Dict[str, Any]]:
+    """Every instrument entity with any signal in the window: papers per week and experiments per week.
+
+    Returns ALL of them - the caller decides which get a card. Movers must be computed over the
+    full list, or an archive-heavy sequencer that few papers name would vanish from both.
+    """
     expr = _paper_date_sql()
     rows = _q(
         conn,
@@ -310,20 +394,35 @@ def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str,
             "experiments_total": sum(aw),
         })
     entities.sort(key=lambda e: (-e["papers_total"], -e["experiments_total"], e["name"]))
-    entities = entities[:MAX_INSTRUMENT_CARDS]
-
-    for e in entities:
-        recent = _q(
-            conn,
-            f"SELECT p.title, p.url, p.journal, {expr} AS d FROM mentions m JOIN papers p ON p.id = m.paper_id "
-            f"WHERE m.kind='instrument' AND m.entity_id=? AND {expr} >= ? AND {expr} <= ? "
-            f"GROUP BY p.id ORDER BY d DESC LIMIT 8",
-            (e["id"], start, end),
-        )
-        e["recent_papers"] = [
-            {"title": t or "(untitled)", "url": u or "", "journal": j or "", "date": d or ""} for t, u, j, d in recent
-        ]
     return entities
+
+
+def _select_instrument_cards(entities: List[Dict[str, Any]], limit: int = MAX_INSTRUMENT_CARDS) -> List[Dict[str, Any]]:
+    """The union of the `limit` most-named instruments and the `limit` with the most experiments.
+
+    One ranking alone hides the other measure: ranking by papers drops sequencers that archives
+    see constantly but papers rarely name by model, ranking by experiments drops every
+    non-sequencing instrument (which has no archive at all).
+    """
+    by_papers = sorted(entities, key=lambda e: (-e["papers_total"], -e["experiments_total"], e["name"]))
+    by_experiments = sorted(entities, key=lambda e: (-e["experiments_total"], -e["papers_total"], e["name"]))
+    chosen = {e["id"] for e in by_papers[:limit] if e["papers_total"] > 0}
+    chosen |= {e["id"] for e in by_experiments[:limit] if e["experiments_total"] > 0}
+    if not chosen:  # nothing has a non-zero total (cannot happen for a real window, but stay total)
+        chosen = {e["id"] for e in by_papers[:limit]}
+    return [e for e in by_papers if e["id"] in chosen]
+
+
+def _recent_papers(conn: sqlite3.Connection, entity_id: str, start: str, end: str, limit: int = 8) -> List[Dict[str, Any]]:
+    expr = _paper_date_sql()
+    rows = _q(
+        conn,
+        f"SELECT p.title, p.url, p.journal, {expr} AS d FROM mentions m JOIN papers p ON p.id = m.paper_id "
+        f"WHERE m.kind='instrument' AND m.entity_id=? AND {expr} >= ? AND {expr} <= ? "
+        f"GROUP BY p.id ORDER BY d DESC LIMIT ?",
+        (entity_id, start, end, int(limit)),
+    )
+    return [{"title": t or "(untitled)", "url": u or "", "journal": j or "", "date": d or ""} for t, u, j, d in rows]
 
 
 def _company_entities(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> List[Dict[str, Any]]:
@@ -441,10 +540,15 @@ def _subgroups(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
         for g, b in counts.items()
     ]
     groups.sort(key=lambda g: (-g["total"], g["id"]))
+    # every group is listed in the table; the chart keeps the largest and folds the rest into
+    # "Other", for the same reason as the stacked vendor charts (no ninth distinguishable hue)
+    series = _fold_tail({g["id"]: g["counts"] for g in groups}, MAX_STACK_SERIES)
     return {
         "available": bool(groups),
         "sources": sorted(sources),
-        "groups": groups[:MAX_STACK_SERIES + 2],
+        "groups": groups,
+        "series": series,
+        "folded": len(groups) > MAX_STACK_SERIES,
     }
 
 
@@ -603,21 +707,26 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
     papers_week = _papers_per_week(conn, axis, start, end) if have_papers else {"total": [0] * weeks, "by_kind": {}}
     instruments_vendor = _instrument_weeks_by_vendor(conn, axis, start, end) if have_mentions else {"series": {}}
     archive_vendor = _archive_weeks_by_vendor(conn, axis, start, end) if have_archive else {"series": {}}
-    instrument_entities = _instrument_entities(conn, axis, start, end) if (have_mentions or have_archive) else []
+    all_instruments = _instrument_entities(conn, axis, start, end) if (have_mentions or have_archive) else []
     company_entities = _company_entities(conn, axis, start, end) if have_mentions else []
     if not have_news:
         for c in company_entities:
             c["news"], c["news_total"] = [0] * weeks, 0
 
-    labels = {e["id"]: e["name"] for e in instrument_entities}
-    movers_papers = _movers(labels, {e["id"]: e["papers_per_week"] for e in instrument_entities}, axis)
-    movers_archive = _movers(labels, {e["id"]: e["experiments_per_week"] for e in instrument_entities}, axis)
+    # movers over EVERY entity; cards for the union of the two top-N lists
+    window = _movers_window(axis, today)
+    labels = {e["id"]: e["name"] for e in all_instruments}
+    movers_papers = _movers(labels, {e["id"]: e["papers_per_week"] for e in all_instruments}, window)
+    movers_archive = _movers(labels, {e["id"]: e["experiments_per_week"] for e in all_instruments}, window)
     company_labels = {c["id"]: c["name"] for c in company_entities}
     movers_companies = _movers(
         company_labels,
         {c["id"]: [a + f + s for a, f, s in zip(c["author"], c["funding_coi"], c["subject"])] for c in company_entities},
-        axis,
+        window,
     )
+    instrument_cards = _select_instrument_cards(all_instruments, limit=MAX_INSTRUMENT_CARDS)
+    for e in instrument_cards:
+        e["recent_papers"] = _recent_papers(conn, e["id"], start, end) if have_mentions else []
 
     totals = {}
     for table in ("papers", "mentions", "archive_records", "news_items", "tracked_author_hits", "scores"):
@@ -635,14 +744,17 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
         "archive_by_vendor": archive_vendor,
         "movers": {"instrument_papers": movers_papers, "archive_experiments": movers_archive,
                    "companies": movers_companies},
-        "instruments": instrument_entities,
+        "movers_window": window,
+        "instruments": instrument_cards,
+        "instruments_total": len(all_instruments),
         "companies": company_entities,
         "subgroups": _subgroups(conn, axis, start, end, tables) if have_papers else
-                     {"available": False, "sources": [], "groups": []},
+                     {"available": False, "sources": [], "groups": [], "series": {}, "folded": False},
         "countries": _countries(conn, axis, start, end) if have_papers else
                      {"available": False, "source": None, "series": {}, "table": []},
         "timeseries": _timeseries(conn, tables),
         "papers": _search_index(conn, start, end, max_papers) if have_papers else [],
+        "skipped_queries": list(getattr(conn, "skipped_queries", [])),
     }
 
 
@@ -713,6 +825,20 @@ def _card(title: str, note: str, canvas_id: str, extra: str = "") -> str:
     )
 
 
+def _movers_note(window: Dict[str, Any]) -> str:
+    """One sentence saying exactly which weeks the movers tables compare."""
+    span = int(window.get("span") or 0)
+    if span < 1:
+        return "Not enough complete weeks in this window to compare."
+    recent, previous = window.get("recent") or [], window.get("previous") or []
+    word = {1: "one", 2: "two", 3: "three", 4: "four"}.get(span, str(span))
+    text = (f"The last {word} complete week{'s' if span != 1 else ''} ({recent[0]} to {recent[-1]}) against the "
+            f"{word} before {'them' if span != 1 else 'it'} ({previous[0]} to {previous[-1]}).")
+    if window.get("excludes_current_week"):
+        text += " The current, unfinished week is left out."
+    return text
+
+
 def _index_html(data: Dict[str, Any]) -> str:
     body = (
         _card("Papers per week", "Every paper and preprint in the corpus, bucketed by publication week "
@@ -726,8 +852,9 @@ def _index_html(data: Dict[str, Any]) -> str:
                 "declared instrument model. This is a census of machines producing data, not of papers.",
                 "archive-week")
         + '  <section class="card">\n    <h2>Top movers</h2>\n'
-          '    <p class="note">Last four weeks against the four before them. Counts, not rates; a short corpus '
-          'makes these noisy, which is why the raw numbers are shown beside the change.</p>\n'
+          f'    <p class="note">{_movers_note(data["movers_window"])} Every instrument and company in the store '
+          'is ranked here, not only those with a card. Counts, not rates; a short corpus makes these noisy, '
+          'which is why the raw numbers are shown beside the change.</p>\n'
           '    <div id="movers"></div>\n  </section>\n'
     )
     if data["timeseries"]["available"]:
@@ -737,8 +864,8 @@ def _index_html(data: Dict[str, Any]) -> str:
     payload = {
         "weeks": data["weeks"], "papers_per_week": data["papers_per_week"],
         "instruments_by_vendor": data["instruments_by_vendor"], "archive_by_vendor": data["archive_by_vendor"],
-        "movers": data["movers"], "timeseries": data["timeseries"], "totals": data["totals"],
-        "window": data["window"],
+        "movers": data["movers"], "movers_window": data["movers_window"], "timeseries": data["timeseries"],
+        "totals": data["totals"], "window": data["window"],
     }
     script = "litradar.renderOverview(litradar.pageData());"
     lede = (
@@ -762,10 +889,17 @@ def _instruments_html(data: Dict[str, Any]) -> str:
     )
     payload = {"weeks": data["weeks"], "entities": data["instruments"], "timeseries": data["timeseries"]}
     script = "litradar.renderInstruments(litradar.pageData());"
+    shown, total = len(data["instruments"]), int(data.get("instruments_total") or len(data["instruments"]))
+    coverage = (
+        f"{shown} of {total} instruments with any signal in this window are shown: the {MAX_INSTRUMENT_CARDS} most "
+        f"named in papers plus the {MAX_INSTRUMENT_CARDS} with the most archive experiments. "
+        if total > shown else f"All {total} instruments with any signal in this window are shown. "
+    )
     lede = (
         "One card per instrument: papers naming it per week, and sequencing experiments released per week whose "
         "declared model maps to it. The two measures sit in separate charts on purpose - they differ by orders of "
-        "magnitude, and a shared second axis would invent a correlation."
+        f"magnitude, and a shared second axis would invent a correlation. {coverage}"
+        "The movers on the overview rank every instrument, carded or not."
     )
     return _page("Instruments", "instruments.html", lede, body, payload, script, data["generated"])
 
@@ -793,9 +927,12 @@ def _companies_html(data: Dict[str, Any]) -> str:
 
 
 def _subgroups_html(data: Dict[str, Any]) -> str:
-    body = _card("Papers per week per subgroup",
-                 "Assembled from tracked-author hits and, when the store carries them, keyword subgroup "
-                 "assignments in extra_json.", "subgroups-week")
+    note = ("Assembled from tracked-author hits and, when the store carries them, keyword subgroup "
+            "assignments in extra_json.")
+    if data["subgroups"].get("folded"):
+        note += (f" The chart keeps the {MAX_STACK_SERIES} largest subgroups and folds the rest into 'Other'; "
+                 "the table below lists every subgroup separately.")
+    body = _card("Papers per week per subgroup", note, "subgroups-week")
     payload = {"weeks": data["weeks"], "subgroups": data["subgroups"]}
     script = "litradar.renderSubgroups(litradar.pageData());"
     sources = ", ".join(data["subgroups"]["sources"]) or "no subgroup signal in this store yet"
@@ -1087,6 +1224,12 @@ var litradar = (function () {
     return (values || []).reduce(function (a, b) { return a + (b || 0); }, 0);
   }
 
+  /* Only http(s) URLs become links. Record URLs come from feeds and archives the site does not
+     control, and the published page is public, so anything else is rendered as plain text. */
+  function isWebUrl(href) {
+    return typeof href === "string" && /^https?:\/\//i.test(href);
+  }
+
   function compact(v) {
     var n = Number(v);
     if (!isFinite(n)) { return v; }
@@ -1212,9 +1355,12 @@ var litradar = (function () {
       row.forEach(function (cell, i) {
         var head = headers[i] || {};
         var td = el("td", null, head.num ? { "class": "num" } : null);
-        if (cell && typeof cell === "object" && cell.href) {
+        if (cell && typeof cell === "object" && cell.href && isWebUrl(cell.href)) {
           var a = el("a", cell.text, { href: cell.href, rel: "noopener" });
           td.appendChild(a);
+        } else if (cell && typeof cell === "object" && cell.href !== undefined) {
+          /* a stored URL that is not http(s) (javascript:, data:, a bare DOI, junk) is shown, not linked */
+          td.textContent = cell.text === null || cell.text === undefined ? "" : String(cell.text);
         } else if (cell && typeof cell === "object" && cell.cls) {
           td.textContent = cell.text;
           td.className = (head.num ? "num " : "") + cell.cls;
@@ -1270,6 +1416,10 @@ var litradar = (function () {
     var holder = document.getElementById("movers");
     if (holder) {
       holder.textContent = "";
+      var win = data.movers_window || {};
+      var span = win.span || 0;
+      var recentLabel = span ? "Last " + span + (span === 1 ? " wk" : " wks") : "Recent";
+      var priorLabel = span ? "Prior " + span + (span === 1 ? " wk" : " wks") : "Previous";
       [["Instruments, papers", (data.movers || {}).instrument_papers],
        ["Instruments, archive experiments", (data.movers || {}).archive_experiments],
        ["Companies, mentions", (data.movers || {}).companies]].forEach(function (pair) {
@@ -1282,7 +1432,7 @@ var litradar = (function () {
                   { text: (m.delta > 0 ? "+" : "") + m.delta, cls: cls },
                   m.pct === null || m.pct === undefined ? "n/a" : (m.pct > 0 ? "+" : "") + m.pct + "%"];
         });
-        table(slot, [{ label: "Entity" }, { label: "Last 4 wks", num: true }, { label: "Prior 4 wks", num: true },
+        table(slot, [{ label: "Entity" }, { label: recentLabel, num: true }, { label: priorLabel, num: true },
                      { label: "Change", num: true }, { label: "Change %", num: true }], rows,
               { collapsible: false, empty: "Not enough history in this window." });
       });
@@ -1435,7 +1585,11 @@ var litradar = (function () {
 
   function renderSubgroups(data) {
     var weeks = data.weeks || [];
-    var groups = ((data.subgroups || {}).groups) || [];
+    var sub = data.subgroups || {};
+    var groups = sub.groups || [];
+    /* the chart draws the folded series (largest groups + "Other"); the table lists every group */
+    var chartSeries = sub.series ? asSeries(sub.series)
+                                 : groups.map(function (g) { return { label: g.id, data: g.counts }; });
     var series = groups.map(function (g) { return { label: g.id, data: g.counts }; });
     if (!series.length) {
       var slot = document.getElementById("subgroups-week-table");
@@ -1447,7 +1601,7 @@ var litradar = (function () {
       afterRender();
       return;
     }
-    register("subgroups-week", function (c) { return lineChart(c, weeks, series); });
+    register("subgroups-week", function (c) { return lineChart(c, weeks, chartSeries); });
     seriesTable("subgroups-week-table", weeks, series);
     afterRender();
   }
@@ -1612,12 +1766,15 @@ def build(db_path: Path, out_dir: Path, weeks: int = 52, max_papers: int = DEFAU
         "weeks": len(data["weeks"]),
         "counts": {
             "instruments": len(data["instruments"]),
+            "instruments_total": data["instruments_total"],
             "companies": len(data["companies"]),
             "subgroups": len(data["subgroups"]["groups"]),
             "countries": len(data["countries"]["table"]),
             "papers_indexed": len(data["papers"]),
             "timeseries_months": len(data["timeseries"]["months"]),
         },
+        "movers_window": data["movers_window"],
+        "skipped_queries": data["skipped_queries"],
         "totals": data["totals"],
         "files": files,
         "bytes": sum(files.values()),

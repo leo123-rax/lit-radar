@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import re
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -147,12 +148,19 @@ def cmd_dashboard(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     db_path = Path(args.db) if args.db else settings.db_path
     out_dir = Path(args.out or "site")
-    report = dashboard.build(db_path, out_dir, weeks=args.weeks, max_papers=args.max_papers)
+    try:
+        report = dashboard.build(db_path, out_dir, weeks=args.weeks, max_papers=args.max_papers)
+    except (sqlite3.Error, FileNotFoundError) as exc:
+        # a locked, corrupt or missing store must not publish an all-zero site
+        print(f"dashboard: cannot read {db_path}: {exc}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(report, indent=1, default=str))
     else:
         print(json.dumps({k: v for k, v in report.items() if k != "files"}, indent=1, default=str))
         print(f"site written to {out_dir} ({report['bytes'] / 1024:.0f} KiB in {len(report['files'])} files)")
+    for message in report.get("skipped_queries", []):
+        print(f"warning: optional data missing, section left empty: {message}", file=sys.stderr)
     return 0
 
 

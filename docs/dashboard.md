@@ -27,10 +27,10 @@ copies the database and its sidecars to a temporary directory, reads the copy, a
 
 | Page | What it shows |
 |---|---|
-| `index.html` | papers per week; instruments named per week by vendor; archive experiments per week by vendor; top movers (instruments by papers, instruments by experiments, companies by mentions); monthly series when the optional `timeseries` table exists |
-| `instruments.html` | one card per instrument: papers naming it per week **and** archive experiments per week, in two separate charts, plus its most recent papers |
+| `index.html` | papers per week; instruments named per week by vendor; archive experiments per week by vendor; top movers (instruments by papers, instruments by experiments, companies by mentions — ranked over **every** entity in the store, not only the carded ones); monthly series when the optional `timeseries` table exists |
+| `instruments.html` | one card per instrument: papers naming it per week **and** archive experiments per week, in two separate charts, plus its most recent papers. Cards are the union of the 48 most-named instruments and the 48 with the most archive experiments, so a sequencer that archives see constantly but papers rarely name by model keeps its card; the lede states how many of the instruments with signal are shown |
 | `companies.html` | one card per company: mentions per week split by role — author affiliation, funding / competing-interest statement, subject of the work — with the stored news count |
-| `subgroups.html` | papers per week per research subgroup |
+| `subgroups.html` | papers per week per research subgroup; every subgroup is in the table, the chart keeps the six largest and folds the rest into `Other` |
 | `countries.html` | papers per week by country of first affiliation, or an explanation of how to enable it |
 | `search.html` | client-side search over the window: title, venue, date, instruments, companies, link |
 
@@ -40,7 +40,11 @@ JavaScript charts disabled or on a screen reader.
 
 ## What it reads
 
-All of these are optional. A missing table or column empties one section; it never fails the build.
+All of these are optional, and *optional* means exactly one thing: a missing table or column
+(SQLite's `no such table` / `no such column`). Such a query is skipped, logged, and listed in the
+report as `skipped_queries` (the CLI prints each one as a warning). Every other database error — a
+locked file, a corrupt image, a torn WAL copy — is raised, the command exits non-zero and nothing
+is written, so a broken store can never publish an all-zero site as if it were news.
 
 | Table | Used for |
 |---|---|
@@ -56,17 +60,25 @@ All of these are optional. A missing table or column empties one section; it nev
 falling back to the date part of `first_seen` for feeds that carry no publication date — the same
 rule the digest uses, so the two never disagree.
 
-**Top movers** compare the last four complete weeks against the four before them, and report the
-raw counts beside the change. A move from zero has no percentage: it is shown as `n/a`, never as an
-infinite or invented growth rate.
+**Top movers** compare the last four *complete* weeks against the four before them, and report the
+raw counts beside the change. The axis ends with the ISO week containing the build date; unless
+that is a Sunday the week is still in progress, so it is left out of the comparison and the page
+says so ("The current, unfinished week is left out."). With fewer than eight complete weeks the
+span shrinks (down to one week against one), and the table headers and the note always name the
+exact weeks compared. The ranking covers every instrument and company with any signal in the
+window, not only those with a card. A move from zero has no percentage: it is shown as `n/a`,
+never as an infinite or invented growth rate.
 
 **Vendor labels in the archive chart.** Records whose declared instrument model is not in the
-gazetteer carry no vendor, so the archive's own `instrument_platform` value stands in. That
-vocabulary is upper-case (`ILLUMINA`) where the gazetteer is mixed-case (`Illumina`), so labels are
-merged case-insensitively with the mixed-case spelling winning. Platform names that are *different
-words* for the same vendor (a sequencer platform code versus the company name) still appear as two
-series; that is a gazetteer gap, and adding the model to `config/instruments.yaml` fixes it at the
-source rather than in the dashboard.
+gazetteer carry no vendor, so the archive's own `instrument_platform` value stands in. Where that
+code is a known vendor's, it is translated to the gazetteer's spelling through a small map
+(`PLATFORM_VENDORS`: `ILLUMINA`, `BGISEQ`/`DNBSEQ`, `PACBIO_SMRT`, `OXFORD_NANOPORE`,
+`ION_TORRENT`, `ELEMENT`, `ULTIMA`), so a platform code and the company name are one stacked
+series rather than two. Codes with no gazetteer vendor (`GENEMIND`, `GENAPSYS`, `ABI_SOLID`,
+`LS454`, `CAPILLARY`) are left as they are — honest, if ugly — and remaining upper-case codes are
+still merged case-insensitively with any mixed-case spelling. The map is only a display fix: the
+records themselves still carry no `entity_id`, so adding the model to `config/instruments.yaml`
+is what makes them count per instrument.
 
 ### Enabling the countries page
 
@@ -116,14 +128,18 @@ Chart choices worth knowing about, because they are deliberate:
   private window simply falls back to auto).
 * **Axis labels are abbreviated (`10-12`), tooltips are not** (`Week of 2026-10-12`), so a
   52-week window spanning two calendar years is never ambiguous.
+* **Only `http(s)` URLs become links.** Paper and news URLs come from feeds and archives the site
+  does not control and the published page is public, so anything with another scheme
+  (`javascript:`, `data:`, a bare DOI) is rendered as plain text. Everything else on the pages is
+  written with `textContent`, never as HTML.
 
 ## Size
 
-The site is data-dependent. For a one-week corpus of ~3,500 papers, ~3,800 mentions and ~123,000
-archive records, a 52-week build came to **2.8 MiB in 15 files**: `index.html` 11 KB,
-`instruments.html` 126 KB, `companies.html` 41 KB, `subgroups.html` 4 KB, `countries.html` 3 KB,
-`search.html` 1.27 MB, `assets/app.js` 20 KB, `assets/styles.css` 5 KB, and the same payloads again
-as `data/*.json`.
+The site is data-dependent. For a one-week corpus of ~3,500 papers, ~4,000 mentions and ~123,000
+archive records, a 52-week build came to **2.9 MiB in 15 files**: `index.html` 12 KB,
+`instruments.html` 157 KB (75 cards), `companies.html` 41 KB, `subgroups.html` 6 KB,
+`countries.html` 3 KB, `search.html` 1.28 MB, `assets/app.js` 23 KB, `assets/styles.css` 5 KB, and
+the same payloads again as `data/*.json`. The build itself takes well under a second.
 
 `search.html` dominates, because the search index is embedded in the page (which keeps the site
 working from a `file://` path, where `fetch()` of a sibling JSON file is blocked by the browser).
@@ -146,14 +162,18 @@ The workflow restores the database from the same Actions cache the digest workfl
 uploads and deploys with `actions/upload-pages-artifact` and `actions/deploy-pages`. It needs
 `pages: write` and `id-token: write`, which are declared in the workflow. If no cached database is
 found — a fresh fork that has not run the digest yet — the workflow posts a notice and finishes
-green without deploying, rather than failing.
+green without deploying, rather than failing. If the cached database is unreadable the build step
+fails red (see *What it reads*), and the previous deployment stays up. The `weeks` dispatch input
+reaches the shell through an environment variable (`WEEKS`), never by interpolation into the
+command line.
 
 Notes and limits:
 
 * `workflow_run` triggers only fire for workflow files on the **default branch**; a pages workflow
   on a feature branch will not be started by a digest run.
-* Actions caches are branch-scoped: the digest and the pages workflow must run on the same branch
-  (the default branch) for the restore to hit.
+* Actions cache visibility: caches written by the digest on the default branch are readable from
+  any branch, so a manually dispatched pages run on a feature branch can still restore the
+  database; caches written on a feature branch are not visible to the default branch.
 * The published site is **public if the repository is public**. The corpus is metadata, abstracts
   and open-licensed text (see `docs/LEGAL.md`), but check what your gazetteers and watchlist terms
   say about your interests before publishing, and keep the repository private if that matters —
@@ -166,5 +186,9 @@ Notes and limits:
 `tests/test_dashboard_offline.py` seeds a temporary SQLite store through the normal `Store` API and
 builds a site from it — no network, no live database. It covers a normal store, an empty one,
 malformed `extra_json` and `companies_json`, unparseable dates, a window containing nothing, the
-optional `timeseries` table, the series-folding rule, and a check that the source database is
+optional `timeseries` table, the series-folding rule, the instrument card cap (an archive-heavy
+instrument with no paper mentions keeps its card and its place in the movers), the complete-weeks
+rule for movers (Saturday versus Sunday builds), optional-versus-fatal database errors (a missing
+column is skipped and counted; a syntax error or a corrupt file raises and writes nothing),
+archive platform-code merging, subgroup folding, and a check that the source database is
 byte-identical after a build.

@@ -58,7 +58,10 @@ jobs:
           fi
       - name: Build the static site
         if: steps.db.outputs.found == 'true'
-        run: python -m litradar dashboard --db data/radar.sqlite --out site --weeks ${{ github.event.inputs.weeks || '52' }}
+        # the dispatch input goes through an environment variable, never straight into the shell line
+        env:
+          WEEKS: ${{ github.event.inputs.weeks || '52' }}
+        run: python -m litradar dashboard --db data/radar.sqlite --out site --weeks "$WEEKS"
       - name: Configure Pages
         if: steps.db.outputs.found == 'true'
         uses: actions/configure-pages@v6
