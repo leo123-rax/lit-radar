@@ -94,6 +94,33 @@ how the code enforces them are in `docs/LEGAL.md`; the short version is `docs/AC
 
 A real run's output is in `digests/`. The design behind each section is in `docs/DESIGN.md`.
 
+## Command reference
+
+Every command reads `config/` and `.env` from the repo root; `python -m litradar <command> --help` shows all flags.
+
+| Command | What it does |
+|---|---|
+| `run --days 7 [--llm]` | full weekly pass: fetch, full text, extract, census, news, signals, rank, digest |
+| `update [--overlap-days 2]` | incremental daily pass from the last run's end (no digest); `status` reports freshness and exits non-zero when stale |
+| `digest --days 7` | re-render the digest from the database (all sections, no fetching) |
+| `search "query" [--since 90d] [--in methods,coi]` · `entity <id>` · `show <id|name>` · `watch add|run` | search and entity dossiers over the corpus |
+| `serve [--datasette]` | read-only JSON API + search page on localhost; or launch Datasette with the bundled metadata |
+| `add <doi|pmid|pmcid|arxiv|url> [--tag x]` · `tags` | add papers to the corpus by identifier |
+| `track company|instrument|author|topic|term ...` · `untrack` · `prioritize <kind> <target> --weight W` | edit what is tracked and weighted without hand-editing YAML |
+| `coverage --days 7` | where coverage is thin: sources, journals with zero items, watched entities with zero mentions |
+| `concepts [--weeks 26] [--llm]` | emerging concepts: phrase bursts in titles, abstracts and Methods |
+| `candidates [refresh|promote|ignore]` | companies spotted in the literature but not yet tracked, with evidence |
+| `timeseries --entity pacb-revio --from 2023-01` | monthly SRA / ENA / Europe PMC counts per instrument (CSV, Markdown, optional PNG) |
+| `trends` | week-over-week and 13-week-baseline movers for instruments, companies, subgroups, journals |
+| `dashboard --out site/` | static trends site (Chart.js) for GitHub Pages |
+| `backfill --from 2018-01 --to 2026-10` | grow the corpus from OpenAlex by topic and month (resumable; snapshot mode too) |
+| `tag [--translate]` · `export --parquet DIR` · `rematch` · `check-config` · `stats` | language/country tags, exports, re-annotation after gazetteer edits, validation |
+| `fetch <source> ...` · `fetch --list` · `browser-check` | raw access to all 16 source clients as JSON lines; the optional real-browser fetcher |
+
+Full docs: `docs/DESIGN.md` (architecture and cost model), `docs/SOURCES.md` (every source, verified), `docs/COOKBOOK.md`
+(copy-paste recipes), `docs/search.md`, `docs/live.md`, `docs/track.md`, `docs/concepts.md`, `docs/discovery.md`,
+`docs/dashboard.md`, `docs/gazetteer.md`, `docs/LEGAL.md`, `docs/deploy.md`, `docs/SCALE.md`, `docs/ROADMAP.md`.
+
 ## Configuration
 
 Everything lives in `config/` and is meant to be edited:
@@ -171,13 +198,13 @@ and `docs/DESIGN.md` section 8.
 | Journal / subject RSS | tables of contents as a backstop | free | wired |
 | SEC EDGAR Atom, PR Newswire, STAT, BioPharma Dive, MedTech Dive | company filings and trade-press headlines | free (EDGAR needs a contact address in the User-Agent) | wired; EDGAR User-Agent fix pending |
 | Google News RSS | headlines for outlets and companies with no scriptable feed | free | wired; robots.txt disallows it, so it is moving to opt-in |
-| NCBI GEO | newly released Series and the platforms they ran on (study-level census) | free; key lifts rate | built, wiring pending |
-| PRIDE Archive | proteomics datasets per declared mass spectrometer | free | built, wiring pending |
-| CZ CELLxGENE Discover | single-cell and spatial assays behind newly public datasets | free | built, wiring pending |
-| ClinicalTrials.gov v2 | newly posted studies naming watched companies or assays | free | built, wiring pending |
-| NIH RePORTER v2 | S10 shared-instrumentation awards, SBIR/STTR, keyword awards | free | built, wiring pending |
-| openFDA device | 510(k) clearances, De Novo grants, PMA decisions | free; key lifts daily quota | built, wiring pending |
-| Semantic Scholar | citation counts and TL;DRs for stored papers | free key (required in practice) | built, wiring pending |
+| NCBI GEO | newly released Series and the platforms they ran on (study-level census) | free; key lifts rate | wired |
+| PRIDE Archive | proteomics datasets per declared mass spectrometer | free | wired |
+| CZ CELLxGENE Discover | single-cell and spatial assays behind newly public datasets | free | wired |
+| ClinicalTrials.gov v2 | newly posted studies naming watched companies or assays | free | wired |
+| NIH RePORTER v2 | S10 shared-instrumentation awards, SBIR/STTR, keyword awards | free | wired |
+| openFDA device | 510(k) clearances, De Novo grants, PMA decisions | free; key lifts daily quota | wired |
+| Semantic Scholar | citation counts and TL;DRs for stored papers | free key (required in practice) | wired |
 
 Full notes, including what did *not* work (several publisher and investor-relations feeds block
 scripts; bioRxiv full-text XML is rate-limited for non-browser clients; the OpenAlex anonymous

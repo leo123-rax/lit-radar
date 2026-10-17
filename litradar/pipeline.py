@@ -36,6 +36,7 @@ from .sources import rss as rss_src
 from .sources import semantic_scholar as s2_src
 from .sources import sra as sra_src
 from .store import FULLTEXT_SECTIONS, Store, restricted_sections
+from .track import priority_multiplier
 
 log = logging.getLogger(__name__)
 
