@@ -39,30 +39,32 @@ or "non-commercial" door is treated as closed by default (see `LEGAL.md`).
 ## 2. Four layers
 
 ```
-            INGEST                  EXTRACT                 ENRICH / RANK               DELIVER / SEARCH
- ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────────┐  ┌─────────────────────┐
- │ papers & preprints   │  │ JATS section parser  │  │ subgroup assignment      │  │ Markdown digest     │
- │  bioRxiv/medRxiv API │  │  methods, funding,   │  │  (OpenAlex topics +      │  │  (+ JSON summary)   │
- │  Europe PMC REST     │  │  COI, ack, data      │  │   keywords)              │  │ e-mail (SMTP)       │
- │  Crossref by ISSN    │→ │  availability, body  │→ │ tracked-author hits      │→ │ Slack webhook       │
- │  OpenAlex (keyed)    │  │ gazetteer matcher    │  │ heuristic score (0-10)   │  │ committed to git    │
- │  arXiv q-bio         │  │  instruments,        │  │ optional LLM rubric      │  │                     │
- │  journal/subject RSS │  │  companies, context  │  │  (Claude, Batches API)   │  │ SQLite + FTS5       │
- │                      │  │  rules               │  │ blend 0.4 / 0.6          │  │  litradar search    │
- │ archives (census)    │  │ author e-mail domains│  │ citation enrichment      │  │  litradar entity    │
- │  NCBI SRA, ENA       │  │ archive-model map    │  │  (Semantic Scholar)      │  │  litradar timeseries│
- │  GEO, PRIDE,         │  │  (controlled vocab,  │  │ data policy: full /      │  │                     │
- │  CELLxGENE (built)   │  │   no context rules)  │  │  facts_only / none       │  │ planned: dashboard, │
- │                      │  │                      │  │                          │  │  Parquet export,    │
- │ news & filings       │  │ company gazetteer    │  │                          │  │  DuckDB             │
- │  RSS, press wires,   │  │  over headlines      │  │                          │  │                     │
- │  SEC 8-K Atom,       │  │                      │  │                          │  │                     │
- │  Google News (opt-in │  │                      │  │                          │  │                     │
- │  pending), CT.gov,   │  │                      │  │                          │  │                     │
- │  NIH RePORTER,       │  │                      │  │                          │  │                     │
- │  openFDA (built)     │  │                      │  │                          │  │                     │
- └──────────────────────┘  └──────────────────────┘  └──────────────────────────┘  └─────────────────────┘
-        litradar/sources/        litradar/extract/         litradar/rank/, policy.py     litradar/digest/, store.py
+ INGEST  (litradar/sources/)                     EXTRACT  (litradar/extract/)
+ ┌─────────────────────────────────────────┐     ┌─────────────────────────────────────────┐
+ │ papers & preprints                      │     │ JATS section parser: Methods, funding,  │
+ │   bioRxiv/medRxiv API, Europe PMC REST, │     │   COI, acknowledgements, data           │
+ │   Crossref by ISSN, OpenAlex (keyed),   │ ──> │   availability, authors, e-mails, body  │
+ │   arXiv q-bio, journal/subject RSS      │     │ gazetteer matcher: instruments,         │
+ │ archives (census)                       │     │   companies, context rules              │
+ │   NCBI SRA, ENA; GEO, PRIDE,            │     │ archive-model map (controlled vocab,    │
+ │   CELLxGENE (built, not wired)          │     │   no context rules)                     │
+ │ news & filings                          │     │ company gazetteer over headlines        │
+ │   RSS, press wires, SEC 8-K Atom,       │     │                                         │
+ │   Google News (opt-in pending);         │     │                                         │
+ │   CT.gov, NIH RePORTER, openFDA (built) │     │                                         │
+ └─────────────────────────────────────────┘     └─────────────────────────────────────────┘
+                                                                     │
+                                                                     v
+ DELIVER / SEARCH  (litradar/digest/, store.py)  ENRICH / RANK  (litradar/rank/, policy.py)
+ ┌─────────────────────────────────────────┐     ┌─────────────────────────────────────────┐
+ │ Markdown digest (+ JSON summary)        │     │ subgroup assignment (OpenAlex topics +  │
+ │ e-mail (SMTP), Slack webhook,           │     │   keywords); tracked-author hits        │
+ │   committed to git                      │ <── │ heuristic score 0-10 with reasons       │
+ │ SQLite + FTS5: litradar search,         │     │ optional LLM rubric (Claude, Batches),  │
+ │   litradar entity, litradar timeseries  │     │   blend 0.4 / 0.6                       │
+ │ planned: dashboard, Parquet export,     │     │ citation enrichment (Semantic Scholar)  │
+ │   DuckDB                                │     │ data policy: full / facts_only / none   │
+ └─────────────────────────────────────────┘     └─────────────────────────────────────────┘
 ```
 
 **Ingest** is a set of dumb adapters: each yields normalised `Paper`, `ArchiveRecord` or `NewsItem`
