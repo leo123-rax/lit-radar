@@ -327,11 +327,11 @@ def test_fixture_ids_exist():
 
 
 # ---- prefilter equivalence and speed (from the store/pipeline hardening pass) ----
-import random
-import time
+import random  # noqa: E402 - appended block from a sibling branch
+import time  # noqa: E402 - appended block from a sibling branch
 
-from litradar.extract.gazetteer import _literal_token
-from litradar.extract.jats import parse_jats
+from litradar.extract.gazetteer import _literal_token  # noqa: E402 - appended block from a sibling branch
+from litradar.extract.jats import parse_jats  # noqa: E402 - appended block from a sibling branch
 
 FIX = FIXTURES / "sample_jats.xml"
 

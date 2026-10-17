@@ -21,6 +21,7 @@
                                                               fill the corpus from OpenAlex (resumable; exit 3 = paused)
   litradar trends   [--until YYYY-MM-DD] [--weeks 13] [--out DIR | --print | --json]
                                                               what changed: this week vs last week vs the trailing baseline
+  litradar export   [--parquet DIR | --csv DIR] [--duckdb FILE] [--tables a,b] [--db PATH]  export tables for analytics
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__, backfill, browser, entities, toolkit, trends
+from . import export as export_mod
 from .config import Settings
 from .digest import deliver, render
 from .extract.gazetteer import Gazetteer
@@ -451,6 +453,36 @@ def cmd_trends(args) -> int:
     path.write_text(md, encoding="utf-8")
     print(f"trends written to {path} ({len(tr['notable'])} notable movers, {len(tr['conversions'])} conversions)")
     return 0
+def cmd_export(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    db_path = Path(args.db) if args.db else settings.db_path
+    tables = [t.strip() for t in args.tables.split(",") if t.strip()] if args.tables else None
+    if not (args.parquet or args.csv or args.duckdb):
+        print("nothing to do: pass --parquet DIR, --csv DIR and/or --duckdb FILE", file=sys.stderr)
+        return 2
+    reports = []
+    failed = False
+    try:
+        if args.parquet:
+            reports.append(export_mod.export_tables(db_path, Path(args.parquet), fmt="parquet", tables=tables, chunk_size=args.chunk_size, gzip_csv=args.gzip))
+        if args.csv:
+            reports.append(export_mod.export_tables(db_path, Path(args.csv), fmt="csv", tables=tables, chunk_size=args.chunk_size, gzip_csv=args.gzip))
+        if args.duckdb:
+            try:
+                reports.append(export_mod.export_duckdb(db_path, Path(args.duckdb), tables=tables, chunk_size=args.chunk_size))
+            except export_mod.OptionalDependencyMissing as exc:
+                print(f"--duckdb skipped: {exc}", file=sys.stderr)
+                failed = True
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        # OSError covers a missing database, an output path that is a file, an unwritable destination;
+        # sqlite3.Error covers "file is not a database" and locked/corrupt files
+        print(f"export failed: {exc}", file=sys.stderr)
+        return 1
+    for rep in reports:
+        if rep.message:
+            print(rep.message, file=sys.stderr)
+    print(json.dumps([r.to_dict() for r in reports], indent=1))
+    return 1 if failed else 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -600,6 +632,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--print", action="store_true", help="print the Markdown instead of writing a file")
     p.add_argument("--json", action="store_true", help="print the structured result as JSON")
     p.set_defaults(func=cmd_trends)
+    p = sub.add_parser("export", help="export tables to Parquet/CSV files or a DuckDB database (for trend analysis)")
+    p.add_argument("--parquet", metavar="DIR", help="one <table>.parquet per table (needs pyarrow; falls back to CSV with a message)")
+    p.add_argument("--csv", metavar="DIR", help="one <table>.csv per table (standard library only)")
+    p.add_argument("--duckdb", metavar="FILE", help="write/refresh a DuckDB database (needs the duckdb package)")
+    p.add_argument("--tables", help=f"comma-separated subset; default {','.join(export_mod.DEFAULT_TABLES)}; also {','.join(export_mod.OPTIONAL_TABLES)}")
+    p.add_argument("--gzip", action="store_true", help="gzip the CSV files")
+    p.add_argument("--db", help="database to export (default: the configured LITRADAR_DB / data/radar.sqlite); opened read-only")
+    p.add_argument("--chunk-size", type=int, default=20000, help="rows per batch")
+    p.set_defaults(func=cmd_export)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")

@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS mentions (
   PRIMARY KEY (paper_id, kind, entity_id, section)
 );
 CREATE INDEX IF NOT EXISTS idx_mentions_entity ON mentions(kind, entity_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_entity_id ON mentions(entity_id);
 
 CREATE TABLE IF NOT EXISTS scores (
   paper_id TEXT PRIMARY KEY,
