@@ -15,8 +15,8 @@ records, grant records, filings and headlines. Such content appears in
   digests/   the committed weekly digests: titles, links, detected entity names, counts and
              abstract excerpts of at most 420 characters
   data/      the SQLite database (metadata, abstracts, open-licensed sections and text, derived
-             mentions) and its compressed snapshots, which the weekly workflow publishes as
-             GitHub release assets (db-latest, db-YYYY-MM)
+             mentions) and its compressed snapshots, which the weekly and daily workflows publish
+             as GitHub release assets (db-latest, db-YYYY-MM)
   .cache/    raw HTTP bodies of full-text fetches (local or on the CI runner; never committed)
 
 and remains subject to the terms of its source. Users are solely responsible for complying with
@@ -56,8 +56,12 @@ below them (litradar/http.py).
                                and is not fetched. One request every 3 seconds.
   Semantic Scholar API         API Licence Agreement; datasets ODC-BY 1.0 (attribution required).
                                1 request/s with a key.
-  GDELT Project                Open data, free for any use; the project asks for attribution.
-                               (Applies only when a GDELT news adapter is present and enabled.)
+  GDELT Project (DOC 2.0 API)  Open data: "unlimited and unrestricted use for any academic,
+                               commercial, or governmental use"; the project asks for attribution.
+                               The per-company news source, on by default (news.gdelt in
+                               config/radar.yaml); headlines, links, dates and the matched company
+                               only. GDELT asks for one request every 5 seconds; the client paces
+                               at 5.5 s and skips the remaining companies after a persistent 429.
   SEC EDGAR                    US Government work, public domain. EDGAR fair-access policy: a
                                declared User-Agent with a contact address and at most
                                10 requests/s; the feeds are skipped when no contact is configured.
@@ -70,9 +74,10 @@ below them (litradar/http.py).
   CZ CELLxGENE Discover        Curation API; dataset metadata only. Each collection carries its
                                own licence and publication link.
   Google News RSS              Google Terms of Service. news.google.com/robots.txt disallows the
-                               /rss/ path to all agents, so this project treats the source as an
-                               opt-in and documents how to switch it off (docs/LEGAL.md).
-                               Headlines and links only.
+                               /rss/ path to all agents, so this source is OFF by default and
+                               opt-in only (news.google_news: false in config/radar.yaml; see
+                               docs/LEGAL.md). When an operator turns it on: headlines and links
+                               only.
   Journal and press RSS feeds  Publisher terms; headlines, DOIs and links only. Feeds that refuse
                                scripted access are dropped, not worked around.
   Unpaywall                    When queried, requests carry the contact e-mail; the same

@@ -5,11 +5,16 @@ anyone can fork it, add their own API keys, and run it on a laptop or on GitHub 
 
 ## Dev setup
 
+Python 3.9+ and pip >= 21.3 (the package is `pyproject.toml`-only; older pips, including the
+21.2.4 shipped with macOS's command-line-tools Python, cannot do an editable install of it, hence
+the upgrade line).
+
 ```bash
 git clone <your fork>
 cd lit-radar
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,llm]"
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev,llm]"
 cp .env.example .env                   # fill in what you have; everything is optional
 python -m litradar check-config         # validates the YAML gazetteers
 python -m pytest -q -p no:warnings      # offline tests, no network needed
@@ -65,8 +70,11 @@ ruff check litradar tests
 * **Licence-aware storage:** anything that stores text must go through `litradar/policy.py` and keep
   the record's licence string.
 * **Workflow changes** keep every third-party action pinned to a full commit SHA with the tag in a
-  comment, pass `workflow_dispatch` inputs through `env:` (never inline `${{ }}` in `run:`), and keep
-  the job that holds API keys on `contents: read`.
+  comment (the same SHA for the same action in all four workflows, `pages.yml` included), pass
+  `workflow_dispatch` inputs through `env:` and validate them before use (never inline `${{ }}` in
+  `run:`), keep the job that holds API keys on `contents: read` (the single-job `daily.yml` is the
+  documented exception), and never print a secret's value, length or prefix (the presence step
+  prints names only).
 * Keep Python 3.9 compatibility (no `match`, no `X | Y` unions at runtime).
 * Run `ruff check litradar tests` and `python -m pytest -q -p no:warnings` before opening a pull
   request. Security problems go to `SECURITY.md`, not the issue tracker.
