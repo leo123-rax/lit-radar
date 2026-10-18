@@ -20,7 +20,7 @@ from .config import Settings
 from .extract.gazetteer import Gazetteer
 from .extract.jats import parse_jats
 from .http import Http
-from .models import ArchiveRecord, Author, Mention, NewsItem, Paper
+from .models import ArchiveRecord, Author, Mention, NewsItem, Paper, is_paper_record
 from .rank import heuristics
 from .sources import arxiv as arxiv_src
 from .sources import biorxiv as biorxiv_src
@@ -43,7 +43,7 @@ from .sources import rss as rss_src
 from .sources import scielo as scielo_src
 from .sources import semantic_scholar as s2_src
 from .sources import sra as sra_src
-from .store import FULLTEXT_SECTIONS, Store, restricted_sections
+from .store import FULLTEXT_SECTIONS, Store, restricted_sections, twin_title_key
 from .track import priority_multiplier
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,12 @@ def _display_key(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip()).casefold()
 
 
+def _norm_orcid(value: str) -> str:
+    """'0000-0002-1825-0097' from any of the forms sources and config use (bare, https://orcid.org/..., lower-case x)."""
+    v = re.sub(r"^https?://(?:www\.)?orcid\.org/", "", (value or "").strip(), flags=re.I).strip("/")
+    return v.upper()
+
+
 class Pipeline:
     def __init__(self, settings: Settings, http: Optional[Http] = None, store: Optional[Store] = None) -> None:
         self.settings = settings
@@ -151,6 +157,7 @@ class Pipeline:
         self.tracked_display: Dict[str, List[Tuple[str, str]]] = {}  # exact display name (casefolded) -> [(display name, subgroup)]
         self.tracked_ids: Dict[str, List[Tuple[str, str]]] = {}  # openalex id -> [(display name, subgroup)]
         self.tracked_id_for: Dict[Tuple[str, str], str] = {}  # (display name, subgroup) -> configured openalex id
+        self.tracked_orcid_for: Dict[Tuple[str, str], str] = {}  # (display name, subgroup) -> configured ORCID
         for g in self.subgroups:
             for a in g.get("tracked_authors", []) or []:
                 if a.get("name"):
@@ -158,6 +165,8 @@ class Pipeline:
                     if key:
                         self.tracked.setdefault(key, []).append((a["name"], g["id"]))
                     self.tracked_display.setdefault(_display_key(a["name"]), []).append((a["name"], g["id"]))
+                    if a.get("orcid"):
+                        self.tracked_orcid_for[(a["name"], g["id"])] = _norm_orcid(str(a["orcid"]))
                 if a.get("openalex_id"):
                     self.tracked_ids.setdefault(str(a["openalex_id"]), []).append((a.get("name", a["openalex_id"]), g["id"]))
                     if a.get("name"):
@@ -238,9 +247,12 @@ class Pipeline:
             existing.published_doi = new.published_doi
         if not existing.fulltext_url:
             existing.fulltext_url = new.fulltext_url
-        # authors: prefer the list with institution metadata, else the longer one
+        # authors: prefer the list with institution metadata, else the longer one; on a tie the list that carries
+        # author identifiers (OpenAlex ids, ORCIDs) wins, because tracked-author matching can only be exact with them
         def richness(authors):
-            return sum(1 for a in authors if a.affiliation or a.institutions or a.orcid) * 10 + len(authors)
+            with_meta = sum(1 for a in authors if a.affiliation or a.institutions or a.orcid)
+            with_ids = sum(1 for a in authors if a.openalex_id or a.orcid)
+            return (with_meta * 10 + len(authors), with_ids)
 
         if richness(new.authors) > richness(existing.authors):
             existing.authors = new.authors
@@ -262,13 +274,31 @@ class Pipeline:
     # ------------------------------------------------------------------ fetch
     def fetch_papers(self, since: str, until: str, only: Optional[Sequence[str]] = None) -> Dict[str, Paper]:
         papers: Dict[str, Paper] = {}
+        by_title: Dict[str, str] = {}  # twin_title_key -> id of the first record with that title, for DOI-less twins
 
         def add(p: Paper, src: str) -> None:
             self.counts[f"fetched.{src}"] += 1
             if p.id in papers:
                 self.merge(papers[p.id], p)
-            else:
-                papers[p.id] = p
+                return
+            # one work, two ids: a record without a DOI (Europe PMC's PMC-only entries, OpenAlex works without a DOI,
+            # RSS items) next to the DOI row from another source. Fold it onto the DOI id; two records that both
+            # carry (different) DOIs are left alone (preprint / article pairs are folded at render time).
+            key = twin_title_key(p.title)
+            other = papers.get(by_title.get(key, "")) if key else None
+            if other is not None and not (p.doi and other.doi):
+                self.counts["papers.twins_folded_in_batch"] += 1
+                if p.doi:
+                    papers.pop(other.id, None)
+                    other.id, other.doi = p.id, p.doi
+                    papers[p.id] = self.merge(other, p)
+                    by_title[key] = p.id
+                else:
+                    self.merge(other, p)
+                return
+            papers[p.id] = p
+            if key and key not in by_title:
+                by_title[key] = p.id
 
         def pulled(*srcs: str) -> None:
             """Record that a pull completed, even with zero records: `fetched.<src>` = 0 is "pulled, nothing in the
@@ -331,7 +361,9 @@ class Pipeline:
             # global topic query stops at `max_records_per_query`, and a slice intersected with
             # authorships.institutions.country_code is small enough to always come back whole; [] switches the slices off
             country_slices = [str(c).strip().upper() for c in (cfg.get("country_slices", ["CN"]) or []) if str(c).strip()]
-            base = {"from_publication_date": since, "to_publication_date": until}
+            # papers only (type:article|preprint|review): without the type filter every topic / author / ISSN query
+            # also returns datasets, supplementary-materials records, peer reviews and software deposits
+            base = {"from_publication_date": since, "to_publication_date": until, "type": openalex_src.TYPE_FILTER}
             mail, key = self.settings.contact_email, self.settings.openalex_api_key
             # every query reports how it ended; failures are folded into self.errors per query group below,
             # because an INFO-only "-> 400" in the log is how OpenAlex silently went dark in hosted runs
@@ -345,8 +377,11 @@ class Pipeline:
                 failures_before = int(stats.get("failures", 0) or 0)
                 n = 0
                 for w in openalex_src.works(self.http, flt, mail, key, maxr, state=state):
-                    add(openalex_src.to_paper(w), f"openalex.{group}")
                     n += 1
+                    if not openalex_src.is_paper_work(w):  # a figure / table component typed article or review
+                        self.counts["openalex.skipped_non_paper"] += 1
+                        continue
+                    add(openalex_src.to_paper(w), f"openalex.{group}")
                 oa_total[group] += 1
                 failed_requests = int((getattr(self.http, "stats", None) or {}).get("failures", 0) or 0) - failures_before
                 err = state.get("error")
@@ -634,6 +669,31 @@ class Pipeline:
             merged.cited_by_count = fresh.cited_by_count
         return merged
 
+    def _fold_stored_twin(self, papers: Dict[str, Paper], p: Paper) -> Optional[Dict[str, Any]]:
+        """`p` is new to the store by id; when the store holds the same work under another id (`Store.find_twin`),
+        fold the two. If the stored row is the `doi:` one (or `p` has no DOI either), `p` takes the stored id and
+        the stored row is returned for `_merge_stored`. If `p` brings the DOI the stored row lacks, the stored
+        content is merged into `p`, the old row is deleted (mentions, hits and score are re-derived under the DOI
+        id by ingest / rank) and None is returned. Returns None too when there is no twin."""
+        twin = self.store.find_twin(p)
+        if twin is None:
+            return None
+        self.counts["papers.twins_folded"] += 1
+        if str(twin["id"]).startswith("doi:") or not p.doi:
+            papers.pop(p.id, None)
+            p.id = str(twin["id"])
+            p.doi = p.doi or twin.get("doi")
+            if p.id in papers:  # the batch already holds the stored id (fetched by another source this run)
+                p = self.merge(papers[p.id], p)
+            papers[p.id] = p
+            return twin
+        merged = self._merge_stored(twin, p)
+        merged.id, merged.doi = p.id, p.doi
+        merged.url = p.url or merged.url
+        papers[p.id] = merged
+        self.store.delete_paper(str(twin["id"]))
+        return None
+
     # ------------------------------------------------------------------ tracked-author hits
     def _record_hits(self, paper_id: str, hits: Sequence[Tuple[str, str, str]]) -> int:
         """Store tracked-author hits; name-only matches (`matched_by` 'name' or 'name_no_ids') are capped per
@@ -690,8 +750,18 @@ class Pipeline:
                 merged[key] = m
         # tracked authors: an OpenAlex id is exact; otherwise the full given name + surname (or the exact display
         # name) must match, never a surname plus an initial. When the tracked person has an id configured and the
-        # record carries author ids, a different id means a different person and the name match is dropped.
+        # record carries author ids, a different id means a different person and the name match is dropped; the
+        # same for a configured ORCID against the record's ORCID. A name match must also be topically plausible:
+        # the paper has to match the tracked person's subgroup by keyword or OpenAlex topic (`assign_subgroups`),
+        # otherwise a namesake in another field is credited with the paper. Nothing is a tracked researcher's
+        # "new paper" when the record is not a paper at all: a dataset or supplement deposit credits every facility
+        # user or depositor as an author (DOE / EMSL data records list 100+ names), so those records get no hits.
         hits: List[Tuple[str, str, str]] = []
+        if not is_paper_record((p.extra or {}).get("work_type"), p.title):
+            self.counts["tracked_hits.skipped_non_paper"] += 1
+            return list(merged.values()), hits
+        topical: Optional[Set[str]] = None
+        configured_groups: Optional[Set[str]] = None
         for a in p.authors:
             if a.openalex_id and a.openalex_id in self.tracked_ids:
                 for name, grp in self.tracked_ids[a.openalex_id]:
@@ -707,6 +777,18 @@ class Pipeline:
                 if configured_id and a.openalex_id and a.openalex_id != configured_id:
                     self.counts["tracked_hits.name_rejected_other_id"] += 1
                     continue
+                configured_orcid = self.tracked_orcid_for.get((name, grp))
+                if configured_orcid and a.orcid and _norm_orcid(a.orcid) != configured_orcid:
+                    self.counts["tracked_hits.name_rejected_other_orcid"] += 1
+                    continue
+                if configured_groups is None:
+                    configured_groups = {str(g.get("id")) for g in self.subgroups if g.get("keywords") or g.get("openalex_topics")}
+                if grp in configured_groups:
+                    if topical is None:
+                        topical = set(self.assign_subgroups(p))
+                    if grp not in topical:
+                        self.counts["tracked_hits.name_rejected_off_topic"] += 1
+                        continue
                 hits.append((name, grp, "name_no_ids" if configured_id else "name"))
         return list(merged.values()), sorted(set(hits))
 
@@ -1315,11 +1397,17 @@ class Pipeline:
         try:
             papers = self.fetch_papers(since, until, only=only)
             # fold in what the store already knows BEFORE full text and extraction, so a metadata-only re-fetch
-            # never wipes Methods mentions and already-parsed papers are not fetched again
+            # never wipes Methods mentions and already-parsed papers are not fetched again; a record the store
+            # holds under another id (same PMCID or title, one side without a DOI) is folded onto that row
             for pid in list(papers):
+                p = papers.get(pid)
+                if p is None:  # re-keyed onto a twin earlier in this loop
+                    continue
                 row = self.store.get_paper(pid)
+                if row is None:
+                    row = self._fold_stored_twin(papers, p)
                 if row:
-                    papers[pid] = self._merge_stored(row, papers[pid])
+                    papers[row["id"]] = self._merge_stored(row, papers[row["id"]])
                     self.counts["papers.reingested"] += 1
             if fulltext:
                 self.attach_fulltext(papers)

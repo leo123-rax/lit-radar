@@ -348,11 +348,11 @@ def _fields(paper: Any) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[str]
     return extra, [a for a in authors if isinstance(a, dict)], [a for a in affs if isinstance(a, str)]
 
 
-def country_counts(paper: Any) -> Counter:
-    """Country code -> number of author / affiliation records pointing at it."""
-    extra, authors, affs = _fields(paper)
+def institution_country_counts(authors: List[Dict[str, Any]], extra: Dict[str, Any]) -> Counter:
+    """Country code -> number of authorships with an institution in it, from exact codes only: OpenAlex
+    ``authors_json[].institutions[].country_code`` and ``extra_json.institution_countries``. Empty when the record
+    carries no codes (then `country_counts` falls back to the affiliation strings)."""
     counts: Counter = Counter()
-    # 1. OpenAlex institution country codes (exact, when the record carries them)
     for a in authors:
         codes = {str(i.get("country_code")).upper() for i in (a.get("institutions") or []) if isinstance(i, dict) and i.get("country_code")}
         for c in codes:
@@ -360,6 +360,14 @@ def country_counts(paper: Any) -> Counter:
     for c in extra.get("institution_countries") or []:
         if isinstance(c, str) and len(c) == 2:
             counts[c.upper()] += 1
+    return counts
+
+
+def country_counts(paper: Any) -> Counter:
+    """Country code -> number of author / affiliation records pointing at it."""
+    extra, authors, affs = _fields(paper)
+    # 1. OpenAlex institution country codes (exact, when the record carries them)
+    counts = institution_country_counts(authors, extra)
     if counts:
         return counts
     # 2. affiliation strings (paper-level list + per-author strings), each distinct string once
@@ -440,6 +448,13 @@ def paper_language(title: str, abstract: str) -> str:
     return detect_language(f"{title or ''}\n{abstract or ''}")
 
 
+def _backfill_codes(extra: Dict[str, Any]) -> List[str]:
+    """The ``countries`` list ``litradar.backfill`` wrote from OpenAlex country codes, or [] for any other row."""
+    if not extra.get("backfill_source"):
+        return []
+    return [c.upper() for c in (extra.get("countries") or []) if isinstance(c, str) and len(c) == 2]
+
+
 def tag_store(
     store: Store,
     since: Optional[str] = None,
@@ -452,6 +467,11 @@ def tag_store(
     Idempotent: tags are recomputed from title / abstract / authors / affiliations each time, never
     from the previous tags. Other keys in ``extra_json`` are preserved. Rows are processed in
     ``chunk_size`` rowid chunks with a commit after each, so memory stays flat on a large corpus.
+
+    Rows written by ``litradar backfill`` are the one exception for ``countries``: the backfill records
+    OpenAlex's own institution country codes, and an older backfill row keeps no codes on its stored
+    author list, so when the row carries no exact codes to recompute from, its backfill ``countries``
+    are kept rather than replaced by a guess from affiliation strings (docs/backfill.md section 3).
 
     Tags are VOLATILE: ``Store.upsert_paper`` replaces the whole ``extra_json`` on re-ingest, so a
     paper fetched again by a later run loses them until it is tagged again. Pass
@@ -471,7 +491,15 @@ def tag_store(
             if not isinstance(extra, dict):
                 extra = {}
             lang = paper_language(title or "", abstract or "")
-            codes = country_of({"authors_json": authors_json, "affiliations_json": affs_json, "extra_json": extra})
+            row = {"authors_json": authors_json, "affiliations_json": affs_json, "extra_json": extra}
+            _, authors, _ = _fields(row)
+            if institution_country_counts(authors, extra):
+                codes = country_of(row)  # exact OpenAlex codes, most frequent first
+            else:
+                codes = _backfill_codes(extra) or country_of(row)  # backfill codes, else the affiliation-string guess
+            first = [c.upper() for c in (extra.get("first_author_countries") or []) if isinstance(c, str)]
+            if first and codes:  # a backfill row: the first author's country leads (dashboard / primary_countries)
+                codes = [c for c in codes if c in first] + [c for c in codes if c not in first]
             extra["lang"] = lang
             extra["countries"] = codes
             store.conn.execute("UPDATE papers SET extra_json=? WHERE id=?", (json.dumps(extra, ensure_ascii=False, default=str), pid))
@@ -498,9 +526,11 @@ def histograms(store: Store, since: Optional[str] = None, until: Optional[str] =
     """Language and country distributions of already-tagged papers in a window (for dashboards/trends).
 
     Read-only. ``countries`` counts a paper once per distinct country; ``primary_countries`` counts
-    only the first. ``untagged`` is the number of papers in the window with no ``lang`` tag - after a
-    re-ingest that is the count of rows whose tags were overwritten; when it is > 0 the other numbers
-    under-count and ``tag_store`` should be run again.
+    only the first. A row is tagged when it carries ``lang`` (written by ``tag_store`` and by
+    ``litradar backfill``) or, failing that, OpenAlex's ``language`` (older backfill rows). ``untagged``
+    is the number of papers in the window with neither - after a re-ingest that is the count of rows
+    whose tags were overwritten; when it is > 0 the other numbers under-count and ``tag_store`` should
+    be run again.
     """
     clauses, params = _window_clauses(since, until)
     langs: Counter = Counter()
@@ -511,10 +541,13 @@ def histograms(store: Store, since: Optional[str] = None, until: Optional[str] =
         for _rowid, extra_json in rows:
             n += 1
             extra = _loads(extra_json, {}) or {}
-            if not isinstance(extra, dict) or "lang" not in extra:
+            if not isinstance(extra, dict):
+                continue
+            lang = extra.get("lang") if "lang" in extra else (extra.get("language") or None)
+            if lang is None:
                 continue
             tagged += 1
-            langs[extra.get("lang") or "other"] += 1
+            langs[str(lang).lower() or "other"] += 1
             codes = [c for c in (extra.get("countries") or []) if isinstance(c, str)]
             if codes:
                 primary[codes[0]] += 1

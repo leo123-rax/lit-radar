@@ -7,7 +7,8 @@ topics, country codes) and both resumable through the additive ``backfill_progre
 
    GET https://api.openalex.org/works
        filter=primary_topic.id:T11289|T10222|T10621,
-              from_publication_date:2024-01-01,to_publication_date:2024-01-31
+              from_publication_date:2024-01-01,to_publication_date:2024-01-31,
+              type:article|preprint|review
               [,institutions.country_code:cn]
        search.title_and_abstract="single-cell RNA" OR "scRNA-seq" OR ...        (omitted with --topics-only)
        per-page=200 & cursor=* & select=<BACKFILL_SELECT> [& mailto=<LITRADAR_CONTACT_EMAIL>]
@@ -83,10 +84,16 @@ topics, country codes) and both resumable through the additive ``backfill_progre
    is_corresponding}, primary_location{source{display_name,issn,type},landing_page_url,license}, funders[],
    awards[], cited_by_count, countries_distinct_count, updated_date. There is no ``grants`` key.
 
-Every paper written by either route carries, in ``extra_json``: ``countries`` (ISO 3166-1 alpha-2 codes of all
-author institutions), ``first_author_countries``, ``language``, ``subgroups``, ``backfill_source`` and ``match``
+Only papers are written: works whose OpenAlex ``type`` is not article / preprint / review (datasets, supplementary
+materials, peer reviews, software, dissertations, errata ...) are excluded by the ``type:`` filter on the API route and
+by the matcher on the snapshot route, and figure / table / data component records ("Figure S5 from <article>") are
+dropped by title whatever their type (``litradar.models.is_paper_record``).
+
+Every paper written by either route carries, in ``extra_json``: ``countries`` (ISO 3166-1 alpha-2 codes of all author
+institutions, first-author countries first), ``first_author_countries``, ``language`` (OpenAlex) and ``lang`` (the
+key ``litradar.i18n`` reads and writes), ``work_type``, ``subgroups``, ``backfill_source`` and ``match``
 (``"topic+keyword"`` or ``"topic"``), so country, language and subgroup trends can be computed later straight from
-the ``papers`` table (see docs/backfill.md).
+the ``papers`` table (see docs/backfill.md and docs/i18n.md).
 """
 from __future__ import annotations
 
@@ -99,6 +106,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
+from . import i18n
 from .http import Http
 from .models import Paper
 from .sources import openalex
@@ -214,6 +222,7 @@ def subgroup_filters(group: Dict[str, Any], month: str, country: str = "", topic
         "primary_topic.id": openalex.or_join(topics),
         "from_publication_date": start,
         "to_publication_date": end,
+        "type": openalex.TYPE_FILTER,  # papers only: no datasets, supplements, peer reviews, software (docs/DESIGN.md)
     }
     if country:
         flt[COUNTRY_FILTER] = country.strip().lower()
@@ -226,7 +235,11 @@ def subgroup_filters(group: Dict[str, Any], month: str, country: str = "", topic
 
 # ---------------------------------------------------------------- tagging --------------------------------------
 def country_codes(w: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """(all author-institution countries, first-author countries) as sorted upper-case ISO codes."""
+    """(all author-institution countries, first-author countries) as upper-case ISO codes.
+
+    The first list puts the first author's countries first (sorted), then the rest (sorted), so ``countries[0]`` is
+    the paper's primary country for the dashboard and ``i18n.histograms`` rather than the alphabetically smallest
+    code; the second list is sorted."""
     allc: Set[str] = set()
     first: Set[str] = set()
     for i, a in enumerate(w.get("authorships") or []):
@@ -241,15 +254,20 @@ def country_codes(w: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         allc |= codes
         if i == 0 or a.get("author_position") == "first":
             first |= codes
-    return sorted(allc), sorted(first)
+    return sorted(first) + sorted(allc - first), sorted(first)
 
 
 def tag_paper(p: Paper, w: Dict[str, Any], subgroups: Sequence[str], source: str, match: str = MATCH_TOPIC_KEYWORD) -> Paper:
-    """Add country / language / subgroup / match tags to a Paper built by openalex.to_paper (metadata only)."""
+    """Add country / language / subgroup / match tags to a Paper built by openalex.to_paper (metadata only).
+
+    ``countries`` and ``lang`` are the keys ``litradar.i18n`` (``tag_store`` / ``histograms``, the dashboard's
+    country pages) read, so a backfilled row counts as tagged without a separate ``litradar tag`` pass; ``language``
+    keeps OpenAlex's own value. ``lang`` is OpenAlex's ``language`` when present, else the house detector."""
     allc, first = country_codes(w)
     p.extra["countries"] = allc
     p.extra["first_author_countries"] = first
     p.extra["language"] = w.get("language") or ""
+    p.extra["lang"] = (w.get("language") or "").strip().lower() or i18n.paper_language(p.title, p.abstract)
     p.extra["subgroups"] = sorted(set(subgroups))
     p.extra["backfill_source"] = source
     p.extra["match"] = match
@@ -478,7 +496,7 @@ def run_api(
     units = plan(groups, from_month, to_month, countries)
     report: Dict[str, Any] = {
         "units": len(units), "skipped": 0, "done": 0, "papers_fetched": 0, "papers_new": 0, "papers_updated": 0,
-        "capped_units": [], "errors": [], "stopped": None, "message": "",
+        "skipped_non_paper": 0, "capped_units": [], "errors": [], "stopped": None, "message": "",
     }
     verified = not do_probe  # the probe / boolean-syntax check runs on units until it is conclusive
     match = MATCH_TOPIC if topics_only else MATCH_TOPIC_KEYWORD
@@ -488,7 +506,7 @@ def run_api(
             continue
         label = _label(subgroup, month, country)
         flt, search = subgroup_filters(by_id[subgroup], month, country, topics_only)
-        fetched = new = 0
+        fetched = new = skipped = 0
         state: Dict[str, Any] = {}
         try:
             if not verified:
@@ -497,6 +515,9 @@ def run_api(
                 http, flt, mailto, api_key, max_records=max_per_month, select=select, extra_params=search or None, state=state
             ):
                 fetched += 1
+                if not openalex.is_paper_work(w):  # a component record typed article / review slips past the type: filter
+                    skipped += 1
+                    continue
                 if upsert_work(store, w, [subgroup], "api", match):
                     new += 1
                 if fetched % 200 == 0:
@@ -506,7 +527,8 @@ def run_api(
             store.commit()
             report["papers_fetched"] += fetched
             report["papers_new"] += new
-            report["papers_updated"] += fetched - new
+            report["papers_updated"] += fetched - new - skipped
+            report["skipped_non_paper"] += skipped
             report["stopped"] = "request"
             report["message"] = (
                 f"OpenAlex rejected the request ({exc}). Nothing to retry until the query is fixed; "
@@ -519,7 +541,8 @@ def run_api(
             store.commit()
             report["papers_fetched"] += fetched
             report["papers_new"] += new
-            report["papers_updated"] += fetched - new
+            report["papers_updated"] += fetched - new - skipped
+            report["skipped_non_paper"] += skipped
             report["stopped"] = "budget"
             report["message"] = (
                 f"OpenAlex refused the request (budget or rate limit): {str(exc)[:300]}. Progress saved: {report['done']} unit(s) "
@@ -531,7 +554,8 @@ def run_api(
         store.commit()
         report["papers_fetched"] += fetched
         report["papers_new"] += new
-        report["papers_updated"] += fetched - new
+        report["papers_updated"] += fetched - new - skipped
+        report["skipped_non_paper"] += skipped
         if not state.get("complete") and not state.get("capped"):
             reason = state.get("error") or "pager stopped early"
             report["errors"].append(f"{label}: {reason}; {fetched} fetched, unit left for the next run")
@@ -605,6 +629,8 @@ class SnapshotMatcher:
             return [], ""
         candidates = [(gid, rx) for gid, topics, rx in self.groups if topic in topics]
         if not candidates:
+            return [], ""
+        if not openalex.is_paper_work(w):  # the offline counterpart of the API route's type: filter
             return [], ""
         pub = w.get("publication_date") or ""
         if self.start and (not pub or pub < self.start):

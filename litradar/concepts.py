@@ -43,6 +43,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import yaml
 
 from .extract.gazetteer import _is_ambiguous, load_entries
+from .models import is_paper_record
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -827,15 +828,27 @@ def ensure_schema(store: Store) -> None:
 
 
 # ---- counting -----------------------------------------------------------------------------
+def _is_paper(row: Dict[str, Any]) -> bool:
+    """Papers only: a dataset, supplementary-materials, peer-review or software record (``extra_json.work_type``), or
+    a figure / table / data component of an article ("Figure S5 from ..."), is not a paper and must not be counted -
+    one article with eleven supplementary figures otherwise becomes a twelve-paper burst."""
+    try:
+        extra = json.loads(row.get("extra_json") or "{}") or {}
+    except ValueError:
+        extra = {}
+    work_type = extra.get("work_type") if isinstance(extra, dict) else None
+    return is_paper_record(work_type if isinstance(work_type, str) else None, row.get("title"))
+
+
 def _paper_rows(store: Store, first_week: str, last_week: str) -> List[Dict[str, Any]]:
     last_day = (datetime.strptime(last_week, "%Y-%m-%d").date() + timedelta(days=6)).isoformat()
     cur = store.conn.execute(
-        """SELECT id, title, abstract, sections_json, pub_date, first_seen FROM papers
+        """SELECT id, title, abstract, sections_json, pub_date, first_seen, extra_json FROM papers
            WHERE (pub_date >= ? AND pub_date <= ?)
               OR (pub_date = '' AND substr(first_seen,1,10) >= ? AND substr(first_seen,1,10) <= ?)""",
         (first_week, last_day, first_week, last_day),
     )
-    return _dicts(cur)
+    return [r for r in _dicts(cur) if _is_paper(r)]
 
 
 def _effective_date(row: Dict[str, Any]) -> str:

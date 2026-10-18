@@ -44,7 +44,10 @@ form is kept for display.
 ## Counting and burst detection
 
 `concept_counts(term, week, papers)` holds distinct papers per term per ISO week (Monday key), built from
-the paper's `pub_date` or, when a feed has no date, its `first_seen`. `concept_papers(term, paper_id,
+the paper's `pub_date` or, when a feed has no date, its `first_seen`. Only paper records are counted: a row whose
+`extra_json.work_type` is not article / preprint / review (a dataset, supplement, peer review or software deposit)
+or whose title is a figure / table / data component of an article ("Figure S5 from ...") is skipped
+(`litradar.models.is_paper_record`), so one article with eleven supplementary-figure DOIs is not a twelve-paper burst. `concept_papers(term, paper_id,
 week, channel)` keeps the links so examples, co-mentioned instruments/companies (a join on `mentions`)
 and subgroup overlaps can be reported. Both tables are created additively by `litradar/concepts.py`
 (`CREATE TABLE IF NOT EXISTS`); `store.py` is untouched.

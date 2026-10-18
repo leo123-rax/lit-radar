@@ -11,10 +11,22 @@ import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from ..http import Http
-from ..models import Author, Paper, normalize_doi
+from ..models import PAPER_WORK_TYPES, Author, Paper, is_paper_record, normalize_doi
 
 log = logging.getLogger(__name__)
 WORKS = "https://api.openalex.org/works"
+# `type:` filter value every works query carries (docs/DESIGN.md: "Always add type:article|preprint to avoid dataset
+# deposits polluting leaderboards"): without it a topic / author / ISSN query returns datasets, supplementary-materials
+# records ("Figure S5 from ..."), peer reviews, software and dissertations, which the pipeline would store as papers.
+TYPE_FILTER = "|".join(PAPER_WORK_TYPES)
+# Preprint servers OpenAlex hosts as `source.type == "repository"`. A work on one of these is a preprint whatever its
+# `type` says; any OTHER repository (Zenodo, Figshare, wwPDB, EMPIAR, institutional archives) is a deposit, not a
+# preprint, so `source.type == "repository"` alone never decides.
+PREPRINT_SERVERS = frozenset({
+    "biorxiv", "medrxiv", "research square", "arxiv", "chemrxiv", "ssrn", "preprints.org", "authorea", "osf preprints",
+    "europe pmc", "sciety", "techrxiv", "chinaxiv", "jxiv", "scielo preprints", "africarxiv", "peerj preprints",
+    "preprints with the lancet", "cell sneak peek",
+})
 SELECT = ",".join(
     [
         "id", "doi", "title", "publication_date", "type", "primary_location", "authorships",
@@ -158,7 +170,10 @@ def to_paper(w: Dict[str, Any]) -> Paper:
     affs: List[str] = []
     for a in w.get("authorships") or []:
         au = a.get("author") or {}
-        insts = [{"name": i.get("display_name"), "type": i.get("type"), "ror": i.get("ror")} for i in (a.get("institutions") or [])]
+        insts = [
+            {"name": i.get("display_name"), "type": i.get("type"), "ror": i.get("ror"), "country_code": (i.get("country_code") or "").upper() or None}
+            for i in (a.get("institutions") or [])
+        ]
         raw = a.get("raw_affiliation_strings") or []
         affs.extend(raw)
         authors.append(
@@ -171,7 +186,8 @@ def to_paper(w: Dict[str, Any]) -> Paper:
             )
         )
     topics = [t.get("display_name") for t in (w.get("topics") or []) if t.get("display_name")]
-    is_preprint = (w.get("type") or "") == "preprint" or (src.get("type") == "repository")
+    work_type = str(w.get("type") or "").strip().lower()
+    is_preprint = work_type == "preprint" or is_preprint_server(src)
     grants = [g.get("funder_display_name") for g in (w.get("grants") or []) if g.get("funder_display_name")]
     p = Paper(
         id=Paper.make_id("openalex", oa_id, doi),
@@ -190,6 +206,7 @@ def to_paper(w: Dict[str, Any]) -> Paper:
         topics=topics,
         extra={
             "openalex_id": oa_id,
+            "work_type": work_type,
             "primary_topic": ((w.get("primary_topic") or {}).get("id") or "").rsplit("/", 1)[-1],
             "company_institutions": sorted({i["name"] for a in authors for i in a.institutions if (i.get("type") == "company" and i.get("name"))}),
             "grants": grants,
@@ -198,6 +215,24 @@ def to_paper(w: Dict[str, Any]) -> Paper:
     if grants:
         p.sections["funding"] = "; ".join(grants)
     return p
+
+
+def is_preprint_server(src: Optional[Dict[str, Any]]) -> bool:
+    """True when a work's primary source is a known preprint server (see PREPRINT_SERVERS)."""
+    name = str((src or {}).get("display_name") or "").strip().lower()
+    if not name:
+        return False
+    if name in PREPRINT_SERVERS:
+        return True
+    return any(name.startswith(k + " ") or name.startswith(k + " (") for k in PREPRINT_SERVERS)
+
+
+def is_paper_work(w: Dict[str, Any]) -> bool:
+    """Is a raw OpenAlex work a paper (type article / preprint / review and not a figure / table / data component)?
+
+    The `type:` filter keeps most non-papers out of the answer, but component records of an article are sometimes
+    typed `review` or `article` by the publisher portal, so callers check the parsed work too."""
+    return is_paper_record(w.get("type"), w.get("title"))
 
 
 def or_join(values: Iterable[str]) -> str:

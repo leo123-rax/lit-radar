@@ -17,6 +17,65 @@ def normalize_doi(doi: Optional[str]) -> Optional[str]:
     return m.group(0).rstrip(".,;)").lower()
 
 
+# Version suffixes that publishers mint as separate DOIs for one work. Each variant resolves on its own, so
+# `Paper.doi` keeps the DOI a source gave; only the row key (`Paper.make_id`) folds them, so one work is one row.
+#   eLife reviewed preprints: 10.7554/elife.108336.1, .2, .3 -> version of record 10.7554/elife.108336
+#     (a single digit only: the three-digit 10.7554/elife.00003.001 form is a figure / component DOI, left alone)
+#   Research Square:          10.21203/rs.3.rs-1234567/v1, /v2 -> 10.21203/rs.3.rs-1234567
+_DOI_VERSION_SUFFIXES = (
+    re.compile(r"^(10\.7554/elife\.\d{5,6})\.\d$"),
+    re.compile(r"^(10\.21203/rs\.3\.rs-\d+)/v\d+$"),
+)
+
+
+def canonical_doi(doi: Optional[str]) -> Optional[str]:
+    """`normalize_doi` plus the version-suffix folding above; the DOI form used to key `papers` rows."""
+    nd = normalize_doi(doi)
+    if not nd:
+        return None
+    for rx in _DOI_VERSION_SUFFIXES:
+        m = rx.match(nd)
+        if m:
+            return m.group(1)
+    return nd
+
+
+# OpenAlex `type` values stored as papers (docs/DESIGN.md: "Always add type:article|preprint to avoid dataset deposits
+# polluting leaderboards"; reviews are papers too). Everything else OpenAlex types - dataset, supplementary-materials,
+# other, paratext, peer-review, software, dissertation, erratum, book-chapter, conference-abstract ... - is not a paper.
+PAPER_WORK_TYPES = ("article", "preprint", "review")
+
+# Component records that publisher portals mint one DOI per figure / table / data file for, titled
+# "Figure S5 from <article>", "Table 2 from <article>", "Supplementary material from "<article>"", "Data from <article>".
+# Some arrive typed `review` or `article`, so the title is checked as well as the type.
+_COMPONENT_TITLE_RE = re.compile(
+    r"^(?:supplementa(?:ry|l)\s+)?"
+    r"(?:figures?|figs?\.?|tables?|data|datasets?|videos?|movies?|images?|files?|materials?|methods?|information|appendix|appendices)"
+    r"(?:"
+    r"\s+S?\d+[a-z]?(?:\s*[-\u2013]\s*S?\d+)?\.?\s+from\s+\S"  # numbered: "Figure S5 from ...", "Table 2 from ...", "Figures S1-S51 from ..."
+    r"|\s+S?\d+[a-z]?\.\s+.{0,200}?\s+from\s+\S"  # "Table S1. <caption> from <article>"
+    r"|\s+from\s+(?-i:[\"\u201c'A-Z])"  # bare label: "Data from <Title Case article>", "Supplementary material from \"...\""
+    r")",
+    re.I | re.S,
+)
+
+
+def is_component_title(title: Optional[str]) -> bool:
+    """True for a figure / table / supplement / data-file record of an article (see `_COMPONENT_TITLE_RE`)."""
+    return bool(_COMPONENT_TITLE_RE.match((title or "").strip()))
+
+
+def is_paper_record(work_type: Optional[str], title: Optional[str] = None) -> bool:
+    """Is a record a paper (article, preprint or review) rather than a dataset, supplement, software deposit ...?
+
+    `work_type` is the OpenAlex `type` (``extra_json.work_type``); an empty / unknown value is accepted because
+    sources other than OpenAlex do not record one. A component title (`is_component_title`) is never a paper."""
+    wt = (work_type or "").strip().lower()
+    if wt and wt not in PAPER_WORK_TYPES:
+        return False
+    return not is_component_title(title)
+
+
 @dataclass
 class Author:
     name: str
@@ -52,7 +111,9 @@ class Paper:
 
     @staticmethod
     def make_id(source: str, native_id: str, doi: Optional[str]) -> str:
-        nd = normalize_doi(doi)
+        """'doi:<canonical doi>' when a DOI exists (version suffixes folded, see `canonical_doi`), else
+        '<source>:<native id>'."""
+        nd = canonical_doi(doi)
         return f"doi:{nd}" if nd else f"{source}:{native_id}"
 
     def text_for(self, section: str) -> str:

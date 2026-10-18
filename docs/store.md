@@ -143,3 +143,30 @@ group sibling entries before the limit (the map is `Gazetteer.families`, built f
 ("NovaSeq X" for `novaseq-x`), and `papers` counts distinct papers across the members, so a paper naming both NovaSeq X
 and NovaSeq X Plus counts once. Rows of entries without a family carry `family: ''` and `members: [entity_id]`, and
 the default (`families=None`) is byte-for-byte the previous behaviour.
+
+## One work, one row
+
+Sources key a paper by DOI when they have one and by their own id otherwise (`Paper.make_id`: `doi:<doi>` else
+`<source>:<native id>`), and some publishers mint a DOI per version. Three rules keep one work on one row:
+
+* **Version DOIs fold into the row key** (`litradar.models.canonical_doi`): eLife reviewed-preprint versions
+  `10.7554/elife.108336.1` / `.2` / `.3` key `doi:10.7554/elife.108336` (the version of record; the three-digit
+  `10.7554/elife.00003.001` form is a figure DOI and is left alone), Research Square `10.21203/rs.3.rs-N/v1` / `/v2`
+  key `doi:10.21203/rs.3.rs-N`. `papers.doi` keeps the DOI the source gave, so every version still resolves.
+* **A DOI-less record is folded onto the DOI row of the same work.** Within one fetch, `Pipeline.fetch_papers` folds a
+  record without a DOI (Europe PMC's PMC-only entries, OpenAlex works without a DOI, RSS items) onto a record with
+  the same normalised title (`twin_title_key`: at least 25 characters and 4 words) that carries a DOI, and re-keys
+  the pair under the DOI (`papers.twins_folded_in_batch`). Against the store, `Store.find_twin` looks a new id up
+  by PMCID (`extra_json.pmcid`) and then by title (publication dates, when both are known, within 400 days); the
+  pipeline then either gives the fetched record the stored id (when the stored row is the `doi:` one) or merges
+  the stored row into the fetched DOI record and deletes it (`Store.delete_paper`: the row, its mentions, score,
+  tracked-author hits, concept links and FTS row; mentions and score are re-derived under the DOI id in the same
+  run). Counted as `papers.twins_folded`. Two records that both carry (different) DOIs are never folded: a
+  preprint and its article are paired at render time by `collapse_preprints`.
+* Two expression indexes support the lookup and are created on open: `idx_papers_title_key` on
+  `lower(rtrim(title, '. '))` and `idx_papers_pmcid` on `json_extract(extra_json, '$.pmcid')` (about two seconds
+  once on a 1 GB store).
+
+Rows written before these rules can be listed with
+`SELECT e.id, d.id FROM papers e JOIN papers d ON lower(rtrim(e.title, '. ')) = lower(rtrim(d.title, '. ')) AND d.id LIKE 'doi:%' WHERE e.id NOT LIKE 'doi:%' AND length(e.title) > 25`
+and are folded by the next run that fetches either side again.

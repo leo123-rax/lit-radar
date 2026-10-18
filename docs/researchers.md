@@ -9,8 +9,9 @@ should flag (`tracked_authors`). Each entry is one flow mapping on one line:
 
 * `name` is the display name the digest prints and the fallback matcher uses.
 * `openalex_id` makes matching exact. `""` means "not resolved yet": the person is then matched by name only.
-* `orcid` is recorded when OpenAlex knows it. The matcher does not use it yet; it is the stable handle for
-  re-resolving a profile after OpenAlex splits or merges it (`/authors?filter=orcid:0000-...`).
+* `orcid` is recorded when OpenAlex knows it. The matcher uses it to reject a name match whose record carries a
+  different ORCID (another person), and it is the stable handle for re-resolving a profile after OpenAlex splits or
+  merges it (`/authors?filter=orcid:0000-...`).
 * `institution` is a free-text hint for humans and for the resolver's institution check; it is never matched
   against papers.
 
@@ -22,7 +23,11 @@ should flag (`tracked_authors`). Each entry is one flow mapping on one line:
 are only found when one of their papers arrives through another source or query (a subgroup topic query,
 bioRxiv, Europe PMC, a journal feed).
 
-**Match** (`Pipeline.extract`). For every author on every stored record:
+**Match** (`Pipeline.extract`). First the record itself: a record that is not a paper produces no hits at all
+(`tracked_hits.skipped_non_paper`) - an OpenAlex `type` of dataset / supplementary-materials / software / peer-review
+(`extra_json.work_type`) or a figure / table / data component title ("Figure S5 from ..."). A data deposit credits
+every facility user or depositor as an author (DOE / EMSL data records list 100+ names, bulk-attributed to each
+of them), so it is never a tracked researcher's new paper. Then, for every author on the record:
 
 1. If the record's author carries an OpenAlex id that is in the tracked list, it is a hit with `matched_by`
    `openalex_id`. This is exact and is never capped.
@@ -37,7 +42,14 @@ bioRxiv, Europe PMC, a journal feed).
      bioRxiv and Europe PMC records): the hit is kept with `matched_by` **`name_no_ids`**. The digest prints it
      with the caveat "name match; the record carried no OpenAlex author ids, so the configured id could not be
      checked";
-   * no id configured: `matched_by` `name`, printed with "name match; add the OpenAlex id to make it exact".
+   * no id configured: `matched_by` `name`, printed with "name match; add the OpenAlex id to make it exact";
+   * the tracked person has an ORCID configured **and** the record's author carries a *different* ORCID: another
+     person, dropped (`tracked_hits.name_rejected_other_orcid`);
+   * **topical plausibility**: a name match is kept only when the paper matches the tracked person's subgroup by
+     keyword or OpenAlex topic (`Pipeline.assign_subgroups`, the same rule that files papers under subgroups).
+     A namesake's insect-phylogenomics paper does not match a CRISPR subgroup and is dropped
+     (`tracked_hits.name_rejected_off_topic`). Id hits are never gated this way. A subgroup configured without
+     keywords and topics cannot judge plausibility and lets name matches through as before.
 
 **Per-name cap.** Name-only hits (`name` and `name_no_ids`) are capped per tracked name per run:
 `tracked_authors.name_match_cap` in `config/radar.yaml`, default 5. Hits beyond the cap are not stored

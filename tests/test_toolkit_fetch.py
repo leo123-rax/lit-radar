@@ -219,7 +219,7 @@ def test_europepmc_section_query_and_records(fake, tmp_path):
     rc = cli.main(["fetch", "europepmc", "--section", "methods", "--terms", "NovaSeq X, Xenium", "--since", "2026-10-10", "--until", "2026-10-17", "--out", str(out)])
     assert rc == 0
     params = http.calls[0][2]
-    assert params["query"] == '(METHODS:"NovaSeq X" OR METHODS:"Xenium") AND (FIRST_PDATE:[2026-10-10 TO 2026-10-17]) AND (OPEN_ACCESS:y)'
+    assert params["query"] == '(METHODS:"NovaSeq X" OR METHODS:"Xenium") AND ((FIRST_PDATE:[2026-10-10 TO 2026-10-17]) OR (CREATION_DATE:[2026-10-10 TO 2026-10-17] AND FIRST_PDATE:[2026-09-10 TO 2026-10-17])) AND (OPEN_ACCESS:y)'
     assert params["resultType"] == "core" and params["cursorMark"] == "*"
     rows = _lines(out)
     assert rows[0]["id"] == "doi:10.1038/s41592-026-1" and rows[0]["journal"] == "Nature methods" and rows[0]["extra"]["pmcid"] == "PMC999"
@@ -230,14 +230,14 @@ def test_europepmc_issn_query_all_access_and_verbatim_query(fake, tmp_path):
     http = fake([{"resultList": {"result": []}}, {"resultList": {"result": []}}, {"resultList": {"result": []}}, {"resultList": {"result": []}}])
     out = str(tmp_path / "q.jsonl")
     assert cli.main(["fetch", "europepmc", "--issn", "1548-7091,0028-0836", "--issn", "1476-4687", "--since", "2026-10-01", "--until", "2026-10-07", "--out", out]) == 0
-    assert http.calls[0][2]["query"] == '(ISSN:"1548-7091" OR ISSN:"0028-0836" OR ISSN:"1476-4687") AND (FIRST_PDATE:[2026-10-01 TO 2026-10-07])'
+    assert http.calls[0][2]["query"] == '(ISSN:"1548-7091" OR ISSN:"0028-0836" OR ISSN:"1476-4687") AND ((FIRST_PDATE:[2026-10-01 TO 2026-10-07]) OR (CREATION_DATE:[2026-10-01 TO 2026-10-07] AND FIRST_PDATE:[2026-09-01 TO 2026-10-07]))'
     assert cli.main(["fetch", "europepmc", "--section", "COMP_INT", "--terms", "Acme", "--all-access", "--since", "2026-10-01", "--until", "2026-10-07", "--out", out]) == 0
-    assert http.calls[1][2]["query"] == '(COMP_INT:"Acme") AND (FIRST_PDATE:[2026-10-01 TO 2026-10-07])'
+    assert http.calls[1][2]["query"] == '(COMP_INT:"Acme") AND ((FIRST_PDATE:[2026-10-01 TO 2026-10-07]) OR (CREATION_DATE:[2026-10-01 TO 2026-10-07] AND FIRST_PDATE:[2026-09-01 TO 2026-10-07]))'
     # a verbatim query is sent as-is when no window was asked for, and AND-ed with the window otherwise
     assert cli.main(["fetch", "europepmc", "--query", 'TITLE:"spatial" AND OPEN_ACCESS:y', "--out", out]) == 0
     assert http.calls[2][2]["query"] == 'TITLE:"spatial" AND OPEN_ACCESS:y'
     assert cli.main(["fetch", "europepmc", "--query", 'TITLE:"spatial"', "--since", "2026-10-01", "--until", "2026-10-07", "--out", out]) == 0
-    assert http.calls[3][2]["query"] == '(TITLE:"spatial") AND (FIRST_PDATE:[2026-10-01 TO 2026-10-07])'
+    assert http.calls[3][2]["query"] == '(TITLE:"spatial") AND ((FIRST_PDATE:[2026-10-01 TO 2026-10-07]) OR (CREATION_DATE:[2026-10-01 TO 2026-10-07] AND FIRST_PDATE:[2026-09-01 TO 2026-10-07]))'
 
 
 def test_europepmc_fulltext_uses_the_pmcid(fake, tmp_path):

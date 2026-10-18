@@ -9,7 +9,14 @@ Tests: `tests/test_sources_offline.py::test_europepmc_*` (canned payloads, no ne
 * Full text: `GET https://www.ebi.ac.uk/europepmc/webservices/rest/{PMCID}/fullTextXML` (open-access subset only)
 
 Query builders: `journal_query(issns, start, end)`, `section_query(field, terms, start, end, open_access_only=True)`
-with `field` in METHODS / BODY / COMP_INT / ACK_FUND / AFF / ABSTRACT, and `date_clause` = `FIRST_PDATE:[start TO end]`.
+with `field` in METHODS / BODY / COMP_INT / ACK_FUND / AFF / ABSTRACT, and `date_clause(start, end)` =
+`((FIRST_PDATE:[start TO end]) OR (CREATION_DATE:[start TO end] AND FIRST_PDATE:[start-30d TO end]))`: records first
+published in the window, plus records that entered the index in the window with a publication date up to
+`INDEX_LAG_DAYS` (30) earlier. PubMed records reach Europe PMC 1-14 days after publication (median ~8, docs/live.md),
+so a publication-date window over the last day or two is structurally empty (`SRC:MED` 1-day: 27 records by
+`FIRST_PDATE` vs 2,831 by `CREATION_DATE` on 2026-10-18) and the daily `update` would miss most Methods / COI
+mentions without the second arm; the 30-day floor keeps legacy back-files out. `index_window=False` gives the plain
+publication-date clause for historical pulls.
 
 ## Record shapes (verified live 2026-10-17, `resultType=core`)
 

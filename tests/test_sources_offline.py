@@ -43,7 +43,9 @@ def test_europepmc_to_paper_and_queries():
     assert p.authors[0].orcid == "0000-0002-1" and p.affiliations == ["Illumina, San Diego"]
     assert p.sections["funding"] == "NIH"
     q = europepmc.section_query("METHODS", ["NovaSeq", "Xenium"], "2026-10-10", "2026-10-17")
-    assert q == '(METHODS:"NovaSeq" OR METHODS:"Xenium") AND (FIRST_PDATE:[2026-10-10 TO 2026-10-17]) AND (OPEN_ACCESS:y)'
+    # the window admits records first published in it OR indexed in it (Europe PMC loads PubMed records 1-14 days late)
+    assert q == '(METHODS:"NovaSeq" OR METHODS:"Xenium") AND ((FIRST_PDATE:[2026-10-10 TO 2026-10-17]) OR (CREATION_DATE:[2026-10-10 TO 2026-10-17] AND FIRST_PDATE:[2026-09-10 TO 2026-10-17])) AND (OPEN_ACCESS:y)'
+    assert europepmc.date_clause("2026-10-10", "2026-10-17", index_window=False) == "(FIRST_PDATE:[2026-10-10 TO 2026-10-17])"
     assert europepmc.journal_query(["1548-7091"], "2026-10-10", "2026-10-17").startswith('(ISSN:"1548-7091")')
 
 

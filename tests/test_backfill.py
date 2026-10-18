@@ -119,7 +119,8 @@ def test_months_and_bounds():
 
 def test_subgroup_filters_use_documented_names_and_search_parameter():
     flt, params = backfill.subgroup_filters(GROUPS[0], "2024-01", country="cn")
-    assert flt == {"primary_topic.id": "T11289|T10222", "from_publication_date": "2024-01-01", "to_publication_date": "2024-01-31", "institutions.country_code": "cn"}
+    assert flt == {"primary_topic.id": "T11289|T10222", "from_publication_date": "2024-01-01", "to_publication_date": "2024-01-31",
+                   "type": "article|preprint|review", "institutions.country_code": "cn"}  # papers only (docs/DESIGN.md)
     assert params == {"search.title_and_abstract": '"single-cell RNA" OR "scRNA-seq"'}
     assert backfill.SEARCH_FILTER not in flt  # the deprecated filter form is not sent
     flt, params = backfill.subgroup_filters(GROUPS[0], "2024-01")
@@ -266,7 +267,7 @@ def test_api_run_pages_upserts_and_records_progress(tmp_path):
     assert http.calls[0]["params"][SEARCH] == '"single-cell RNA" OR "scRNA-seq"' and http.calls[1]["params"][SEARCH] == '"single-cell RNA"'
     assert SEARCH not in http.calls[2]["params"]
     p = http.calls[3]["params"]
-    assert p["filter"] == "primary_topic.id:T11289|T10222,from_publication_date:2024-01-01,to_publication_date:2024-01-31"
+    assert p["filter"] == "primary_topic.id:T11289|T10222,from_publication_date:2024-01-01,to_publication_date:2024-01-31,type:article|preprint|review"
     assert p[SEARCH] == '"single-cell RNA" OR "scRNA-seq"' and ".search:" not in p["filter"]
     assert p["select"] == backfill.BACKFILL_SELECT and p["mailto"] == "me@example.org" and p["per-page"] == 200
     assert http.calls[3]["headers"]["Authorization"] == "Bearer k"

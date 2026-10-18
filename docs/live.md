@@ -53,9 +53,13 @@ measured against the live APIs on 2026-10-17 with the queries noted, so they can
 
 ### Europe PMC (PubMed records, `SRC:MED`)
 
-Europe PMC exposes `firstPublicationDate` (what the pipeline filters on with `FIRST_PDATE`) and
-`firstIndexDate` (when the record entered Europe PMC). Two cohorts, every record paged with
-`cursorMark`:
+Europe PMC exposes `firstPublicationDate` (`FIRST_PDATE`) and `firstIndexDate` / `CREATION_DATE`
+(when the record entered Europe PMC). Because of the lag measured below, the pipeline's window
+(`europepmc.date_clause`) collects records first published in the window OR created in the index in
+the window with a publication date at most 30 days earlier (`INDEX_LAG_DAYS`), so a daily pull
+collects what became available that day instead of the structurally thin leading edge: on
+2026-10-18 `ISSN:"0028-0836"` over 2026-10-11..18 answered 0 records by `FIRST_PDATE` alone and 102
+with the combined clause. Two cohorts, every record paged with `cursorMark`:
 
 | Publication day | Records | indexed same day | within 1 d | within 2 d | within 7 d | within 9 d | within 14 d | max lag |
 |---|---|---|---|---|---|---|---|---|

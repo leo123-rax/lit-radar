@@ -38,7 +38,7 @@ import os
 import re
 import sqlite3
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS papers (
 CREATE INDEX IF NOT EXISTS idx_papers_pub_date ON papers(pub_date);
 CREATE INDEX IF NOT EXISTS idx_papers_doi ON papers(doi);
 CREATE INDEX IF NOT EXISTS idx_papers_first_seen ON papers(first_seen);
+CREATE INDEX IF NOT EXISTS idx_papers_title_key ON papers(lower(rtrim(title, '. ')));
+CREATE INDEX IF NOT EXISTS idx_papers_pmcid ON papers(CASE WHEN json_valid(extra_json) THEN json_extract(extra_json, '$.pmcid') END);
 {FTS_DDL}
 CREATE TABLE IF NOT EXISTS mentions (
   paper_id TEXT NOT NULL,
@@ -253,6 +255,26 @@ def _json_dict(text: Optional[str]) -> Dict[str, Any]:
 def _norm_title(title: Optional[str]) -> str:
     s = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+TWIN_TITLE_MIN_CHARS = 25
+TWIN_TITLE_MIN_WORDS = 4
+TWIN_MAX_DATE_GAP_DAYS = 400  # two dated records further apart than this are not the same work
+
+
+def twin_title_key(title: Optional[str]) -> str:
+    """Normalised title used to recognise one work stored under two ids (`Store.find_twin`, the pipeline's in-batch
+    fold): '' when the title is too short or too generic to identify a work ("Correction", "Editorial")."""
+    t = _norm_title(title)
+    if len(t) < TWIN_TITLE_MIN_CHARS or len(t.split()) < TWIN_TITLE_MIN_WORDS:
+        return ""
+    return t
+
+
+def _title_sql_key(title: Optional[str]) -> str:
+    """The SQL side of the title match: what the expression index `idx_papers_title_key` stores for a row
+    (SQLite's `lower()` folds ASCII letters only, so the Python side does the same)."""
+    return "".join(c.lower() if c.isascii() else c for c in (title or "")).rstrip(". ")
 
 
 def archive_vendor_label(vendor: Optional[str], platform: Optional[str], instrument_model: Optional[str]) -> str:
@@ -531,6 +553,69 @@ class Store:
     # ---- papers -------------------------------------------------------------------------
     def has_paper(self, paper_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM papers WHERE id=?", (paper_id,)).fetchone() is not None
+
+    def find_twin(self, p: Paper) -> Optional[Dict[str, Any]]:
+        """A stored row for the same work under ANOTHER id, or None.
+
+        Sources key a paper by DOI when they have one and by their own id otherwise (`Paper.make_id`), so a Europe
+        PMC record whose PMC entry carries no DOI, an OpenAlex work without a DOI or an RSS item lands next to the
+        Crossref row for the same article. The match is by PMCID (``extra_json.pmcid``) first, then by exact
+        normalised title (`twin_title_key`: at least 25 characters and 4 words; both publication dates, when known,
+        within `TWIN_MAX_DATE_GAP_DAYS`). A `doi:` row is preferred when several rows match."""
+        pmcid = str((p.extra or {}).get("pmcid") or "").strip()
+        rows: List[Dict[str, Any]] = []
+
+        def distinct_dois(r: Dict[str, Any]) -> bool:
+            # two records that both carry a DOI are two works (a preprint and its article, a paper and its
+            # correction); only a record WITHOUT a DOI can be the twin of one with a DOI
+            return bool(p.doi and r.get("doi") and normalize_doi(p.doi) != normalize_doi(str(r["doi"])))
+
+        if pmcid:
+            rows = [r for r in _rows(self.conn.execute(
+                # the same expression as idx_papers_pmcid (json_valid guards rows whose extra_json is not JSON)
+                "SELECT rowid AS _rowid, * FROM papers WHERE CASE WHEN json_valid(extra_json) THEN json_extract(extra_json, '$.pmcid') END = ? AND id != ?",
+                (pmcid, p.id),
+            )) if not distinct_dois(r)]
+        if not rows:
+            key = twin_title_key(p.title)
+            if not key:
+                return None
+            cands = _rows(self.conn.execute(
+                "SELECT rowid AS _rowid, * FROM papers WHERE lower(rtrim(title, '. ')) = ? AND id != ?", (_title_sql_key(p.title), p.id)
+            ))
+            for r in cands:
+                if twin_title_key(r.get("title")) != key or distinct_dois(r):
+                    continue
+                if p.pub_date and r.get("pub_date"):
+                    try:
+                        gap = abs((date.fromisoformat(p.pub_date[:10]) - date.fromisoformat(str(r["pub_date"])[:10])).days)
+                    except ValueError:
+                        gap = 0
+                    if gap > TWIN_MAX_DATE_GAP_DAYS:
+                        continue
+                rows.append(r)
+        if not rows:
+            return None
+        rows.sort(key=lambda r: (not str(r["id"]).startswith("doi:"), str(r["id"])))
+        return rows[0]
+
+    def delete_paper(self, paper_id: str) -> bool:
+        """Remove a paper and every row that hangs off it (mentions, scores, tracked-author hits, concept links,
+        translations, its FTS row). Used when a stored record turns out to be a twin of another row. Returns True
+        when the paper existed. The caller commits."""
+        rid = self.rowid_for(paper_id)
+        if rid is None:
+            return False
+        tables = [r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'papers_fts%' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()]
+        for name in tables:
+            cols = {r[1] for r in self.conn.execute(f'PRAGMA table_info("{name}")')}
+            if "paper_id" in cols:
+                self.conn.execute(f'DELETE FROM "{name}" WHERE paper_id=?', (paper_id,))
+        self.conn.execute("DELETE FROM papers_fts WHERE rowid=?", (rid,))
+        self.conn.execute("DELETE FROM papers WHERE rowid=?", (rid,))
+        return True
 
     def get_paper(self, paper_id: str) -> Optional[Dict[str, Any]]:
         cur = self.conn.execute("SELECT rowid AS _rowid, * FROM papers WHERE id=?", (paper_id,))
