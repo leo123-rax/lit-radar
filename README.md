@@ -165,6 +165,18 @@ Everything lives in `config/` and is meant to be edited:
 * **Laptop or server**: `cron` or `launchd` calling `python -m litradar run --email`; examples in
   `docs/examples/`. Windows: Task Scheduler with the same command.
 
+## Getting the digest
+
+No mail server needed. After each weekly run the workflow opens a GitHub Issue titled
+`Weekly digest YYYY-MM-DD` (label `digest`) whose body is the digest itself, and closes the previous
+week's issue with a link to the new one; re-running a date updates the same issue. To receive it by
+e-mail, open the repository, click **Watch -> Custom -> Issues**: GitHub then mails every digest to
+you with no setup on your side. A fork gets the same for free once Issues are enabled in its
+settings and digests are committed (`LITRADAR_COMMIT_DIGESTS=true`). The Pages workflow also
+publishes an Atom feed of the last 12 digests at `https://<owner>.github.io/<repository>/feed.xml`
+for any feed reader. E-mail (SMTP) and Slack remain as before (`run --email`, `run --slack`);
+`python -m litradar deliver --status` shows which channels are configured. Details: `docs/delivery.md`.
+
 ## Security and privacy
 
 * **Keys live in `.env` (git-ignored) or in GitHub Actions secrets, nowhere else**: never in
