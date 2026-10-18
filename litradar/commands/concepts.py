@@ -64,7 +64,8 @@ def cmd_concepts(args) -> int:
     if args.json:
         print(json.dumps(report, indent=1, default=str, ensure_ascii=False))
         return 0
-    md = concepts.render_report_markdown(report, top=int(args.top), heading=f"# Emerging concepts: window ending {until}")
+    md = concepts.render_report_markdown(report, top=int(args.top), heading=f"# Emerging concepts: window ending {until}",
+                                         first_seen_column=True if args.since_baseline else None)
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -86,4 +87,5 @@ def register(sub) -> None:
     p.add_argument("--json", action="store_true", help="print the full report as JSON instead of Markdown")
     p.add_argument("--out", help="write the Markdown report to this file instead of stdout")
     p.add_argument("--force", action="store_true", help="recount every week in the window (default: only missing weeks and the latest two)")
+    p.add_argument("--since-baseline", dest="since_baseline", action="store_true", help="always add the 'first seen in corpus' column (default: only while the baseline is shorter than 8 weeks)")
     p.set_defaults(func=cmd_concepts)

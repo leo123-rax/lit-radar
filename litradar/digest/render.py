@@ -40,8 +40,10 @@ SIGNAL_FEED_LABELS = {
     "fda-pma": "FDA PMA decisions",
 }
 SIGNAL_FEEDS = tuple(SIGNAL_FEED_LABELS)
-SEQUENCING_ARCHIVES = ("sra", "ena", "geo")
-SEQUENCING_ARCHIVE_LABELS = {"sra": "NCBI SRA", "ena": "ENA", "geo": "GEO"}
+SEQUENCING_ARCHIVES = ("sra", "ena", "geo", "gsa", "gsa_human")
+SEQUENCING_ARCHIVE_LABELS = {"sra": "NCBI SRA", "ena": "ENA", "geo": "GEO", "gsa": "NGDC GSA", "gsa_human": "GSA-Human"}
+# paper sources whose terms ask for a visible credit when their records are redistributed (docs/SOURCES.md)
+SOURCE_CREDITS = {"kci": "KCI (Korea Citation Index)", "jstage": "J-STAGE"}
 # how a tracked-author hit was made -> the caveat shown next to it
 TRACKED_HINTS = {
     "openalex_id": "",
@@ -530,6 +532,11 @@ def render(
             f"\n**Last pipeline run** (finished {esc(when) or 'n/a'} UTC, window {esc(r_since)} to {esc(r_until)}{scope}). "
             "Records pulled per source in that run, before de-duplication: " + (", ".join(f"{esc(k)} {esc(v)}" for k, v in sorted(fetched.items())) or "none") + ".  "
         )
+        credited = sorted({SOURCE_CREDITS[k.split(".", 1)[0]] for k, v in fetched.items()
+                          if k.split(".", 1)[0] in SOURCE_CREDITS and str(v).strip() not in ("", "0")})
+        if credited:
+            md.append("\nSource credits: this digest includes bibliographic records from " + esc(", ".join(credited))
+                      + "; their terms ask for this credit (see docs/SOURCES.md).  ")
         md.append(
             f"\nIn that run: unique papers after de-duplication {esc(c.get('papers.unique', 0))} ({esc(c.get('papers.new', 0))} new to the database, {esc(c.get('papers.reingested', 0))} already known and merged). "
             f"Full text parsed: bioRxiv {esc(c.get('fulltext.biorxiv', 0))} (failed {esc(c.get('fulltext.biorxiv_failed', 0))}), Europe PMC {esc(c.get('fulltext.europepmc', 0))} (failed {esc(c.get('fulltext.europepmc_failed', 0))}); "

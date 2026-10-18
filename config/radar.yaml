@@ -288,6 +288,12 @@ digest:
   archive_table_n: 30
   news_n: 40
   title: "Science literature radar"
+  delivery:                 # zero-credential weekly delivery (docs/delivery.md); absent keys = these defaults
+    github_issue: true      # weekly.yml opens/updates "Weekly digest <date>" as a GitHub Issue (watchers get e-mail)
+    close_previous: true    # close older open digest issues with a pointer to the new one
+    label: digest
+    feed_entries: 12        # Atom entries written to site/feed.xml by pages.yml
+    pages_url: ""           # override the derived https://<owner>.github.io/<repo>/ link
 
 # Optional real-browser fetcher for hosts that block scripted clients but serve open-licensed content
 # (bioRxiv/medRxiv full-text XML). Needs `pip install 'lit-radar[browser]'` and either a running Chrome started

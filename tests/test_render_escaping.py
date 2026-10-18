@@ -262,7 +262,7 @@ def test_news_display_names_coverage_labels_and_single_archive_placeholder(tmp_p
     assert "Source errors in that run (1): arxiv: host export.arxiv.org rate-limited (HTTP 429)." in cov
     # empty archive section: one placeholder, generic heading
     arch = md[md.index("## Instruments behind"): md.index("### Proteomics")]
-    assert arch.count("_nothing in this window_") == 1 and "(NCBI SRA, ENA, GEO)" in arch
+    assert arch.count("_nothing in this window_") == 1 and "(NCBI SRA, ENA, GEO, NGDC GSA, GSA-Human)" in arch
     st.close()
     # with only SRA rows the heading names only SRA, and a window with no run says so
     st2 = Store(tmp_path / "n2.sqlite")
