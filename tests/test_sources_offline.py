@@ -446,3 +446,37 @@ def test_europepmc_preprint_server_license_and_open_access_gate():
     closed = europepmc.to_paper({**art, "isOpenAccess": "N", "license": None})
     assert europepmc.is_open_access(closed) is False and europepmc.attach_fulltext(FakeHttp([]), closed) is False
     assert europepmc.is_open_access(europepmc.to_paper({"id": "3", "source": "MED", "pmcid": "PMC1", "title": "t"})) is None
+
+
+def test_openalex_repository_deposits_are_preprints_only_when_the_repository_is_a_preprint_server():
+    """Seen live: Figshare, Zenodo, wwPDB and EMPIAR deposits (and PubMed mirrors) were all labelled preprints because
+    their primary location is a repository, and a same-day Figshare publisher deposit was then printed as 'the preprint
+    of' the article it belongs to."""
+    def work(doi, src_type, src_name, work_type="article"):
+        return {"id": "https://openalex.org/W1", "doi": f"https://doi.org/{doi}", "title": "Potential to improve early detection", "type": work_type,
+                "publication_date": "2026-10-12", "primary_location": {"source": {"type": src_type, "display_name": src_name}}}
+    assert openalex.to_paper(work("10.6084/m9.figshare.34339374", "repository", "Figshare")).kind == "article"
+    assert openalex.to_paper(work("10.5281/zenodo.123", "repository", "Zenodo (CERN European Organization for Nuclear Research)")).kind == "article"
+    assert openalex.to_paper(work("10.2210/pdb9abc/pdb", "repository", "Worldwide Protein Data Bank")).kind == "article"
+    assert openalex.to_paper(work("10.1101/2026.10.01.123456", "repository", "bioRxiv (Cold Spring Harbor Laboratory)")).kind == "preprint"
+    assert openalex.to_paper(work("10.21203/rs.3.rs-1", "repository", "Research Square")).kind == "preprint"
+    assert openalex.to_paper(work("10.64898/2026.10.05.756623", "repository", "")).kind == "preprint"  # the DOI alone says bioRxiv
+    assert openalex.to_paper(work("10.1038/s41586-026-1", "journal", "Nature", work_type="preprint")).kind == "preprint"  # OpenAlex's own type wins
+    assert openalex.to_paper(work("10.1038/s41586-026-1", "journal", "Nature")).kind == "article"
+
+
+def test_biorxiv_preprint_is_dated_by_its_first_posting_not_the_version_listed():
+    """The API lists every version with that version's date; a weekly pull that only sees v2 of a December preprint
+    must not date it after its own journal version. The DOI encodes the first posting."""
+    page = {"messages": [{"status": "ok", "count": 2, "total": 2}], "collection": [
+        {"doi": "10.64898/2025.12.05.691730", "title": "AlphaFold3 and disordered proteins", "authors": "A, B", "date": "2026-10-13", "version": "2",
+         "category": "bioinformatics", "license": "cc_by", "jatsxml": "", "abstract": "abs", "published": "10.1002/prot.70189", "server": "bioRxiv"},
+        {"doi": "10.1101/2026.10.12.654321", "title": "Fresh", "authors": "C", "date": "2026-10-12", "version": "1",
+         "category": "genomics", "license": "cc_by", "jatsxml": "", "abstract": "abs", "published": "NA", "server": "bioRxiv"},
+    ]}
+    papers = {p.doi: p for p in biorxiv.fetch(FakeHttp([page]), "2026-10-10", "2026-10-17")}
+    revised = papers["10.64898/2025.12.05.691730"]
+    assert revised.pub_date == "2025-12-05" and revised.extra["version_date"] == "2026-10-13" and revised.extra["version"] == "2"
+    assert revised.published_doi == "10.1002/prot.70189"
+    fresh = papers["10.1101/2026.10.12.654321"]
+    assert fresh.pub_date == "2026-10-12" and fresh.extra["version_date"] == "2026-10-12"

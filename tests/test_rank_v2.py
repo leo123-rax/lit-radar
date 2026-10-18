@@ -303,8 +303,11 @@ def test_build_context_news_concepts_and_published_versions(tmp_path):
     st.conn.execute("INSERT INTO concept_counts VALUES ('spatial proteomics', '2026-10-05', 2, 'spatial proteomics', 'now')")
     st.conn.execute("INSERT INTO concept_counts VALUES ('old term', '2026-08-03', 2, 'old term', 'now')")
     st.conn.execute("INSERT INTO concept_counts VALUES ('old term', '2026-10-05', 2, 'old term', 'now')")
+    st.conn.execute("INSERT INTO concept_counts VALUES ('sangha river', '2026-10-05', 1, 'Sangha River', 'now')")  # one paper's place name
     st.conn.execute("INSERT INTO concept_papers VALUES ('spatial proteomics', 'doi:10.1/a', '2026-10-05', 'seed')")
+    st.conn.execute("INSERT INTO concept_papers VALUES ('spatial proteomics', 'doi:10.1/b', '2026-10-05', 'seed')")
     st.conn.execute("INSERT INTO concept_papers VALUES ('old term', 'doi:10.1/a', '2026-10-05', 'seed')")
+    st.conn.execute("INSERT INTO concept_papers VALUES ('sangha river', 'doi:10.1/a', '2026-10-05', 'term')")
     st.commit()
     by_name, by_issn = journal_tiers(CONFIG)
     assert by_name["nature methods"] == "A" and journal_tier_for("Nature Methods", {}, by_name, by_issn) == "A"
@@ -318,7 +321,11 @@ def test_build_context_news_concepts_and_published_versions(tmp_path):
         st.conn.execute("INSERT INTO concept_counts VALUES ('old term', ?, 1, 'old term', 'now')", (wk,))
     st.commit()
     ctx2 = build_context(st, *WINDOW, by_name, by_issn)
-    assert ctx2.concept_history_ok is True and ctx2.first_concepts == {"doi:10.1/a": ["spatial proteomics"]}
+    # a first-seen term counts once at least two papers in the window carry it; a singleton phrase (a river name, one
+    # lab's acronym) is one paper's wording, not a concept entering the corpus
+    assert ctx2.concept_history_ok is True and ctx2.first_concepts == {"doi:10.1/a": ["spatial proteomics"], "doi:10.1/b": ["spatial proteomics"]}
+    ctx3 = build_context(st, *WINDOW, by_name, by_issn, first_concept_min_papers=1)
+    assert ctx3.first_concepts["doi:10.1/a"] == ["Sangha River", "spatial proteomics"]
     st.close()
 
 

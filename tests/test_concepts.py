@@ -441,3 +441,41 @@ def test_frequency_list_mode_says_so_and_adds_the_first_seen_column(tmp_path):
     assert "First seen in corpus" in C.render_concepts_markdown(strong, "2026-10-11", UNTIL, top=5, config_dir=CONFIG, first_seen_column=True)
     st.close()
     strong.close()
+
+
+def test_methods_text_feeds_only_the_seed_channel(excl):
+    """Seen live: Methods text existed only for the papers whose full text was parsed, so every acronym defined there
+    (bicinchoninic acid (BCA), polyvinylidene fluoride (PVDF), column volumes (CV), multiple cloning site (MCS)) was a
+    'first appearance' and dominated the risers and the first-in-corpus ranking signal."""
+    methods = ("Protein was quantified with the bicinchoninic acid (BCA) assay and blotted on polyvinylidene fluoride (PVDF) "
+               "membranes; the insert was cloned into the multiple cloning site (MCS) and eluted over five column volumes (CV). "
+               "Libraries were prepared for Perturb-seq and patient-derived organoids were profiled by spatial transcriptomics.")
+    cands = C.extract_candidates("", "", methods, excl)
+    assert not any(c.channel == "acronym" for c in cands.values()), sorted(cands)
+    for noise in ("bicinchoninic acid", "polyvinylidene fluoride", "multiple cloning site", "column volume"):
+        assert noise not in cands
+    for seed in ("perturb seq", "patient derived organoid", "spatial transcriptomics"):
+        assert seed in cands and cands[seed].channel == "seed"
+    # the same acronym definition in an abstract still resolves (title + abstract keep all three channels)
+    assert C.extract_candidates("", "We measured circulating tumor DNA (ctDNA).", "", excl)["circulating tumor dna"].channel == "acronym"
+
+
+def test_generic_phrases_match_in_the_extractor_key_space(excl):
+    """The boilerplate list is compared with `normalize_term` keys, so entries whose plural or spelling differed from the
+    key ('hazard ratios', 'colony forming units', 'type 2 diabete') never matched; the lab consumables and routine
+    statistics that filled the live risers table are listed as well."""
+    assert {"hazard ratio", "colony forming unit", "type 2 diabetes", "dulbecco modified eagle medium"} <= C.GENERIC_PHRASES
+    for raw in C._GENERIC_PHRASES_RAW:
+        assert C.normalize_term(raw) in C.GENERIC_PHRASES or not C.normalize_term(raw)
+    text = ("Cells were kept in Dulbecco's modified Eagle medium and Iscove's Modified Dulbecco's Medium; viability used Cell Counting Kit-8 "
+            "(CCK-8) and green fluorescence protein (GFP). Beta diversity used principal coordinates analysis (PCoA); agreement used the "
+            "intraclass correlation coefficient (ICC); isolates were assigned sequence types (STs) by multilocus sequence typing (MLST). "
+            "Causal estimates came from two-sample Mendelian randomization (MR) and transcranial magnetic stimulation (TMS) with diffusion MRI (dMRI). "
+            "Hazard ratios were estimated with five-fold cross-validation in patients with Alzheimers disease. We built a single-cell foundation model.")
+    out = C.extract_terms(text, excl)
+    for noise in ("dulbecco modified eagle medium", "iscove modified dulbecco medium", "cell counting kit 8", "green fluorescence protein",
+                  "principal coordinates analysis", "intraclass correlation coefficient", "sequence type", "multilocus sequence typing",
+                  "mendelian randomization", "two sample mendelian randomization", "transcranial magnetic stimulation", "diffusion mri", "hazard ratio",
+                  "five fold cross validation", "alzheimers disease"):
+        assert noise not in out, (noise, sorted(out))
+    assert "single cell foundation model" in out

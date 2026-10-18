@@ -11,7 +11,7 @@ import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from ..http import Http
-from ..models import Author, Paper, normalize_doi
+from ..models import Author, Paper, is_preprint_doi, is_preprint_server, normalize_doi
 
 log = logging.getLogger(__name__)
 WORKS = "https://api.openalex.org/works"
@@ -171,7 +171,12 @@ def to_paper(w: Dict[str, Any]) -> Paper:
             )
         )
     topics = [t.get("display_name") for t in (w.get("topics") or []) if t.get("display_name")]
-    is_preprint = (w.get("type") or "") == "preprint" or (src.get("type") == "repository")
+    # OpenAlex types preprints as "preprint"; a work whose primary location is a repository is a preprint only when
+    # that repository is a preprint server (bioRxiv, Research Square, SSRN, ...). Figshare, Zenodo, wwPDB, EMPIAR and
+    # PubMed mirrors are repositories too, and their deposits are not preprints of anything.
+    is_preprint = (w.get("type") or "") == "preprint" or (
+        src.get("type") == "repository" and (is_preprint_server(src.get("display_name")) or is_preprint_doi(doi))
+    )
     grants = [g.get("funder_display_name") for g in (w.get("grants") or []) if g.get("funder_display_name")]
     p = Paper(
         id=Paper.make_id("openalex", oa_id, doi),

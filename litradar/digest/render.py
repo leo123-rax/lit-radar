@@ -21,9 +21,15 @@ from ..store import Store, _json_dict
 from ..trends import compute_trends, render_trends_markdown
 
 
-def _trends_section(store: Store, until: str, dcfg: Dict[str, Any]) -> str:
+def _trends_section(store: Store, until: str, dcfg: Dict[str, Any], n_conversions: int) -> str:
+    """The 'What changed' section. Preprint-to-journal conversions are printed once in the digest, under the top
+    list (`Store.preprint_conversions`, which also covers the published_doi pairs the trends module finds), so the
+    trends renderer is handed a pointer instead of its own table."""
     trends = compute_trends(store, until, weeks=int(dcfg.get("trend_weeks", 13)))
-    return render_trends_markdown(trends, top_n=int(dcfg.get("trend_top_n", 10)), heading_level=2)
+    note = (f"{n_conversions} preprint → journal conversion{'s' if n_conversions != 1 else ''} in this digest's window, listed under "
+            "the top innovations above (publisher links and title matches, preprints posted in any week)."
+            if n_conversions else "no preprint → journal conversions detected in this digest's window (see the top innovations section).")
+    return render_trends_markdown(trends, top_n=int(dcfg.get("trend_top_n", 10)), heading_level=2, conversions_note=note)
 
 # which `type` values from config/companies.yaml land where in the Companies section
 MAIN_COMPANY_TYPES = ("tools", "diagnostics", "synthesis", "ai_bio")
@@ -40,10 +46,16 @@ SIGNAL_FEED_LABELS = {
     "fda-pma": "FDA PMA decisions",
 }
 SIGNAL_FEEDS = tuple(SIGNAL_FEED_LABELS)
-SEQUENCING_ARCHIVES = ("sra", "ena", "geo", "gsa", "gsa_human")
-SEQUENCING_ARCHIVE_LABELS = {"sra": "NCBI SRA", "ena": "ENA", "geo": "GEO", "gsa": "NGDC GSA", "gsa_human": "GSA-Human"}
-# paper sources whose terms ask for a visible credit when their records are redistributed (docs/SOURCES.md)
-SOURCE_CREDITS = {"kci": "KCI (Korea Citation Index)", "jstage": "J-STAGE"}
+# stored `archive_records.archive` ids of the sequencing archives (the GSA-Human adapter writes "gsa-human", with a
+# hyphen; the source / counter name `gsa_human` is a label, not the stored id)
+SEQUENCING_ARCHIVES = ("sra", "ena", "geo", "gsa", "gsa-human")
+SEQUENCING_ARCHIVE_LABELS = {"sra": "NCBI SRA", "ena": "ENA", "geo": "GEO", "gsa": "NGDC GSA", "gsa-human": "GSA-Human"}
+# paper sources whose terms ask for a visible credit wherever their records are shown (docs/SOURCES.md): the exact
+# wording each one requires and the link it must carry. Keyed off the papers rendered in the window, not off a run.
+SOURCE_CREDITS = {
+    "jstage": ("Powered by J-STAGE", "https://www.jstage.jst.go.jp/"),  # J-STAGE WebAPI terms, Article 9
+    "kci": ("Source: KCI (Korea Citation Index), National Research Foundation of Korea", "https://www.kci.go.kr/"),  # KCI OAI guide
+}
 # how a tracked-author hit was made -> the caveat shown next to it
 TRACKED_HINTS = {
     "openalex_id": "",
@@ -251,6 +263,14 @@ def render(
     show_why = bool(dcfg.get("why_it_matters", True))
     show_subgroup = bool(dcfg.get("show_subgroup", True))
     rendered_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # the concepts section first: it refreshes the latest weeks' concept counts (one pass over papers the store has
+    # not counted yet), and the re-ranker's first-in-corpus signal must read counts made by the current extractor,
+    # not the ones a previous run left behind. A derived section must never cost the digest, so it degrades to a note.
+    derived: Dict[str, str] = {}
+    try:
+        derived["concepts"] = render_concepts_markdown(store, since, until, top=int(dcfg.get("concepts_n", 15)))
+    except Exception as exc:  # noqa: BLE001
+        derived["concepts"] = f"## Concepts\n\n_section unavailable: {esc(str(exc))[:200]}_\n"
     rank_info: Optional[Dict[str, Any]] = None
     if (rcfg.get("v2") or {}).get("enabled", True):
         rank_info = rerank_window(store, since, until, cfg, company_types=company_types, config_dir=config_dir, top_n=top_n)
@@ -345,12 +365,29 @@ def render(
             links = "; ".join(_link(x.get("title"), x.get("url"), max_len=90) for x in related[:3])
             more = f" and {len(related) - 3} more" if len(related) > 3 else ""
             md.append(f"<sub>+{len(related)} related from the same group, same venue, same day: {links}{more}</sub>\n")
+    md.append("### Preprints that appeared as journal articles this window\n")
     if conversions:
-        md.append("### Preprints that appeared as journal articles this window\n")
-        for c in conversions[:15]:
+        md.append("Journal versions published in the window whose preprint is on record (posted in any week): the preprint server's own "
+                  "publisher link, or an identical title on a genuine preprint record posted no later than the article. One line per "
+                  "article, dated by its earliest preprint record.\n")
+        by_article: Dict[str, List[Dict[str, Any]]] = {}
+        for c in conversions:
+            by_article.setdefault(c["article_id"], []).append(c)
+        for items in list(by_article.values())[:15]:
+            items = sorted(items, key=lambda c: (c.get("preprint_date") or "9999-99-99", str(c["preprint_id"])))
+            c = items[0]
             how = "linked by the publisher" if c.get("matched_by") == "published_doi" else "matched by title"
-            md.append(f"- {_link(c['article_title'], c['article_url'])} — {esc(c.get('journal') or '')} {esc(c.get('article_date') or '')}; preprint {esc(c.get('preprint_date') or 'n.d.')} ({how})")
+            lag = c.get("lag_days")
+            lag_s = f", {int(lag)} days earlier" if isinstance(lag, int) and lag > 0 else (", same day" if lag == 0 else "")
+            server = f" on {esc(c['preprint_server'])}" if c.get("preprint_server") else ""
+            more = f" (+{len(items) - 1} further preprint record{'s' if len(items) > 2 else ''})" if len(items) > 1 else ""
+            md.append(f"- {_link(c['article_title'], c['article_url'])} — {esc(c.get('journal') or '')} {esc(c.get('article_date') or '')}; "
+                      f"preprint {esc(c.get('preprint_date') or 'n.d.')}{server}{lag_s} ({how}){more}")
+        if len(by_article) > 15:
+            md.append(f"- … and {len(by_article) - 15} more")
         md.append("")
+    else:
+        md.append("_no preprint → journal conversions detected in this window_\n")
 
     # ---- instruments in the literature
     md.append("## Platforms named in this week's papers\n")
@@ -492,8 +529,8 @@ def render(
 
     # ---- derived layers: what changed, emerging concepts, companies not yet tracked ----------------
     for label, builder in (
-        ("trends", lambda: _trends_section(store, until, dcfg)),
-        ("concepts", lambda: render_concepts_markdown(store, since, until, top=int(dcfg.get("concepts_n", 15)))),
+        ("trends", lambda: _trends_section(store, until, dcfg, len(conversions))),
+        ("concepts", lambda: derived["concepts"]),  # computed above, before the re-rank
         ("candidates", lambda: render_candidates_markdown(store, since, until, top=int(dcfg.get("candidates_n", 15)))),
     ):
         try:
@@ -519,6 +556,15 @@ def render(
         + (", ".join(f"{esc(k)} {v} ({ft_by_source[k]} with full text)" for k, v in by_source.most_common()) or "none")
         + ".  "
     )
+    # source credits: the terms of some sources require an exact wording with a link wherever their records are shown.
+    # Derived from the papers in this window (what the digest actually prints), never from a run's fetch counters.
+    source_credits = [{"source": k, "text": SOURCE_CREDITS[k][0], "url": SOURCE_CREDITS[k][1], "papers": int(by_source[k])}
+                      for k in SOURCE_CREDITS if by_source.get(k)]
+    if source_credits:
+        md.append(
+            "\nSource credits: " + " · ".join(f"[{esc(c['text'])}]({c['url']}) ({c['papers']} record{'s' if c['papers'] != 1 else ''} in this window)" for c in source_credits)
+            + ". Their terms ask for this credit wherever their records are shown (see docs/SOURCES.md).  "
+        )
     if not run_report:
         run_report = _latest_run_report(store, since, until)
     if run_report:
@@ -532,11 +578,6 @@ def render(
             f"\n**Last pipeline run** (finished {esc(when) or 'n/a'} UTC, window {esc(r_since)} to {esc(r_until)}{scope}). "
             "Records pulled per source in that run, before de-duplication: " + (", ".join(f"{esc(k)} {esc(v)}" for k, v in sorted(fetched.items())) or "none") + ".  "
         )
-        credited = sorted({SOURCE_CREDITS[k.split(".", 1)[0]] for k, v in fetched.items()
-                          if k.split(".", 1)[0] in SOURCE_CREDITS and str(v).strip() not in ("", "0")})
-        if credited:
-            md.append("\nSource credits: this digest includes bibliographic records from " + esc(", ".join(credited))
-                      + "; their terms ask for this credit (see docs/SOURCES.md).  ")
         md.append(
             f"\nIn that run: unique papers after de-duplication {esc(c.get('papers.unique', 0))} ({esc(c.get('papers.new', 0))} new to the database, {esc(c.get('papers.reingested', 0))} already known and merged). "
             f"Full text parsed: bioRxiv {esc(c.get('fulltext.biorxiv', 0))} (failed {esc(c.get('fulltext.biorxiv_failed', 0))}), Europe PMC {esc(c.get('fulltext.europepmc', 0))} (failed {esc(c.get('fulltext.europepmc_failed', 0))}); "
@@ -579,6 +620,7 @@ def render(
         "ranking": ({k: rank_info.get(k) for k in ("candidates", "clustered", "pool", "caps", "deferred", "context", "persisted")} | {"method": "v2"})
         if rank_info else {"method": "stored"},
         "preprint_conversions": conversions,
+        "source_credits": source_credits,
         "instruments": instruments, "platforms": platforms, "lab_tools": infra,
         "platforms_total": n_platforms, "lab_tools_total": n_infra,
         "archive": archive, "archive_proteomics": archive_proteomics, "archive_singlecell": archive_singlecell,

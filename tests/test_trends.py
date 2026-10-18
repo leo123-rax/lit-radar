@@ -29,10 +29,10 @@ def _set_first_seen(st: Store, pid: str, day: str) -> None:
     st.conn.execute("UPDATE papers SET first_seen=?, updated_at=? WHERE id=?", (f"{day}T12:00:00Z", f"{day}T12:00:00Z", pid))
 
 
-def _add_instrument_papers(st: Store, entity: str, name: str, weeks_back: int, n: int, first_seen_day: str = None, prefix: str = "") -> None:
+def _add_instrument_papers(st: Store, entity: str, name: str, weeks_back: int, n: int, first_seen_day: str = None, prefix: str = "", **kw) -> None:
     for i in range(n):
         pid = f"doi:10.1000/{prefix}{entity}-w{weeks_back}-{i}"
-        st.upsert_paper(_paper(pid, _day(weeks_back, i % 7)))
+        st.upsert_paper(_paper(pid, _day(weeks_back, i % 7), **kw))
         st.replace_mentions(pid, [Mention(pid, "instrument", entity, name, "Vendor", "TCK", "sequencer", "methods", 1, "...")])
         _set_first_seen(st, pid, first_seen_day or _day(weeks_back, i % 7))
 
@@ -460,7 +460,9 @@ def test_backfill_fills_the_baseline_by_pub_date_and_extends_coverage(tmp_path):
             st.upsert_paper(_paper(pid, _day(wk, i % 7), journal="Backfill Journal", source="openalex"))
             st.replace_mentions(pid, [Mention(pid, "instrument", "bf-seq", "Backfilled Seq", "Vendor", "TCK", "sequencer", "methods", 1, "...")])
             st.conn.execute("UPDATE papers SET first_seen=? WHERE id=?", (today, pid))  # ... all ingested today
-    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 40, first_seen_day=_day(0))
+    # the live week comes from the same source as the backfill, so the baseline weeks are comparable (a live week fed
+    # by other sources is the source-mix case, tested separately)
+    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 40, first_seen_day=_day(0), source="openalex")
     st.record_run(f"{_day(0)}T00:00:00Z", _day(0, 6), _day(0), {})  # the live run covers the current week only
     st.commit()
     tr = trends.compute_trends(st, UNTIL, weeks=4)
@@ -493,3 +495,155 @@ def test_backfill_fills_the_baseline_by_pub_date_and_extends_coverage(tmp_path):
     assert trends._backfill_start(st.conn) is None  # an unusable month is ignored, not fatal
     json.dumps(tr2)
     st.close()
+
+
+def _backfilled_baseline(st: Store, entity: str = "bf-seq", weeks: int = 4, per_week: int = 12) -> None:
+    """OpenAlex-only baseline weeks by pub_date, all ingested today (a backfill), each naming one instrument."""
+    today = f"{_day(0)}T12:00:00Z"
+    for wk in range(weeks, 0, -1):
+        for i in range(per_week):
+            pid = f"doi:10.1000/mix-w{wk}-{i}"
+            st.upsert_paper(_paper(pid, _day(wk, i % 7), journal="Backfill Journal", source="openalex"))
+            st.replace_mentions(pid, [Mention(pid, "instrument", entity, "Backfilled Seq", "Vendor", "TCK", "sequencer", "methods", 1, "...")])
+            st.conn.execute("UPDATE papers SET first_seen=? WHERE id=?", (today, pid))
+
+
+def test_source_mix_step_suppresses_paper_z_and_movers_rank_by_z_only(tmp_path):
+    """Seen live: a 13-week OpenAlex-only backfill under a multi-source live week printed 'z +13.9' for the corpus and 245
+    notable movers, every one of them the step in coverage. Baseline weeks whose source mix does not cover the current
+    week's are left out of the paper baseline; and with the paper z gone, the movers tables rank the archive family by z
+    alone instead of putting its raw deltas above every paper row."""
+    st = Store(tmp_path / "mix.sqlite")
+    _backfilled_baseline(st)
+    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 10, first_seen_day=_day(0), source="openalex")  # 20 % of the live week
+    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 40, first_seen_day=_day(0), prefix="live-")  # europepmc: 80 %
+    recs = [ArchiveRecord("sra", f"SRX{wk}-{i}", f"SRP{wk}", "Illumina NovaSeq X Plus", "ILLUMINA", "WGS", _day(wk, i % 7), "c", "t", "", "ilmn-novaseq-x", "Illumina", "ILMN")
+            for wk in (4, 3, 2, 1) for i in range(100)]
+    recs += [ArchiveRecord("sra", f"SRX0-{i}", "SRP0", "Illumina NovaSeq X Plus", "ILLUMINA", "WGS", _day(0, i % 7), "c", "t", "", "ilmn-novaseq-x", "Illumina", "ILMN") for i in range(300)]
+    st.upsert_archive_records(recs)
+    st.record_run(f"{_day(0)}T00:00:00Z", _day(0, 6), _day(0), {})
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    hist = tr["history"]
+    dropped = hist["paper_weeks_dropped_source_mix"]
+    assert [d["week"] for d in dropped] == [1, 2, 3, 4] and all(d["missing"] == ["europepmc"] for d in dropped)
+    assert dropped[0]["covered_share"] == 0.2 and dropped[0]["total"] == 12
+    assert hist["current_week_sources"] == {"europepmc": 40, "openalex": 10}
+    assert hist["paper_weeks_with_data"] == 0 and hist["paper_weeks_holding_papers"] == 4
+    assert hist["z_available_papers"] is False and hist["z_available_archive"] is True
+    assert hist["previous_week_partial_papers"] is True  # 'last week' is one of the non-comparable weeks
+    assert tr["cold_start"] is True and hist["ingested_this_week_only_with_history"] is True  # a backfill, not a first week
+    row = {r["id"]: r for r in tr["instruments"]["papers"]}["bf-seq"]
+    assert row["series"] == [12, 12, 12, 12, 50] and row["z"] is None and row["mean"] is None and row["notable"] is False
+    assert tr["totals"]["papers"]["z"] is None and tr["totals"]["archive_experiments"]["z"] == 200.0
+    assert [(r["group"], r["id"]) for r in tr["notable"]] == [("instrument_experiments", "Illumina NovaSeq X Plus")]
+    risers, fallers = trends.top_movers(tr)
+    assert [(r["group"], r["id"]) for r in risers] == [("instrument_experiments", "Illumina NovaSeq X Plus")] and fallers == []
+    md = trends.render_trends_markdown(tr)
+    assert "_Source mix: 4 baseline weeks (2026-09-13 to 2026-10-10) hold papers but their sources are not this week's (openalex supplies 20% of this week's 50 papers; europepmc is absent or far smaller there)" in md
+    assert "z-scores for the paper family are suppressed until 3 comparable weeks exist" in md and "'Last week' is one of them" in md
+    assert "Fewer than 3 comparable weeks of paper history: z-scores for that family are suppressed, and its rows are left out of the movers tables" in md
+    assert "**Corpus:** 50 (last week 12) papers" in md  # no baseline figure, no z for the corpus line
+    assert "| **Illumina NovaSeq X Plus** | instrument · experiments | 300 | 100 | 100.0 ± 0.0 | +200.0 |" in md
+    assert "Backfilled Seq" not in md[md.index("### Biggest risers"): md.index("### New this week")]
+    assert "Every paper in this corpus was ingested this week although 4 earlier weeks hold publication-dated papers" in md
+    assert "are by publication date and are not affected by the ingestion day; the source-mix note under the header says which backfilled weeks are comparable" in md
+    assert "First week of data in this corpus" not in md
+    json.dumps(tr)
+    # the rule is a parameter: 0 disables it and the old (coverage-measuring) z comes back
+    tr0 = trends.compute_trends(st, UNTIL, weeks=4, min_source_coverage=0)
+    assert tr0["history"]["paper_weeks_dropped_source_mix"] == [] and tr0["history"]["z_available_papers"] is True
+    assert {r["id"]: r for r in tr0["instruments"]["papers"]}["bf-seq"]["z"] == 38.0
+    assert "Source mix:" not in trends.render_trends_markdown(tr0)
+    with pytest.raises(ValueError):
+        trends.compute_trends(st, UNTIL, min_source_coverage=1.5)
+    # a live week fed by the same source is comparable: nothing is dropped
+    st2 = Store(tmp_path / "same.sqlite")
+    _backfilled_baseline(st2)
+    _add_instrument_papers(st2, "bf-seq", "Backfilled Seq", 0, 40, first_seen_day=_day(0), source="openalex")
+    st2.commit()
+    tr2 = trends.compute_trends(st2, UNTIL, weeks=4)
+    assert tr2["history"]["paper_weeks_dropped_source_mix"] == [] and tr2["history"]["z_available_papers"] is True
+    # a minor new source (below 25 % of the live week) does not make the baseline incomparable
+    _add_instrument_papers(st2, "bf-seq", "Backfilled Seq", 0, 5, first_seen_day=_day(0), prefix="minor-")  # europepmc: 5 of 45
+    st2.commit()
+    tr3 = trends.compute_trends(st2, UNTIL, weeks=4)
+    assert tr3["history"]["paper_weeks_dropped_source_mix"] == [] and tr3["history"]["z_available_papers"] is True
+    st.close()
+    st2.close()
+
+
+def test_source_mix_z_returns_once_enough_comparable_weeks_exist(tmp_path):
+    """Three multi-source weeks behind the live week are comparable; the OpenAlex-only weeks before them are not, and
+    the z is computed against the comparable weeks only."""
+    st = Store(tmp_path / "heal.sqlite")
+    _backfilled_baseline(st, weeks=6)  # weeks 6..1: 12 openalex papers each
+    for wk in (3, 2, 1):  # the last three baseline weeks also carry 36 europepmc papers (75 %) naming the instrument
+        _add_instrument_papers(st, "bf-seq", "Backfilled Seq", wk, 36, prefix=f"live{wk}-")
+    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 12, first_seen_day=_day(0), source="openalex")
+    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 60, first_seen_day=_day(0), prefix="live-")
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=6)
+    hist = tr["history"]
+    assert [d["week"] for d in hist["paper_weeks_dropped_source_mix"]] == [4, 5, 6]
+    assert hist["paper_weeks_with_data"] == 3 and hist["z_available_papers"] is True and hist["previous_week_partial_papers"] is False
+    row = {r["id"]: r for r in tr["instruments"]["papers"]}["bf-seq"]
+    assert row["series"] == [12, 12, 12, 48, 48, 48, 72] and row["baseline_weeks"] == 3 and row["mean"] == 48.0 and row["z"] == 24.0
+    md = trends.render_trends_markdown(tr)
+    assert "Source mix: 3 baseline weeks (2026-08-30 to 2026-09-19)" in md and "computed against the 3 comparable weeks only" in md
+    assert "'Last week' is one of them" not in md
+    st.close()
+
+
+def test_archive_last_week_coverage_comes_from_the_runs_not_the_paper_backfill(tmp_path):
+    """A recorded backfill covers papers, never archive records: with a backfill back to August and a first run three
+    days into 'last week', the paper family is fully covered while the archive family holds 3 of 7 days."""
+    st = Store(tmp_path / "arch.sqlite")
+    for wk in (3, 2, 1):
+        _add_instrument_papers(st, "x", "X", wk, 10)
+    _add_instrument_papers(st, "x", "X", 0, 30, first_seen_day=_day(0))
+    st.upsert_archive_records([ArchiveRecord("sra", f"SRX1-{i}", "SRP1", "Illumina NovaSeq X Plus", "ILLUMINA", "WGS", _day(1, i % 3), "c", "t", "") for i in range(20)]
+                              + [ArchiveRecord("sra", f"SRX0-{i}", "SRP0", "Illumina NovaSeq X Plus", "ILLUMINA", "WGS", _day(0, i % 7), "c", "t", "") for i in range(50)])
+    st.conn.executescript(
+        "CREATE TABLE IF NOT EXISTS backfill_progress (subgroup TEXT NOT NULL, month TEXT NOT NULL, country TEXT NOT NULL DEFAULT '', "
+        "done_at TEXT, fetched INTEGER DEFAULT 0, cap INTEGER DEFAULT 0, PRIMARY KEY (subgroup, month, country));"
+        "INSERT INTO backfill_progress (subgroup, month, country, done_at, fetched) VALUES ('spatial', '2026-08', '', 'now', 30);"
+    )
+    st.record_run(f"{_day(0)}T00:00:00Z", _day(1, 2), _day(0), {})  # first run started 2026-10-08: 3 of the 7 days of 10-04..10-10
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    hist = tr["history"]
+    assert hist["previous_week_coverage"] == {"covered_from": "2026-08-01", "days_covered": 7, "partial": False}
+    assert hist["previous_week_coverage_archive"] == {"covered_from": "2026-10-08", "days_covered": 3, "partial": True}
+    assert hist["z_available_papers"] is True and hist["z_available_archive"] is False
+    assert trends.week_over_week_comparable(tr, "papers") is True and trends.week_over_week_comparable(tr, "archive") is False
+    md = trends.render_trends_markdown(tr)
+    assert "'Last week' is only partly covered by the runs that built this store (from 2026-10-08, 3 of 7 days) for archive records; read the 'Last week' column as a lower bound." in md
+    assert "for papers; read the 'Last week'" not in md
+    # the z-ranked tables hold the paper family only (archive z is suppressed)
+    risers, _ = trends.top_movers(tr)
+    assert {r["group"] for r in risers} == {"instrument_papers", "journal"} and "Illumina NovaSeq X Plus" not in md[md.index("### Biggest risers"):]
+    # with no z anywhere, the week-over-week fallback keeps the paper rows and leaves the archive rows out, saying why
+    tr1 = trends.compute_trends(st, UNTIL, weeks=4, min_baseline_weeks=5)
+    assert tr1["history"]["z_available_papers"] is False and tr1["history"]["z_available_archive"] is False
+    risers, fallers = trends.top_movers(tr1)
+    assert {r["group"] for r in risers} == {"instrument_papers", "journal"} and all(r["z"] is None for r in risers)
+    md1 = trends.render_trends_markdown(tr1)
+    assert "### Biggest risers\n" in md1 and "archive rows are left out because the runs that built this store cover 'last week' (2026-10-04 to 2026-10-10) from 2026-10-08 only (3 of 7 days) for archive records" in md1
+    # and when every family is incomplete the tables wait, naming each reason
+    st.conn.execute("DELETE FROM backfill_progress")
+    st.commit()
+    md2 = trends.render_trends_markdown(trends.compute_trends(st, UNTIL, weeks=4, min_baseline_weeks=5))
+    assert "### Biggest risers and fallers\n" in md2 and "Suppressed: the runs that built this store cover 'last week' (2026-10-04 to 2026-10-10) from 2026-10-08 only (3 of 7 days) for papers and archive records, and with no baseline" in md2
+    assert "_'Last week' is only partly covered by the runs that built this store (from 2026-10-08, 3 of 7 days) for papers and archive records; read the 'Last week' column as a lower bound._" in md2
+    st.close()
+
+
+def test_conversions_note_replaces_the_table_inside_the_digest(synthetic):
+    tr = trends.compute_trends(synthetic, UNTIL, weeks=4)
+    assert len(tr["conversions"]) == 1
+    md = trends.render_trends_markdown(tr, conversions_note="2 conversions in this digest's window, listed under the top innovations above.")
+    section = md[md.index("### Preprints that became journal articles"):]
+    assert "_2 conversions in this digest's window, listed under the top innovations above._" in section
+    assert "| Preprint |" not in section and "Preprint P" not in section and "median preprint-to-journal lag" not in section
+    assert "[Preprint P]" in trends.render_trends_markdown(tr)  # the standalone `litradar trends` output keeps its table

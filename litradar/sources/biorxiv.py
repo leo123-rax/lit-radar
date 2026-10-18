@@ -19,7 +19,7 @@ from typing import Dict, Iterable, Iterator, List, Optional
 
 from ..extract.jats import parse_jats
 from ..http import Http
-from ..models import Author, Paper, normalize_doi
+from ..models import Author, Paper, normalize_doi, preprint_posting_date
 from . import jats_abstract
 
 log = logging.getLogger(__name__)
@@ -62,6 +62,11 @@ def fetch(
             version = str(item.get("version") or "1")
             published = item.get("published")
             published_doi = normalize_doi(published) if published and published != "NA" else None
+            # `date` is the date of the version listed; the DOI encodes the first posting (10.1101/2025.12.05.691730).
+            # A weekly pull that only sees v2 must not date the preprint after its own journal version.
+            version_date = item.get("date") or ""
+            posted = preprint_posting_date(doi)
+            pub_date = posted if posted and (not version_date or posted < version_date) else version_date
             p = Paper(
                 id=f"doi:{doi}",
                 source=server,
@@ -70,7 +75,7 @@ def fetch(
                 doi=doi,
                 abstract=(item.get("abstract") or "").strip(),
                 journal=server,
-                pub_date=item.get("date") or "",
+                pub_date=pub_date,
                 url=f"https://www.{server}.org/content/{doi}v{version}",
                 license=item.get("license") or "",
                 category=cat,
@@ -78,7 +83,7 @@ def fetch(
                 authors=_author_list(item.get("authors") or "", item.get("author_corresponding_institution") or ""),
                 affiliations=[item["author_corresponding_institution"]] if item.get("author_corresponding_institution") else [],
                 fulltext_url=item.get("jatsxml") or "",
-                extra={"version": version, "type": item.get("type"), "corresponding": item.get("author_corresponding")},
+                extra={"version": version, "version_date": version_date, "type": item.get("type"), "corresponding": item.get("author_corresponding")},
             )
             prev = seen.get(doi)
             if prev is None or int(version) >= int(prev.extra.get("version", "1")):

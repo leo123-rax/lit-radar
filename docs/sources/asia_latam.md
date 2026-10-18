@@ -344,23 +344,31 @@ jstage:
 **J-STAGE is opt-in, unlike every other source.** `Pipeline._enabled()` treats a source whose key is missing from
 `radar.yaml` as enabled; for J-STAGE the pipeline additionally requires an explicit `enabled: true` (or
 `--sources jstage` on the command line) because the API terms forbid storing or caching the data in machine-readable
-form for 24 hours or more and require a "Powered by J-STAGE" credit wherever it is displayed, which the digest does
-not render yet. The live check passed; the default is a terms decision, not a technical one.
+form for 24 hours or more (Article 3(5)), which a persistent corpus does. The "Powered by J-STAGE" credit the terms
+also require (Article 9) is rendered (see "Source credits" below). The live check passed; the default is a terms
+decision, not a technical one.
 
 `litradar/http.py` needed no change: each adapter registers its own pacing in `http.min_interval`
 (`api.jstage.jst.go.jp` 1.0 s, `articlemeta.scielo.org` 0.25 s, `open.kci.go.kr` 1.0 s).
 
+### Source credits
+
+`litradar/digest/render.py` prints a "Source credits" line in the Coverage section whenever a paper from a source
+with attribution terms is in the digest window (`SOURCE_CREDITS`, keyed by `Paper.source`; the line is derived from
+the papers rendered in the window, never from a run's `fetched.*` counters, so a `litradar digest` re-render after a
+`--sources` run still carries it):
+
+* `source == "jstage"`: `Powered by J-STAGE` linking to <https://www.jstage.jst.go.jp/> (J-STAGE terms Article 9: the
+  credit with a link must appear wherever API data is displayed);
+* `source == "kci"`: `Source: KCI (Korea Citation Index), National Research Foundation of Korea` linking to
+  <https://www.kci.go.kr/> (출처표시, source attribution, required by the OAI guide page).
+
+Each credit carries the number of such records in the window; the digest JSON summary repeats them under
+`source_credits`. SciELO states no credit requirement, so no line is printed for it. `Paper.extra["lang"]` /
+`["country"]` (JP / KR / BR ...) are available for a language or country breakdown when the renderer grows one.
+
 ### Still open after the wiring
 
-* `litradar/digest/render.py` (required by the sources' terms before J-STAGE is enabled, and owed to KCI already):
-  after the paper sections, append an attribution footer built from the sources actually rendered:
-  * when any rendered paper has `source == "jstage"`: `Powered by J-STAGE` linking to <https://www.jstage.jst.go.jp/>
-    (J-STAGE terms Article 9: the credit with a link must appear wherever API data is displayed);
-  * when any rendered paper has `source == "kci"`: `Source: KCI (Korea Citation Index), National Research Foundation
-    of Korea` linking to <https://www.kci.go.kr/> (출처표시, source attribution, required by the OAI guide page);
-  * SciELO states no credit requirement; a `Source: SciELO` line is courteous.
-  `Paper.extra["lang"]` / `["country"]` (JP / KR / BR ...) are available for a language or country breakdown when
-  the renderer grows one.
 * `litradar/cli.py`: the `--sources` help string does not list `scielo,kci,jstage` yet (the ids work; only the help lags).
 
 ## Tests

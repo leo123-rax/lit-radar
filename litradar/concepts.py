@@ -1,6 +1,7 @@
 """Emerging concepts: technical phrases that are bursting or new in the literature.
 
-No ML. Three extraction channels run over title + abstract (+ parsed Methods when present):
+No ML. Three extraction channels run over title + abstract; only the curated seed channel (c) also
+runs over parsed Methods, whose vocabulary is reagents, buffers, statistics and software:
 
   (a) multiword technical terms   runs of 2-4 tokens that are capitalised words, hyphenated terms,
                                   tokens with digits or Greek letters (stop words break a run;
@@ -174,8 +175,11 @@ UNITS: Set[str] = set(
     md phd mph msc bsc""".split()
 )
 
-# boilerplate long forms and established generic phrases that would otherwise dominate the counts
-GENERIC_PHRASES: Set[str] = set(
+# boilerplate long forms and established generic phrases that would otherwise dominate the counts. Matched as whole
+# phrases against `normalize_term` keys: the set is rebuilt through `normalize_term` below (GENERIC_PHRASES), so an
+# entry's plural or spelling only has to be one that normalises to the key the extractor produces; variants that
+# differ in a non-final token ("principal coordinates analysis", "green fluorescence protein") are listed as such.
+_GENERIC_PHRASES_RAW: Set[str] = set(
     " ".join(s.split())
     for s in """confidence interval|hazard ratio|odds ratio|relative risk|standard deviation|standard error|
     interquartile range|body mass index|area under the curve|receiver operating characteristic|quality of
@@ -186,7 +190,7 @@ GENERIC_PHRASES: Set[str] = set(
     health record|progression free survival|overall survival|adverse event|standard of care|principal
     component analysis|analysis of variance|enzyme linked immunosorbent assay|western blot|flow
     cytometry|gene ontology|false discovery rate|reactive oxygen species|extracellular matrix|central
-    nervous system|blood brain barrier|type 2 diabete|type 1 diabete|cardiovascular disease|coronary
+    nervous system|blood brain barrier|type 2 diabetes|type 1 diabetes|cardiovascular disease|coronary
     artery disease|inflammatory bowel disease|mean arterial pressure|heart rate|blood pressure|intensive
     care unit|emergency department|length of stay|covid 19 pandemic|sars cov 2 infection|not applicable|
     not available|et al|e g|i e|wild type|room temperature|real time|generalized linear model|linear
@@ -244,7 +248,22 @@ GENERIC_PHRASES: Set[str] = set(
     limit of quantification|transcripts per million|reads per kilobase|tris buffered saline|american type culture
     collection|bayesian information criterion|akaike information criterion|total nitrogen|total phosphorus|total
     carbon|total organic carbon|connectome project|human connectome project|hematopoietic stem cell|
-    induced pluripotent stem cell|embryonic stem cell|mesenchymal stem cell""".split("|")
+    induced pluripotent stem cell|embryonic stem cell|mesenchymal stem cell|
+    bicinchoninic acid|bicinchoninic acid assay|polyvinylidene fluoride|polyvinylidene fluoride membrane|cell counting kit 8|
+    cell counting kit|phenylmethylsulfonyl fluoride|cetyltrimethylammonium bromide|hexadecyltrimethylammonium bromide|
+    column volume|column volumes|multiple cloning site|green fluorescence protein|enhanced green fluorescent protein|
+    iscove modified dulbecco medium|iscoves modified dulbecco medium|roswell park memorial institute|
+    dulbecco phosphate buffered saline|dulbeccos phosphate buffered saline|sodium dodecyl sulfate polyacrylamide|
+    intraclass correlation coefficient|intraclass correlation|principal coordinates analysis|principal coordinate|
+    sequence type|sequence types|multilocus sequence typing|multi locus sequence typing|mendelian randomization|
+    mendelian randomisation|two sample mendelian randomization|transcranial magnetic stimulation|repetitive transcranial
+    magnetic stimulation|diffusion mri|diffusion tensor imaging|functional magnetic resonance imaging|numerical aperture|
+    soil organic carbon|lancet commission|standard error of mean|coefficient of determination|generalized estimating
+    equation|generalised estimating equation|structural equation modeling|structural equation modelling|
+    propensity score matching|inverse probability weighting|minimum spanning tree|degrees of freedom|sample size|
+    five fold cross validation|ten fold cross validation|10 fold cross validation|5 fold cross validation|k fold cross
+    validation|leave one out cross validation|nested cross validation|stratified cross validation|train test split|
+    training and validation|validation cohort|training cohort|test set|training set|validation set""".split("|")
     if s.strip()
 )
 
@@ -348,12 +367,18 @@ def normalize_term(phrase: str) -> str:
     return " ".join(parts)
 
 
+# the boilerplate list in the extractor's own key space: every raw entry plus its `normalize_term` form, so
+# "hazard ratios", "colony forming units" or "Dulbecco's modified Eagle medium" all meet their stored keys
+GENERIC_PHRASES: Set[str] = _GENERIC_PHRASES_RAW | {normalize_term(s) for s in _GENERIC_PHRASES_RAW if normalize_term(s)}
+
+
 # Disease, anatomy, cohort and regulatory phrases: real biomedical terms, but not the methods / assays / modalities /
 # model classes the surfacer promises. Whole-phrase matches after normalisation; a small list of obvious cases seen
 # live (the extractor's capitalised-run and hyphen channels pick them up from titles), extended by a head-word rule.
 CLINICAL_PHRASES: Set[str] = set(
     normalize_term(s)
     for s in """amyotrophic lateral sclerosis|autism spectrum disorder|Parkinson's disease|Alzheimer's disease|
+    Parkinsons disease|Alzheimers disease|Parkinson disease|Alzheimer disease|Huntingtons disease|Crohns disease|
     Huntington's disease|Crohn's disease|multiple sclerosis|rheumatoid arthritis|systemic lupus erythematosus|
     chronic obstructive pulmonary disease|chronic kidney disease|acute myeloid leukemia|acute lymphoblastic leukemia|
     non-small cell lung cancer|small cell lung cancer|triple-negative breast cancer|hepatocellular carcinoma|
@@ -783,11 +808,12 @@ def extract_candidates(title: str, abstract: str = "", methods: str = "", excl: 
         _extract_seeds(out, runs, excl)
         _extract_acronyms(out, abstract, excl)
     if methods:
-        # Methods name reagents, buffers, statistics and software far more than ideas, so the capitalised-run
-        # channel is skipped there; seed anchors and acronym definitions still count.
-        text = methods[:20000]
-        _extract_seeds(out, _runs(text), excl)
-        _extract_acronyms(out, text, excl)
+        # Methods name reagents, buffers, statistics and software far more than ideas, so only the curated seed
+        # anchors run there. The capitalised-run channel and the acronym channel are skipped: measured live, the
+        # acronym definitions in Methods were lab boilerplate (bicinchoninic acid, polyvinylidene fluoride, column
+        # volumes, multiple cloning site), and because Methods text exists only for the papers whose full text was
+        # parsed, every such phrase is "first seen" in the corpus and would earn the novelty bonus.
+        _extract_seeds(out, _runs(methods[:20000]), excl)
     return out
 
 

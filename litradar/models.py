@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"<>]+", re.I)
@@ -15,6 +16,78 @@ def normalize_doi(doi: Optional[str]) -> Optional[str]:
     if not m:
         return None
     return m.group(0).rstrip(".,;)").lower()
+
+
+# DOI shapes minted by preprint servers. bioRxiv / medRxiv (10.1101, 10.64898) share the CSHL prefix with Genome
+# Research, so the date-stamped (2026.10.05.756623) or plain numeric tail is required; the others carry a server
+# token after the prefix (arXiv, Research Square, SSRN, Preprints.org, ChemRxiv, Authorea, ChinaXiv, OSF, TechRxiv,
+# PeerJ Preprints, SciELO Preprints). Data repositories (Figshare 10.6084, Zenodo 10.5281, Dryad, Dataverse, wwPDB,
+# EMPIAR) never match.
+PREPRINT_DOI_RE = re.compile(
+    r"^(?:10\.(?:1101|64898)/(?:\d{4}\.\d{2}\.\d{2}\.)?\d{6,8}(?:v\d+)?$"
+    r"|10\.48550/arxiv\.|10\.21203/rs\.|10\.2139/ssrn\.|10\.20944/preprints|10\.26434/chemrxiv|10\.22541/"
+    r"|10\.12074/|10\.31219/osf\.io|10\.31234/osf\.io|10\.36227/techrxiv|10\.7287/peerj\.preprints|10\.1590/scielopreprints)",
+    re.I,
+)
+# venue / source names that identify a preprint server (substring match, lower case)
+PREPRINT_SERVER_NAMES = (
+    "biorxiv", "medrxiv", "arxiv", "chinaxiv", "research square", "ssrn", "preprints.org", "chemrxiv", "authorea",
+    "scielo preprints", "osf preprints", "psyarxiv", "techrxiv", "peerj preprints",
+)
+_POSTING_DATE_RE = re.compile(r"^10\.(?:1101|64898)/(\d{4})\.(\d{2})\.(\d{2})\.\d+", re.I)
+_PREPRINT_SERVER_BY_DOI = (
+    (re.compile(r"^10\.(?:1101|64898)/", re.I), "bioRxiv or medRxiv"),
+    (re.compile(r"^10\.48550/", re.I), "arXiv"),
+    (re.compile(r"^10\.21203/", re.I), "Research Square"),
+    (re.compile(r"^10\.2139/", re.I), "SSRN"),
+    (re.compile(r"^10\.20944/", re.I), "Preprints.org"),
+    (re.compile(r"^10\.26434/", re.I), "ChemRxiv"),
+    (re.compile(r"^10\.22541/", re.I), "Authorea"),
+    (re.compile(r"^10\.12074/", re.I), "ChinaXiv"),
+    (re.compile(r"^10\.31219/", re.I), "OSF Preprints"),
+    (re.compile(r"^10\.31234/", re.I), "PsyArXiv"),
+    (re.compile(r"^10\.36227/", re.I), "TechRxiv"),
+    (re.compile(r"^10\.7287/", re.I), "PeerJ Preprints"),
+    (re.compile(r"^10\.1590/scielopreprints", re.I), "SciELO Preprints"),
+)
+
+
+def is_preprint_doi(doi: Optional[str]) -> bool:
+    """True when the DOI was minted by a preprint server (see PREPRINT_DOI_RE)."""
+    return bool(PREPRINT_DOI_RE.match((doi or "").strip().lower()))
+
+
+def is_preprint_server(name: Optional[str]) -> bool:
+    """True when a venue, publisher or source name is a known preprint server."""
+    low = (name or "").strip().lower()
+    return bool(low) and any(s in low for s in PREPRINT_SERVER_NAMES)
+
+
+def preprint_server_from_doi(doi: Optional[str]) -> str:
+    """The preprint server a DOI was minted by ('' when the DOI is not a preprint server's), for records whose
+    venue field is blank (OpenAlex often leaves it so for repository deposits)."""
+    d = (doi or "").strip()
+    if not is_preprint_doi(d):
+        return ""
+    for pattern, name in _PREPRINT_SERVER_BY_DOI:
+        if pattern.match(d):
+            return name
+    return ""
+
+
+def preprint_posting_date(doi: Optional[str]) -> str:
+    """The first-posting date a bioRxiv / medRxiv DOI encodes (10.1101/2025.12.05.691730 -> 2025-12-05), else ''.
+
+    The API's per-record `date` is the date of the *version* listed, so a revised preprint fetched by a weekly
+    pull carries the revision date; the DOI keeps the original posting date."""
+    m = _POSTING_DATE_RE.match((doi or "").strip())
+    if not m:
+        return ""
+    y, mo, d = (int(x) for x in m.groups())
+    try:
+        return date(y, mo, d).isoformat()
+    except ValueError:
+        return ""
 
 
 @dataclass
