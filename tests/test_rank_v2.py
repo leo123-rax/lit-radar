@@ -453,6 +453,14 @@ def test_topical_gate_withholds_the_venue_prior_for_off_topic_tier_a_papers():
     res2 = score_paper_v2(on_topic, [], "A", ["spatial transcriptomics"], None)
     venue2 = [c for c in res2.components if c.key == "venue"][0]
     assert res2.facts["topical"] is True and venue2.points == DEFAULT_WEIGHTS["tier_A"] and "withheld" not in venue2.label
+    # a software-type (big tech) affiliation, a first-seen concept or a bare noun cue do not count as topical on their own
+    weather = dict(off_topic, abstract="We introduce a new framework for weather forecasting.")
+    ments = [_m("company", "microsoft-research", "affiliations", name="Microsoft Research")]
+    res4 = score_paper_v2(weather, ments, "A", ["spatial transcriptomics"], None, company_types={"microsoft-research": "software"})
+    assert res4.facts["topical"] is False and [c for c in res4.components if c.key == "venue"][0].points == DEFAULT_WEIGHTS["tier_unknown"]
+    # the same affiliation from a tools company is topical
+    res5 = score_paper_v2(weather, [_m("company", "acme-tools", "affiliations", name="Acme Tools")], "A", [], None, company_types={"acme-tools": "tools"})
+    assert res5.facts["topical"] is True and [c for c in res5.components if c.key == "venue"][0].points == DEFAULT_WEIGHTS["tier_A"]
     # the gate can be switched off
     res3 = score_paper_v2(off_topic, [], "A", ["spatial transcriptomics"], None, weights={"topical_gate": False})
     assert [c for c in res3.components if c.key == "venue"][0].points == DEFAULT_WEIGHTS["tier_A"]

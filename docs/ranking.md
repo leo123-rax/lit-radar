@@ -359,6 +359,7 @@ A tier-A or tier-B venue prior is worth more than most topical signals, so a gen
 otherwise push off-topic articles (weather forecasting, quantum hardware) into the shortlist on venue alone. The
 scorer therefore withholds a tier-A or tier-B prior (it falls back to the unranked-venue floor, +0.5; tier C and
 preprint priors are small and stay) when none of the
-topical components fire: a platform or lab tool named, a company named or affiliated, a watchlist term, a tracked
-author, a new-platform cue or a first-in-corpus concept. The reason string says "prior withheld" so the reader can
+topical components fire: a platform or lab tool named, a watchlist term, a tracked author, or a company named or
+affiliated whose gazetteer type is not `software` (big-tech labs publish in every field, so an affiliation alone
+is not evidence of fit; a first-in-corpus n-gram or a bare "we introduce a new framework" cue is not either). The reason string says "prior withheld" so the reader can
 see why a prestigious venue scored low. `ranking.weights.topical_gate: false` restores the plain prior.

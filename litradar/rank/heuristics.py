@@ -296,10 +296,20 @@ def _news_hits(platforms: Sequence[Dict[str, Any]], subject_company_ids: Iterabl
     return _ordered(hits)
 
 
-# component keys that tie a paper to the radar's subject matter; a tier-A/B venue prior alone must not carry an
-# off-topic paper (weather forecasting in a tier-A journal) into the shortlist
-TOPICAL_KEYS = frozenset({"platforms", "platform_central", "lab_tools", "companies", "company_author", "watchlist",
-                          "tracked_author", "new_platform", "first_concept"})
+# signals that tie a paper to the radar's subject matter. A tier-A/B venue prior alone must not carry an off-topic
+# paper (weather forecasting in a tier-A journal) into the shortlist, and neither should a big-tech affiliation,
+# a generic first-seen n-gram or a bare "we introduce a new framework" cue: those fire on any field.
+TOPICAL_KEYS = frozenset({"platforms", "platform_central", "lab_tools", "watchlist", "tracked_author"})
+NON_TOPICAL_COMPANY_TYPES = frozenset({"software"})
+
+
+def _is_topical(comps: Sequence[Component], facts: Dict[str, Any], types: Dict[str, str]) -> bool:
+    if any(c.key in TOPICAL_KEYS for c in comps):
+        return True
+    for cid in list(facts.get("companies") or []) + list(facts.get("author_companies") or []):
+        if types.get(str(cid).lower(), "") not in NON_TOPICAL_COMPANY_TYPES:
+            return True  # a tools, diagnostics, pharma, CRO or ai_bio company named or affiliated
+    return False
 
 
 def score_paper_v2(
@@ -494,13 +504,13 @@ def score_paper_v2(
             facts["notice"] = True
 
     # ---- topical gate
-    topical = any(c.key in TOPICAL_KEYS for c in comps)
+    topical = _is_topical(comps, facts, types)
     facts["topical"] = topical
     if w.get("topical_gate", True) and not topical:
         floor = float(w["tier_unknown"])
         for i, c in enumerate(comps):
             if c.key == "venue" and c.points > floor and isinstance(c.detail, dict) and c.detail.get("tier") in ("A", "B"):
-                comps[i] = Component("venue", c.label + "; prior withheld: no platform, company, watchlist term, tracked author or new concept",
+                comps[i] = Component("venue", c.label + "; prior withheld: no platform, lab tool, watchlist term, tracked author or life-science company",
                                      floor, c.detail)
 
     raw = sum(c.points for c in comps)
