@@ -144,8 +144,11 @@ successive runs that covered it.
 
 ## The daily workflow (`.github/workflows/daily.yml`)
 
-1. **Restore.** `gh release view db-latest`; if the release does not exist it is created (as a
-   pre-release, so it never shows as "Latest release"). If it holds `radar.sqlite.zst`, the asset
+1. **Restore.** `gh release view db-latest`; if the release does not exist it is created. It is meant
+   to be a pre-release that is never marked "Latest" (`--prerelease --latest=false`), so the rolling
+   snapshot does not show up as the repository's latest release; if a run created it with other flags
+   (the weekly and daily workflows have not always agreed), `gh release edit db-latest --prerelease
+   --latest=false` fixes the existing release in place. If it holds `radar.sqlite.zst`, the asset
    is downloaded and decompressed to `data/radar.sqlite`; a failed download fails the job so a good
    snapshot is never replaced by a 7-day one. No asset yet means a fresh start (first-run window).
 2. **Update.** `python -m litradar update --overlap-days 2 --max-days 14`, with optional
@@ -235,7 +238,9 @@ python -m litradar run --days 7 --email             # the full weekly pass: fetc
 ```
 
 `update` prints one paragraph: the window and its basis, papers fetched / new to the store, new
-archive records per archive, new news items, errors by source, request counts and database size.
+archive records per archive, new news items (inserted rows only; news queries the run skipped, for
+example GDELT after a 429 or Google News while it is opt-in, are listed separately in parentheses and
+never counted as items), errors by source, request counts and database size.
 The same facts are in `digests/_work/last_update.json`:
 
 ```json
@@ -246,7 +251,8 @@ The same facts are in `digests/_work/last_update.json`:
  "sources": "all",
  "papers_fetched": 2210, "papers_new": 1480, "fetched_by_source": {"biorxiv": 611, "europepmc.journals": 402, "...": 0},
  "archive_new": 61834, "archive_new_by_source": {"ena": 2098, "sra": 59736},
- "news_new": 57, "fulltext": {"europepmc": 388, "biorxiv_failed": 2},
+ "news_new": 57, "news_new_by_source": {"gdelt": 51, "press": 6}, "news_queries_skipped": {"gnews": 8},
+ "fulltext": {"europepmc": 388, "biorxiv_failed": 2},
  "mentions": 4120, "tracked_hits": 9, "llm_scored": 0,
  "errors": ["rss Example Journal: HTTP 404"], "error_sources": ["rss"],
  "http": {"requests": 1543, "cache_hits": 920, "retries": 3, "failures": 1, "blocked_skips": 0},
@@ -262,33 +268,45 @@ added to `runs`, so the next update re-covers the same window.
 
 ```
 lit-radar status  (2026-10-17T07:02:11Z)  OK
-last update: finished 2026-10-17T06:41:50Z (0.01 days ago), window 2026-10-14..2026-10-17 (3 days), 2210 papers fetched / 1480 new
+last update (the most recent run only): finished 2026-10-17T06:41:50Z (0.01 days ago), window 2026-10-14..2026-10-17 (3 days), 2210 papers fetched / 1480 new
   errors in last run (1, sources: rss):
     - rss Example Journal: HTTP 404
+  news queries skipped in last run (not inserted items): gnews 8
+  earlier run 40 (finished 2026-10-16T06:41:12Z, window 2026-10-13..2026-10-16) had 1 error(s) on openalex:
+    - openalex: HTTP 429: Insufficient budget
 papers/day (last 14 days, by first_seen): 612.4  (8574 total)
 archive records/day (last 14 days, by first_public): 18311.9  (256366 total)
-per-source counts, most recent first (run 41 2026-10-14..2026-10-17  run 40 2026-10-13..2026-10-16  run 39 2026-10-12..2026-10-15); delta = latest - previous:
+per-source counts, most recent first (run 41 2026-10-14..2026-10-17  run 40 2026-10-13..2026-10-16  run 39 2026-10-12..2026-10-15); delta = latest - previous, n/a when the latest run did not pull the source:
   archive.ena_new               2098     1107      420  (+991)
   archive.sra_new              59736    68849    72500  (-9113)
   fetched.biorxiv                611      598      640  (+13)
+  fetched.openalex                 0      402      380  (n/a: not in latest run)
   ...
 sources disabled in config: none
-keys configured: LITRADAR_CONTACT_EMAIL=yes, NCBI_API_KEY=yes, OPENALEX_API_KEY=no, ...
+keys configured: LITRADAR_CONTACT_EMAIL=yes, NCBI_API_KEY=yes, OPENALEX_API_KEY=no, OPENFDA_API_KEY=no, ...
 database: 734.0 MB at data/radar.sqlite; papers 48211, archive_records 1903377, news_items 6120, mentions 211904, runs 41
 gaps (days with zero papers by pub_date in the last 30 days, 30 checked from 2026-09-01): none
 next scheduled runs (UTC, as documented): daily corpus update 2026-10-18T06:20Z [20 6 * * *]; weekly digest 2026-10-19T11:15Z [15 11 * * 1]
 ```
 
+* *last update* describes the most recent run only. Errors from the other recent runs (the three the
+  per-source table shows) are listed under it as *earlier run ...*, so an rss-only pass does not hide
+  yesterday's OpenAlex failure; the exit code still follows the latest run.
+* *news queries skipped* are queries the run did not send (a host rate-limited mid-run, Google News
+  while it is opt-in). They are never counted as new items.
 * *papers/day* counts by `first_seen` (what the updater brought in), *archive records/day* by
   the archives' own `first_public`.
 * *per-source* values come from the `counts` stored with each run; compare them against the
   window length shown in the header, since a 7-day weekly run will always dwarf a 3-day update.
+  A source the latest run did not pull (a `--sources` subset) shows `n/a` instead of a large negative delta.
 * *gaps* are days with zero papers by **publication date**, checked only from the first day any
   run ever covered; a day fetched late is not a gap, a day never covered is. Expect the most
   recent day or two to be thin for Europe PMC (see the lag section); a zero inside the window
   means a source problem.
-* *keys configured* is presence only. Values never appear in `status` output or in
-  `last_update.json`.
+* *keys configured* is presence only, and "yes" means a non-empty value: a key left blank in `.env`
+  (`NCBI_API_KEY=`), even with a comment after it, is "no". The list mirrors the keys in `.env.example`
+  that a source reads (`OPENFDA_API_KEY` included; the reserved Altmetric key is not listed). Values never
+  appear in `status` output or in `last_update.json`.
 * Exit code 1 when the last run finished more than `--stale-days` (3) ago or had errors on more
   than `--max-failing-sources` (2) distinct sources. Per-feed RSS failures count as one source
   (`rss`), so a handful of dead journal feeds does not page anyone.

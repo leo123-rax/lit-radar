@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from .. import query as Q
 from ..config import Settings
 from ..coverage import coverage_report, render_coverage_markdown
 from ..pipeline import window
@@ -32,8 +33,8 @@ def cmd_coverage(args) -> int:
 
 def register(sub) -> None:
     p = sub.add_parser("coverage", help="coverage report: records per source, silent journals and watched entities, errored sources, suggestions")
-    p.add_argument("--days", type=int, default=None, help="look-back window (default 7)")
-    p.add_argument("--since", help="YYYY-MM-DD")
-    p.add_argument("--until", help="YYYY-MM-DD")
+    p.add_argument("--days", type=int, default=None, help="look-back window in days when --since is not given (default 7)")
+    p.add_argument("--since", type=Q.since_arg, help=f"window start: {Q.SINCE_FORMAT}")
+    p.add_argument("--until", type=Q.until_arg, help="window end: YYYY-MM-DD or Nd (default: today, UTC)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_coverage)

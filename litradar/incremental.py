@@ -174,12 +174,27 @@ def compute_window(
 # ---------------------------------------------------------------------------------------------
 # run summary (digests/_work/last_update.json)
 # ---------------------------------------------------------------------------------------------
+# `news.*` counters that are not inserted items: filtered-out headlines and queries the run never sent
+NEWS_NON_INSERT = ("news.excluded", "news.offtopic")
+
+
+def is_news_insert_counter(key: str) -> bool:
+    """`news.gdelt`, `news.press`, `news.nih-reporter` count stored items; `news.gdelt_skipped` /
+    `news.gnews_skipped` count queries that were skipped, `news.excluded` / `news.offtopic` count rejects."""
+    return key.startswith("news.") and key not in NEWS_NON_INSERT and not key.endswith("_skipped")
+
+
+def news_skipped_counters(counts: Dict[str, Any]) -> Dict[str, int]:
+    """`{'gdelt': 72, 'gnews': 8}` from the `news.<source>_skipped` counters."""
+    return {k[len("news."):-len("_skipped")]: int(v or 0) for k, v in counts.items() if k.startswith("news.") and k.endswith("_skipped") and v}
+
+
 def summarize_update(report: Dict[str, Any], plan: Dict[str, Any], started: str, finished: str, db_path: Path, only: Optional[Sequence[str]]) -> Dict[str, Any]:
     counts: Dict[str, Any] = report.get("counts") or {}
     errors: List[str] = [str(e) for e in (report.get("errors") or [])]
     archive = {k[len("archive."):-len("_new")]: v for k, v in counts.items() if k.startswith("archive.") and k.endswith("_new")}
     fetched = {k[len("fetched."):]: v for k, v in counts.items() if k.startswith("fetched.")}
-    news = {k[len("news."):]: v for k, v in counts.items() if k.startswith("news.") and k not in ("news.excluded", "news.offtopic")}
+    news = {k[len("news."):]: v for k, v in counts.items() if is_news_insert_counter(k)}
     fulltext = {k[len("fulltext."):]: v for k, v in counts.items() if k.startswith("fulltext.")}
     return {
         "started": started,
@@ -194,6 +209,8 @@ def summarize_update(report: Dict[str, Any], plan: Dict[str, Any], started: str,
         "archive_new": int(sum(int(v or 0) for v in archive.values())),
         "archive_new_by_source": archive,
         "news_new": int(sum(int(v or 0) for v in news.values())),
+        "news_new_by_source": news,
+        "news_queries_skipped": news_skipped_counters(counts),
         "fulltext": fulltext,
         "mentions": int(counts.get("mentions", 0) or 0),
         "tracked_hits": int(counts.get("tracked_hits", 0) or 0),
@@ -224,6 +241,14 @@ def read_summary(out_dir: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _skipped_suffix(skipped: Dict[str, int]) -> str:
+    """' (gdelt 72 queries skipped, gnews 8 queries skipped)' or '' when nothing was skipped."""
+    if not skipped:
+        return ""
+    parts = [f"{k} {v} quer{'y' if v == 1 else 'ies'} skipped" for k, v in sorted(skipped.items())]
+    return " (" + ", ".join(parts) + ")"
+
+
 def summary_paragraph(summary: Dict[str, Any]) -> str:
     w = summary.get("window", {})
     basis = {"first_run": "first run", "last_run": "continuing from the last run", "override": "explicit --since/--until"}.get(w.get("basis"), w.get("basis"))
@@ -231,7 +256,7 @@ def summary_paragraph(summary: Dict[str, Any]) -> str:
         f"Updated {summary['since']}..{summary['until']} ({w.get('days')} days, {basis}{', capped' if w.get('capped') else ''}):",
         f"{summary['papers_fetched']} papers fetched, {summary['papers_new']} new to the store;",
         f"{summary['archive_new']} new archive records" + (f" ({', '.join(f'{k} {v}' for k, v in sorted(summary['archive_new_by_source'].items()))})" if summary.get("archive_new_by_source") else "") + ";",
-        f"{summary['news_new']} new news items;",
+        f"{summary['news_new']} new news items" + _skipped_suffix(summary.get("news_queries_skipped") or {}) + ";",
     ]
     errs = summary.get("errors") or []
     if errs:
@@ -303,17 +328,23 @@ def paper_gaps(conn: sqlite3.Connection, today: date, days: int = GAP_WINDOW_DAY
 
 
 def per_source_table(runs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Per-source counts across the given runs (most recent first) with latest-minus-previous deltas."""
+    """Per-source counts across the given runs (most recent first) with latest-minus-previous deltas.
+
+    A source absent from the latest run's counters (a `--sources` subset, or a source that never got
+    to count anything) gets `delta: None` and `in_latest: False` rather than a large negative number.
+    """
     keys: List[str] = []
     for r in runs:
         for k in r.get("counts", {}):
-            if (k.startswith("fetched.") or (k.startswith("archive.") and k.endswith("_new")) or (k.startswith("news.") and k not in ("news.excluded", "news.offtopic"))) and k not in keys:
+            if (k.startswith("fetched.") or (k.startswith("archive.") and k.endswith("_new")) or is_news_insert_counter(k)) and k not in keys:
                 keys.append(k)
     rows = []
+    latest_counts = runs[0].get("counts", {}) if runs else {}
     for k in sorted(keys):
         values = [int(r.get("counts", {}).get(k, 0) or 0) for r in runs]
-        delta = (values[0] - values[1]) if len(values) >= 2 else None
-        rows.append({"source": k, "values": values, "delta": delta})
+        in_latest = k in latest_counts
+        delta = (values[0] - values[1]) if (in_latest and len(values) >= 2) else None
+        rows.append({"source": k, "values": values, "delta": delta, "in_latest": in_latest})
     return rows
 
 
@@ -363,17 +394,25 @@ def next_cron(cron: str, now: datetime) -> Optional[datetime]:
     return None
 
 
+def _set(value: Any) -> bool:
+    return bool(str(value or "").strip())
+
+
 def key_presence(settings: Any) -> Dict[str, bool]:
-    """Which optional credentials are configured. Presence only; values never leave this function."""
+    """Which optional credentials are configured (non-empty). Presence only; values never leave this function.
+
+    Mirrors the keys in .env.example that a source actually reads; the reserved ALTMETRIC_API_KEY is not
+    listed because nothing uses it yet. OPENFDA_API_KEY is read from the environment by the openFDA adapter.
+    """
     return {
-        "LITRADAR_CONTACT_EMAIL": bool(getattr(settings, "contact_email", "")),
-        "NCBI_API_KEY": bool(getattr(settings, "ncbi_api_key", "")),
-        "OPENALEX_API_KEY": bool(getattr(settings, "openalex_api_key", "")),
-        "SEMANTIC_SCHOLAR_API_KEY": bool(getattr(settings, "semantic_scholar_api_key", "")),
-        "ALTMETRIC_API_KEY": bool(getattr(settings, "altmetric_api_key", "")),
-        "ANTHROPIC_API_KEY": bool(getattr(settings, "anthropic_api_key", "")),
-        "SMTP_HOST": bool(getattr(settings, "smtp_host", "")),
-        "SLACK_WEBHOOK_URL": bool(getattr(settings, "slack_webhook_url", "")),
+        "LITRADAR_CONTACT_EMAIL": _set(getattr(settings, "contact_email", "")),
+        "NCBI_API_KEY": _set(getattr(settings, "ncbi_api_key", "")),
+        "OPENALEX_API_KEY": _set(getattr(settings, "openalex_api_key", "")),
+        "OPENFDA_API_KEY": _set(getattr(settings, "openfda_api_key", None) or os.environ.get("OPENFDA_API_KEY", "")),
+        "SEMANTIC_SCHOLAR_API_KEY": _set(getattr(settings, "semantic_scholar_api_key", "")),
+        "ANTHROPIC_API_KEY": _set(getattr(settings, "anthropic_api_key", "")),
+        "SMTP_HOST": _set(getattr(settings, "smtp_host", "")),
+        "SLACK_WEBHOOK_URL": _set(getattr(settings, "slack_webhook_url", "")),
     }
 
 
@@ -410,6 +449,11 @@ def health(
     if len(failing) > max_failing_sources:
         problems.append(f"last run had errors on {len(failing)} sources (limit {max_failing_sources}): {', '.join(failing)}")
     totals = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("papers", "archive_records", "news_items", "mentions", "runs")}
+    # errors from the other recent runs: a clean rss-only pass must not hide yesterday's OpenAlex failure
+    earlier_errors = [
+        {"id": r["id"], "finished": r["finished"], "since": r["since"], "until": r["until"], "errors": r["errors"], "error_sources": error_sources(r["errors"])}
+        for r in runs[1:] if r["errors"]
+    ]
     return {
         "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ok": not problems,
@@ -425,8 +469,10 @@ def health(
             "papers_fetched": int(last["counts"].get("papers.unique", 0) or 0),
             "errors": last["errors"],
             "error_sources": failing,
+            "news_queries_skipped": news_skipped_counters(last["counts"]),
             "http": last["http"],
         },
+        "earlier_errors": earlier_errors,
         "last_update_json": last_summary,
         "papers": papers_per_day(conn, today),
         "archive": archive_per_day(conn, today),
@@ -451,7 +497,7 @@ def format_status(report: Dict[str, Any]) -> str:
     for p in report.get("problems", []):
         lines.append(f"  ! {p}")
     if lu:
-        lines.append(f"last update: finished {lu['finished']} ({lu['age_days']} days ago), window {lu['since']}..{lu['until']} ({lu['window_days']} days), {lu['papers_fetched']} papers fetched / {lu['papers_new']} new")
+        lines.append(f"last update (the most recent run only): finished {lu['finished']} ({lu['age_days']} days ago), window {lu['since']}..{lu['until']} ({lu['window_days']} days), {lu['papers_fetched']} papers fetched / {lu['papers_new']} new")
         if lu["errors"]:
             lines.append(f"  errors in last run ({len(lu['errors'])}, sources: {', '.join(lu['error_sources'])}):")
             for e in lu["errors"][:10]:
@@ -460,18 +506,30 @@ def format_status(report: Dict[str, Any]) -> str:
                 lines.append(f"    ... {len(lu['errors']) - 10} more")
         else:
             lines.append("  errors in last run: none")
+        skipped = lu.get("news_queries_skipped") or {}
+        if skipped:
+            lines.append("  news queries skipped in last run (not inserted items): " + ", ".join(f"{k} {v}" for k, v in sorted(skipped.items())))
     else:
         lines.append("last update: none recorded")
+    for er in report.get("earlier_errors") or []:
+        lines.append(f"  earlier run {er['id']} (finished {er['finished']}, window {er['since']}..{er['until']}) had {len(er['errors'])} error(s) on {', '.join(er['error_sources'])}:")
+        for e in er["errors"][:3]:
+            lines.append(f"    - {e[:160]}")
     p, a = report["papers"], report["archive"]
     lines.append(f"papers/day (last {p['window_days']} days, by first_seen): {p['per_day']}  ({p['total']} total)")
     lines.append(f"archive records/day (last {a['window_days']} days, by first_public): {a['per_day']}  ({a['total']} total)")
     ps = report["per_source"]
     if ps["rows"]:
         hdr = "  ".join(f"run {r['id']} {r['since']}..{r['until']}" for r in ps["runs"])
-        lines.append(f"per-source counts, most recent first ({hdr}); delta = latest - previous:")
+        lines.append(f"per-source counts, most recent first ({hdr}); delta = latest - previous, n/a when the latest run did not pull the source:")
         for row in ps["rows"]:
             vals = "  ".join(f"{v:>7}" for v in row["values"])
-            delta = "" if row["delta"] is None else f"  ({row['delta']:+d})"
+            if row["delta"] is not None:
+                delta = f"  ({row['delta']:+d})"
+            elif not row.get("in_latest", True):
+                delta = "  (n/a: not in latest run)"
+            else:
+                delta = ""
             lines.append(f"  {row['source']:<28}{vals}{delta}")
     lines.append(f"sources disabled in config: {', '.join(report['sources_disabled']) or 'none'}")
     keys = report.get("keys_configured") or {}

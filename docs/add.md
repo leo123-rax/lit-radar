@@ -12,6 +12,9 @@ upsert. Afterwards the paper is indistinguishable from a pipeline paper: it show
 
 ## Usage
 
+(`litradar ...` below is the console script installed by `pip install -e .`; without it, `python -m litradar ...`
+is the identical command.)
+
 ```bash
 litradar add 10.1038/s41592-024-02201-0                       # a DOI
 litradar add PMID:38409223 PMC10887192 arXiv:2301.08370        # several ids of any kind
@@ -174,7 +177,12 @@ litradar tags reading-list
 Every line is resolved independently; a line that fails is reported and the rest are stored, and
 the exit code is `1` so a script can notice. Re-running the same file is safe (refresh, not
 duplicate). Lines are run in order and arXiv requests are paced at one per 3 seconds, so a long
-list of arXiv ids takes a while; everything else is sub-second per lookup.
+list of arXiv ids takes a while; everything else is sub-second per lookup **when the services
+answer**. When one does not, the HTTP client retries with exponential backoff (1, 2, 4, 8 s on 503
+and 429, honouring `Retry-After`) and closes a host after two consecutive 429s for the rest of the
+command, so a batch that meets a throttled arXiv or bioRxiv can spend a minute or two waiting with
+only the retry log lines to show for it; run with `-v` to watch the requests, and expect the summary
+for every identifier only at the end.
 
 ## Finding hand-added papers again
 

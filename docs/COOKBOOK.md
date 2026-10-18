@@ -175,7 +175,7 @@ Revio                             292   0.2%
 
 ```bash
 litradar timeseries --entity pacb-revio --from 2023-01 --sources sra,ena --no-chart --out ts/
-# -> ts/timeseries_2023-01_2026-10.csv (long format) and .md (pivot); add --no-chart off for a PNG when matplotlib is installed
+# -> ts/timeseries_2023-01_2026-10.csv (long format) and .md (pivot); leave out --no-chart to also get a PNG when matplotlib is installed
 # any vendor at once:  litradar timeseries --vendor pacb --from 2023-01
 ```
 
@@ -222,8 +222,11 @@ ride along in the `fda-denovo` feed. Product code is the precise handle: PZM is 
 code; a free-text filter also catches PCR kits. An `OPENFDA_API_KEY` raises the daily quota from 1,000
 to 120,000 requests.
 
-Live check: last 45 days, 31 IVD decisions, **0 sequencing-based**; year to date, 182 decisions,
-**1 PZM** (plus 3 keyword hits that are PCR or panel controls).
+Live check (2026-10-17): last 45 days, 31 IVD decisions, **0 sequencing-based**; year to date, 182
+decisions, **1 PZM**. The free-text `sequenc|NGS` filter in the snippet above adds a few hits in some
+weeks (PCR kits and panel controls whose summaries mention sequencing); on this date it added none, so
+the snippet printed `182 IVD decisions; 1 sequencing-related`. The datasets refresh monthly, so the
+numbers move with the refresh, not with the day you run it.
 ```
 2026-05-12 fda-510k CellDx-Tissue — Datar Cancer Genetics Private Limited | PZM
 ```

@@ -3,10 +3,11 @@
   litradar run      [--days 7 | --since YYYY-MM-DD --until YYYY-MM-DD] [--llm] [--no-fulltext] [--sources a,b] [--email] [--slack]
   litradar digest   [--since --until] [--out DIR]           re-render from the database without fetching
   litradar rematch  [--since 90d]                             re-annotate stored papers after editing the gazetteers
-  litradar search   "query" [--since 90d] [--in methods,coi] [--limit 50]
-  litradar entity   <entity_id> [--since 90d]                 papers that mention one gazetteer entry
+  litradar search   "query" [--since 90d] [--in methods,coi] [--limit 50] [--raw-fts] [--json]
+                                                              a plain multi-word query is a phrase; --raw-fts passes FTS5 syntax through
+  litradar entity   <entity_id> [--since 90d] [--limit 100]   distinct papers that mention one gazetteer entry
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
-  litradar stats                                              database totals and last runs
+  litradar stats    [--json]                                  database totals and last runs
   litradar dashboard --out site/ [--weeks 52]                 build the static trends site from the database
   litradar check-config                                       validate YAML files and report duplicates
   litradar timeseries [--entity id ...] [--vendor name ...] [--from YYYY-MM --to YYYY-MM] [--sources sra,ena,epmc] [--out DIR]
@@ -29,43 +30,46 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
+import os
 import sqlite3
 import sys
-from datetime import date, datetime, timedelta, timezone
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, backfill, browser, entities, i18n, toolkit, trends
-from . import export as export_mod
-from .config import Settings
-from .coverage import render_coverage_markdown
-from .digest import deliver, render
-from .extract.gazetteer import Gazetteer
-from .http import Http
-from .pipeline import Pipeline, window
-from .store import Store
+# The stock macOS Python 3.9 links LibreSSL and urllib3 v2 warns about it on import, on every command.
+# Nothing here depends on that OpenSSL feature set, so the warning is noise for this CLI.
+warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL")
 
+from . import __version__, backfill, browser, entities, i18n, toolkit, trends  # noqa: E402
+from . import export as export_mod  # noqa: E402
+from . import query as Q  # noqa: E402
+from .config import (  # noqa: E402
+    ConfigError,
+    Settings,
+    check_config_dir,
+    duplicate_top_level_keys,
+    format_yaml_error,
+    load_yaml_checked,
+    resolve_config_dir,
+)
+from .coverage import render_coverage_markdown  # noqa: E402
+from .digest import deliver, render  # noqa: E402
+from .extract.gazetteer import Gazetteer  # noqa: E402
+from .http import Http  # noqa: E402
+from .pipeline import Pipeline, window  # noqa: E402
+from .store import FTS_COLUMNS, Store  # noqa: E402
 
-def _parse_since(s: Optional[str]) -> Optional[str]:
-    if not s:
-        return None
-    m = re.fullmatch(r"(\d+)d", s)
-    if m:
-        return (datetime.now(timezone.utc).date() - timedelta(days=int(m.group(1)))).isoformat()
-    return s
+_parse_since = Q.parse_since  # kept for callers that imported the old private name
 
 
 def _dated_window(since_arg: Optional[str], until_arg: Optional[str], default_since: str) -> tuple:
-    """Resolve --since / --until for `show` and `watch run`: each is YYYY-MM-DD or Nd (N days before today);
-    --until defaults to today. Raises ValueError on anything else or when since is after until."""
-    since = _parse_since(since_arg) or _parse_since(default_since)
-    until = _parse_since(until_arg) or datetime.now(timezone.utc).date().isoformat()
-    for flag, value in (("--since", since), ("--until", until)):
-        try:
-            date.fromisoformat(value)
-        except ValueError:
-            raise ValueError(f"bad {flag} {value!r}: use YYYY-MM-DD or Nd (e.g. 30d)") from None
+    """Resolve --since / --until for `show` and `watch run`. The parser has already validated and resolved
+    both (YYYY-MM-DD or Nd, see litradar.query); --until defaults to today. Raises ValueError when since is
+    after until."""
+    since = Q.parse_since(since_arg) or Q.parse_since(default_since)
+    until = Q.parse_date(until_arg, "--until") or datetime.now(timezone.utc).date().isoformat()
     if since > until:
         raise ValueError(f"--since {since} is after --until {until}")
     return since, until
@@ -123,17 +127,53 @@ def cmd_digest(args) -> int:
 def cmd_rematch(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     pipe = Pipeline(settings)
-    report = pipe.rematch(since=_parse_since(args.since))
+    report = pipe.rematch(since=args.since or None)
     print(json.dumps(report, indent=1))
     return 0
 
 
+def _parse_sections(text: Optional[str]) -> tuple:
+    """`--in methods,coi` -> ('methods', 'coi'); unknown names raise ValueError with the valid list."""
+    parts = []
+    for raw in (text or "").split(","):
+        s = raw.strip().lower()
+        if s and s not in parts:
+            parts.append(s)
+    bad = [s for s in parts if s not in FTS_COLUMNS]
+    if bad:
+        raise ValueError(f"unknown section(s) {', '.join(bad)}; choose from {', '.join(FTS_COLUMNS)}")
+    return tuple(parts)
+
+
+def _attach_scores(store: Store, rows: List[dict]) -> None:
+    """Add `score: {final, heuristic, reasons}` (or None) to paper rows, so `--json` shows what ranking did."""
+    for r in rows:
+        sc = store.get_score(r["id"]) if r.get("id") else None
+        r["score"] = {"final": sc.get("final"), "heuristic": sc.get("heuristic"), "reasons": sc.get("reasons")} if sc else None
+
+
 def cmd_search(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
+    try:
+        sections = _parse_sections(args.in_sections)
+    except ValueError as exc:
+        print(f"litradar search: error: {exc}", file=sys.stderr)
+        return 2
     store = Store(settings.db_path)
-    sections = args.in_sections.split(",") if args.in_sections else ()
-    rows = store.search(args.query, since=_parse_since(args.since), limit=args.limit, sections=sections)
+    query = args.query.strip()
+    if not query:
+        print("litradar search: error: the query is empty", file=sys.stderr)
+        return 2
+    fts_query = query if args.raw_fts else Q.auto_phrase(query)
+    if fts_query != query:
+        print(f"litradar search: searching for the phrase {fts_query} (pass --raw-fts to use FTS5 syntax as typed)", file=sys.stderr)
+    err = Q.fts_syntax_error(store.conn, Q.with_sections(fts_query, sections))
+    if err:
+        fts_query = Q.phrase_query(query)
+        print(f"litradar search: note: the query is not valid FTS5 ({err}); searching for it as the phrase {fts_query} instead", file=sys.stderr)
+    rows = store.search(fts_query, since=args.since or None, limit=args.limit, sections=sections)
     if args.json:
+        _attach_scores(store, rows)
         print(json.dumps(rows, indent=1, default=str))
         return 0
     if not rows:
@@ -147,13 +187,24 @@ def cmd_search(args) -> int:
 def cmd_entity(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
-    rows = store.entity_papers(args.entity_id, since=_parse_since(args.since), limit=args.limit)
+    rows, total, kind = entities.entity_papers(store, args.entity_id, since=args.since or None, limit=args.limit)
+    if kind is None:
+        # never seen in the mentions table: a valid gazetteer id with no hits, or a typo
+        instruments, companies, _ = _entity_context(settings)
+        known = next((e for gz in (instruments, companies) for e in gz.entries if e.id.lower() == args.entity_id.lower()), None)
+        if known is None:
+            print(f"litradar entity: {args.entity_id!r} is not a gazetteer id and has no stored mentions "
+                  f"(find ids with `litradar entities --grep <text>`; `litradar show <name>` also accepts names, aliases and tickers)", file=sys.stderr)
+            return 1
     if args.json:
-        print(json.dumps(rows, indent=1, default=str))
+        _attach_scores(store, rows)
+        print(json.dumps({"entity_id": args.entity_id, "kind": kind, "since": args.since or None, "papers": total, "shown": len(rows), "results": rows}, indent=1, default=str))
         return 0
-    print(f"{len(rows)} papers mention {args.entity_id}")
+    shown = f" (showing {len(rows)})" if len(rows) < total else ""
+    print(f"{total} paper{'s' if total != 1 else ''} mention {args.entity_id}{shown}")
     for r in rows:
-        print(f"- {r['pub_date'] or 'n.d.'}  [{r['section']}] {r['title']}\n    {r['url']}\n    {r['snippet'][:200]}")
+        secs = "/".join(r.get("sections") or []) or "-"
+        print(f"- {r['pub_date'] or 'n.d.'}  [{secs}] {r['title']}\n    {r['url']}\n    {(r.get('snippet') or '')[:200]}")
     return 0
 
 
@@ -172,9 +223,19 @@ def cmd_entities(args) -> int:
 def cmd_stats(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
-    print(json.dumps(store.counts(), indent=1))
-    for r in store.conn.execute("SELECT started, finished, since, until, counts_json FROM runs ORDER BY id DESC LIMIT 5"):
-        print(r[0], "->", r[1], f"window {r[2]}..{r[3]}")
+    counts = store.counts()
+    runs = [
+        {"id": r[0], "started": r[1], "finished": r[2], "since": r[3], "until": r[4]}
+        for r in store.conn.execute("SELECT id, started, finished, since, until FROM runs ORDER BY id DESC LIMIT 5")
+    ]
+    if getattr(args, "json", False):
+        print(json.dumps({"counts": counts, "runs": runs}, indent=1))
+        return 0
+    for k, v in counts.items():
+        print(f"{k:22} {v:>10,}")
+    print(f"recent runs ({len(runs)}):" if runs else "recent runs: none recorded")
+    for r in runs:
+        print(f"  {r['started']} -> {r['finished']}  window {r['since']}..{r['until']}")
     return 0
 
 
@@ -203,10 +264,28 @@ def cmd_dashboard(args) -> int:
 def cmd_check_config(args) -> int:
     import yaml
 
-    settings = Settings.from_env(config_dir=args.config_dir)
+    cfg_dir = resolve_config_dir(args.config_dir)
+    problems = check_config_dir(cfg_dir)
+    print(f"config dir: {cfg_dir}")
+    if problems:
+        for pr in problems:
+            print(f"check-config: {pr}", file=sys.stderr)
+        return 1
+    try:
+        settings = Settings.from_env(config_dir=cfg_dir)
+    except yaml.YAMLError as exc:
+        print("check-config: " + format_yaml_error(cfg_dir / "radar.yaml", exc), file=sys.stderr)
+        return 1
     ok = True
     for name, kind in (("instruments", "instrument"), ("companies", "company")):
-        data = settings.yaml(name)
+        try:
+            data = load_yaml_checked(cfg_dir / f"{name}.yaml")
+        except ConfigError as exc:
+            print(f"check-config: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(data, dict):
+            print(f"check-config: {name}.yaml: expected a mapping with an `entries:` list", file=sys.stderr)
+            return 1
         entries = data.get("entries", [])
         ids = [e.get("id") for e in entries]
         dups = sorted({i for i in ids if ids.count(i) > 1})
@@ -223,12 +302,17 @@ def cmd_check_config(args) -> int:
                     print(f"  alias collision: '{a}' in {seen[key]} and {e.id}")
                 seen[key] = e.id
     for name in ("journals", "subgroups", "feeds", "radar"):
+        path = cfg_dir / f"{name}.yaml"
         try:
-            d = settings.yaml(name)
-            print(f"{name}: ok ({len(d) if isinstance(d, dict) else 0} top-level keys)")
-        except yaml.YAMLError as exc:
-            print(f"{name}: YAML error {exc}")
+            d = load_yaml_checked(path)
+        except ConfigError as exc:
+            print(f"check-config: {exc}", file=sys.stderr)
             ok = False
+            continue
+        print(f"{name}: ok ({len(d) if isinstance(d, dict) else 0} top-level keys)")
+        for key, lines in sorted(duplicate_top_level_keys(path).items()):
+            print(f"  WARNING {name}.yaml: top-level key '{key}' appears {len(lines)} times (lines {', '.join(map(str, lines))}); "
+                  f"YAML keeps the last one, merge them by hand")
     # archive_models.yaml (instrument time series): ids must exist in instruments.yaml unless `proposed`
     models_path = Path(settings.config_dir) / "archive_models.yaml"
     if models_path.exists():
@@ -237,7 +321,7 @@ def cmd_check_config(args) -> int:
         try:
             specs = ts.load_archive_models(models_path)
         except yaml.YAMLError as exc:
-            print(f"archive_models: YAML error {exc}")
+            print("check-config: " + format_yaml_error(models_path, exc), file=sys.stderr)
             return 1
         warnings = ts.check_models(specs, ts.load_instrument_index(Path(settings.config_dir) / "instruments.yaml"))
         print(f"archive_models: {len(specs)} entities, {sum(len(x.ena) for x in specs.values())} archive model strings, {len(warnings)} warnings")
@@ -325,12 +409,19 @@ def cmd_watch(args) -> int:
             print(f"{verb}: {row['term']!r} as {row['kind']}" + (f" ({res['kind']} {res['id'] or res['name']}, by {res['matched_by']})" if res else ""))
         return 0
     if args.action == "remove":
+        instruments, companies, subgroups = _entity_context(settings)
         try:
-            ok = entities.watch_remove(store, args.term)
+            removed = entities.watch_remove(store, args.term, instruments=instruments, companies=companies, subgroups=subgroups)
         except (ValueError, sqlite3.OperationalError) as exc:
             print(f"watch: {exc}")
             return 1
-        print(json.dumps({"term": args.term, "removed": ok}) if as_json else (f"removed {args.term!r}" if ok else f"{args.term!r} was not on the watchlist"))
+        ok = removed is not None
+        if as_json:
+            print(json.dumps({"term": args.term, "removed": ok, "stored_as": removed}))
+        elif ok:
+            print(f"removed {removed!r}" + (f" (given as {args.term!r})" if removed != args.term else ""))
+        else:
+            print(f"{args.term!r} was not on the watchlist (see `litradar watch list`)")
         return 0 if ok else 1
     if args.action == "list":
         rows = entities.watch_list(store)
@@ -492,7 +583,7 @@ def cmd_export(args) -> int:
 def cmd_tag(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     store = Store(settings.db_path)
-    since, until = _parse_since(args.since), args.until
+    since, until = args.since or None, args.until or None
     if args.check:
         # read-only: what a dashboard would see, plus how many rows lost their tags to a re-ingest
         report = i18n.histograms(store, since=since, until=until)
@@ -543,54 +634,68 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--version", action="version", version=f"litradar {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    since_help = f"window start: {Q.SINCE_FORMAT}"
+    until_help = "window end: YYYY-MM-DD or Nd (default: today, UTC)"
     p = sub.add_parser("run", help="fetch, extract, rank and render the digest")
-    p.add_argument("--days", type=int, default=None)
-    p.add_argument("--since")
-    p.add_argument("--until")
+    p.add_argument("--days", type=_positive_int, default=None, help="look-back window in days when --since is not given (default 7)")
+    p.add_argument("--since", type=Q.since_arg, help=since_help)
+    p.add_argument("--until", type=Q.until_arg, help=until_help)
     p.add_argument("--llm", action="store_true", help="score the shortlist with Claude (needs ANTHROPIC_API_KEY)")
-    p.add_argument("--no-fulltext", action="store_true")
+    p.add_argument("--no-fulltext", action="store_true", help="skip open-access full-text retrieval (metadata and abstracts only)")
     p.add_argument("--sources", help="comma-separated subset: biorxiv,europepmc,openalex,crossref,arxiv,rss,ena,sra,geo,pride,cellxgene,nih_reporter,clinicaltrials,openfda,semantic_scholar")
-    p.add_argument("--out")
-    p.add_argument("--email", action="store_true")
-    p.add_argument("--slack", action="store_true")
+    p.add_argument("--out", help="digest directory (default: out_dir in radar.yaml / LITRADAR_OUT_DIR, else digests/)")
+    p.add_argument("--email", action="store_true", help="e-mail the digest (SMTP_* and DIGEST_* in .env)")
+    p.add_argument("--slack", action="store_true", help="post the top 10 to Slack (SLACK_WEBHOOK_URL in .env)")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("digest", help="re-render the digest from the database")
-    p.add_argument("--days", type=int, default=None)
-    p.add_argument("--since")
-    p.add_argument("--until")
-    p.add_argument("--out")
-    p.add_argument("--print", action="store_true")
+    p.add_argument("--days", type=_positive_int, default=None, help="look-back window in days when --since is not given (default 7)")
+    p.add_argument("--since", type=Q.since_arg, help=since_help)
+    p.add_argument("--until", type=Q.until_arg, help=until_help)
+    p.add_argument("--out", help="digest directory (default: out_dir in radar.yaml / LITRADAR_OUT_DIR, else digests/)")
+    p.add_argument("--print", action="store_true", help="print the Markdown to stdout as well as writing it")
     p.set_defaults(func=cmd_digest)
 
     p = sub.add_parser("rematch", help="re-run gazetteer matching and scoring over stored papers (after editing config)")
-    p.add_argument("--since", help="YYYY-MM-DD or Nd; default: everything")
+    p.add_argument("--since", type=Q.since_arg, help=f"only papers from this date: {Q.SINCE_FORMAT}; default: everything")
     p.set_defaults(func=cmd_rematch)
 
-    p = sub.add_parser("search", help="full-text search of stored papers")
+    p = sub.add_parser(
+        "search",
+        help="full-text search of stored papers",
+        description="Full-text search (SQLite FTS5, porter stemming) over title, abstract, Methods, funding, competing interests, "
+                    "affiliations and open-access body text. A plain multi-word query is searched as a PHRASE "
+                    "(\"liquid biopsy\" = those words adjacent, in order); anything using FTS5 syntax is passed through "
+                    "as typed: methods:Xenium, \"exact phrase\", Xenium OR Visium, Xenium NOT Visium, NovaSeq*, NEAR(a b, 10), "
+                    "{methods coi}: Illumina. Note: matching is on stored text, so a product the gazetteer attributed through "
+                    "an alias is found by `litradar entity <id>`, not necessarily by its name here. Full syntax: docs/search.md.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("query")
-    p.add_argument("--since", help="YYYY-MM-DD or Nd (e.g. 90d)")
+    p.add_argument("--since", type=Q.since_arg, help=since_help)
     p.add_argument("--in", dest="in_sections", help="restrict to columns: title,abstract,methods,funding,coi,affiliations,body")
-    p.add_argument("--limit", type=int, default=50)
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--limit", type=_positive_int, default=50, help="rows to print (default 50)")
+    p.add_argument("--raw-fts", action="store_true", dest="raw_fts", help="pass the query to FTS5 exactly as typed (no automatic phrase quoting)")
+    p.add_argument("--json", action="store_true", help="machine-readable output, with each paper's score")
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser("entity", help="papers mentioning one gazetteer entry (see `entities`)")
-    p.add_argument("entity_id")
-    p.add_argument("--since")
-    p.add_argument("--limit", type=int, default=100)
-    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("entity", help="distinct papers mentioning one gazetteer entry (ids: `litradar entities`)")
+    p.add_argument("entity_id", help="gazetteer id, e.g. txg-xenium or illumina (list them with `litradar entities --grep <text>`)")
+    p.add_argument("--since", type=Q.since_arg, help=since_help + "; default: everything")
+    p.add_argument("--limit", type=_positive_int, default=100, help="papers to print (default 100); the headline count is never capped")
+    p.add_argument("--json", action="store_true", help="machine-readable output: {entity_id, kind, papers, shown, results[]} with scores")
     p.set_defaults(func=cmd_entity)
 
     p = sub.add_parser("entities", help="list gazetteer entries")
-    p.add_argument("--kind", choices=["instrument", "company"])
-    p.add_argument("--grep")
+    p.add_argument("--kind", choices=["instrument", "company"], help="only instruments or only companies (default both)")
+    p.add_argument("--grep", help="case-insensitive substring filter over the printed line (id, name, vendor, ticker)")
     p.set_defaults(func=cmd_entities)
 
     p = sub.add_parser("stats", help="database totals and recent runs")
+    p.add_argument("--json", action="store_true", help="one JSON object {counts, runs} instead of text")
     p.set_defaults(func=cmd_stats)
 
-    p = sub.add_parser("check-config", help="validate config files")
+    p = sub.add_parser("check-config", help="validate config files (exit 1 when the directory, a required file or the YAML is broken)")
     p.set_defaults(func=cmd_check_config)
 
     p = sub.add_parser("timeseries", help="monthly counts of SRA/ENA experiments and Europe PMC papers per instrument model")
@@ -611,7 +716,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("browser-check", help="report whether the optional real-browser fetcher is installed and a Chrome DevTools endpoint is listening")
     p.add_argument("--cdp-url", help="Chrome DevTools URL to probe (default: browser.cdp_url in radar.yaml, else http://localhost:9222)")
-    p.set_defaults(func=browser.cmd_browser_check)
+    p.set_defaults(func=cmd_browser_check)
     # Plugin commands: any module in litradar/commands/ exposing register(subparsers) is added here,
     # so new features never need to edit this file.
     import importlib
@@ -639,27 +744,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.set_defaults(func=cmd_dashboard)
     p = sub.add_parser("show", help="entity dossier: instrument / company id, name, alias, ticker, or an author's 'First Last'")
     p.add_argument("query")
-    p.add_argument("--since", default="365d", help="YYYY-MM-DD or Nd (default 365d)")
-    p.add_argument("--until", help="YYYY-MM-DD or Nd (default today)")
-    p.add_argument("--limit", type=int, default=15, help="rows per list (recent papers, co-mentions, news)")
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--since", type=Q.since_arg, default="365d", help="YYYY-MM-DD or Nd (default 365d)")
+    p.add_argument("--until", type=Q.until_arg, help="YYYY-MM-DD or Nd (default today)")
+    p.add_argument("--limit", type=_positive_int, default=15, help="rows per list (recent papers, co-mentions, news)")
+    p.add_argument("--json", action="store_true", help="machine-readable dossier (recent papers carry their score)")
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("watch", help="watchlist of free-text terms, entities and authors, evaluated against the store")
+    p = sub.add_parser(
+        "watch",
+        help="watchlist of free-text terms, entities and authors, evaluated against the store",
+        description="Watchlist of free-text terms, gazetteer entities and authors. The list is stored in the SQLite database "
+                    "(table `watchlist`), not in config/, so it follows LITRADAR_DB and survives a different --config-dir. "
+                    "A multi-word free-text term matches as a phrase (the words adjacent, in order); use FTS5 syntax "
+                    "(quotes, AND/OR/NOT, prefix*) for anything else. `remove` accepts the same spelling `add` did.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     wsub = p.add_subparsers(dest="action", required=True)
     w = wsub.add_parser("add", help="add a term (kind is auto-detected unless --kind is given)")
-    w.add_argument("term")
-    w.add_argument("--kind", choices=list(entities.WATCH_KINDS))
+    w.add_argument("term", help="free text (phrase match), a gazetteer id/name/alias/ticker, or an author's 'First Last'")
+    w.add_argument("--kind", choices=list(entities.WATCH_KINDS), help="force the kind instead of auto-detecting it")
     w.add_argument("--json", action="store_true")
-    w = wsub.add_parser("remove", help="remove a term")
+    w = wsub.add_parser("remove", help="remove a term (by the stored term, or by the name/alias/ticker that resolved to it)")
     w.add_argument("term")
     w.add_argument("--json", action="store_true")
     w = wsub.add_parser("list", help="list watched terms")
     w.add_argument("--json", action="store_true")
     w = wsub.add_parser("run", help="report matches for every watched term in the window")
-    w.add_argument("--since", default="7d", help="YYYY-MM-DD or Nd (default 7d)")
-    w.add_argument("--until", help="YYYY-MM-DD or Nd (default today)")
-    w.add_argument("--limit", type=int, default=20, help="rows shown per term (the match count is never capped)")
+    w.add_argument("--since", type=Q.since_arg, default="7d", help="YYYY-MM-DD or Nd (default 7d)")
+    w.add_argument("--until", type=Q.until_arg, help="YYYY-MM-DD or Nd (default today)")
+    w.add_argument("--limit", type=_positive_int, default=20, help="rows shown per term (the match count is never capped)")
     w.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_watch)
     p = sub.add_parser("backfill", help="fill the corpus from OpenAlex month by month, or from a snapshot directory (resumable)")
@@ -693,18 +806,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--chunk-size", type=int, default=20000, help="rows per batch")
     p.set_defaults(func=cmd_export)
     p = sub.add_parser("tag", help="write language ('lang') and country codes ('countries') into papers.extra_json for dashboards and trends")
-    p.add_argument("--since", help="YYYY-MM-DD or Nd (e.g. 365d); default: everything")
-    p.add_argument("--until", help="YYYY-MM-DD; default: open-ended")
+    p.add_argument("--since", type=Q.since_arg, help="YYYY-MM-DD or Nd (e.g. 365d); default: everything")
+    p.add_argument("--until", type=Q.until_arg, help="YYYY-MM-DD or Nd; default: open-ended")
     p.add_argument("--translate", action="store_true", help="translate non-English titles/abstracts into English with Claude via one Message Batches request (needs ANTHROPIC_API_KEY; model from LITRADAR_LLM_MODEL)")
     p.add_argument("--max-translate", type=int, default=1000, help="cap on papers sent for translation per run")
     p.add_argument("--check", action="store_true", help="read-only: histograms of already-tagged papers and a warning if any row in the window is untagged (tags are lost on re-ingest)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_tag)
 
-    args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    return args.func(args)
+    try:
+        args = ap.parse_args(argv)
+        logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        rc = args.func(args)
+        sys.stdout.flush()  # small outputs sit in the buffer until exit: surface a closed pipe here, where it is handled
+        return rc
+    except BrokenPipeError:
+        # the reader went away (`litradar entities | head`): finish quietly, and point stdout at /dev/null so the
+        # interpreter's final flush does not print "Exception ignored ... BrokenPipeError" either
+        _silence_stdout()
+        return 0
+    except SystemExit:
+        # --help, --version and usage errors exit through argparse; give their buffered output the same treatment
+        try:
+            sys.stdout.flush()
+        except BrokenPipeError:
+            _silence_stdout()
+        raise
+
+
+def _silence_stdout() -> None:
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def cmd_browser_check(args) -> int:
+    """`browser-check`: informational unless the browser fetcher is enabled in radar.yaml (then exit 1 when unusable)."""
+    rc = browser.cmd_browser_check(args)
+    if rc == 0:
+        return 0
+    settings = Settings.from_env(config_dir=getattr(args, "config_dir", None))
+    enabled = bool(((settings.radar or {}).get("browser") or {}).get("enabled"))
+    return rc if enabled else 0
 
 
 if __name__ == "__main__":

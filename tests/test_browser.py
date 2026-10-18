@@ -380,4 +380,9 @@ def test_status_and_browser_check_command(monkeypatch, capsys, tmp_path):
 
     rc = cli.main(["--config-dir", str(tmp_path), "browser-check", "--cdp-url", "http://localhost:9999"])
     out = capsys.readouterr().out
-    assert rc == 1 and '"cdp_url": "http://localhost:9999"' in out and '"enabled_in_radar_yaml": false' in out
+    # an optional extra that is simply not installed is information, not a failure ...
+    assert rc == 0 and '"cdp_url": "http://localhost:9999"' in out and '"enabled_in_radar_yaml": false' in out
+    # ... unless radar.yaml has switched the browser fetcher on and it is unusable
+    (tmp_path / "radar.yaml").write_text("browser:\n  enabled: true\n", encoding="utf-8")
+    rc = cli.main(["--config-dir", str(tmp_path), "browser-check", "--cdp-url", "http://localhost:9999"])
+    assert rc == 1 and '"enabled_in_radar_yaml": true' in capsys.readouterr().out

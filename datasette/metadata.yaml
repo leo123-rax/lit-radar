@@ -6,10 +6,14 @@
 # The database name Datasette derives from the file is "radar" (file stem). If you serve a copy
 # under another name, rename the key under `databases:` to match.
 #
-# Full-text search: `papers_fts` is an external-content FTS5 table keyed by the text column `id`,
-# not by rowid, so Datasette's table-level `fts_table` integration (which joins on rowid) cannot
-# be used. The `search` canned query below does the join instead and accepts raw FTS5 syntax
-# (column filters such as methods:, phrases, NEAR(), prefix*). See docs/search.md.
+# Full-text search: `papers_fts` is a standalone FTS5 table (its own content shadow tables) that
+# carries the paper id as an UNINDEXED column. The `search` canned query below joins it to `papers`
+# on that id and accepts raw FTS5 syntax (column filters such as methods:, phrases, NEAR(), prefix*,
+# binary NOT); Datasette's table-level `fts_table` integration is not used because the join is needed
+# for dates, journals and URLs anyway. See docs/search.md.
+#
+# Date parameters (`since`, `until`) are calendar dates, YYYY-MM-DD; a blank parameter means "no
+# bound" in every query. The `Nd` shorthand of the CLI and JSON API is not SQL and would match nothing.
 
 title: Literature radar
 description_html: |
@@ -134,11 +138,52 @@ databases:
       timeseries:
         description: Monthly experiment/paper counts per instrument model from SRA, ENA and Europe PMC (litradar timeseries). Present only after that command has run.
         facets: [source, entity_id]
+        columns:
+          source: sra | ena | epmc
+          entity_id: Gazetteer instrument id (config/archive_models.yaml).
+          model: Archive instrument-model string or Europe PMC term the count was fetched for.
+          month: YYYY-MM.
+          count: Experiments (sra, ena) or papers (epmc) first public in that month.
+          fetched_at: UTC timestamp of the request that produced the count.
+      concept_counts:
+        description: Weekly paper counts per technical phrase (litradar concepts). Present only after that command has run.
+        facets: [week]
+        sort_desc: week
+        columns:
+          term: Normalised phrase (the counting key).
+          week: ISO week start, YYYY-MM-DD.
+          papers: Papers in that week whose title/abstract/Methods carry the phrase.
+          display: Display spelling of the phrase.
+          computed_at: UTC timestamp of the count.
+      concept_papers:
+        description: Which paper contributed to which concept count; large and only useful as a join (litradar concepts).
+        hidden: true
+      concepts:
+        description: Optional LLM definitions for burst concepts (litradar concepts --llm), one row per term.
+        columns:
+          term: Normalised phrase, joins concept_counts.term.
+          display: Display spelling.
+          definition_json: JSON with the one-line definition, new-vs-renamed verdict, affected vendor categories and a 1-5 relevance score.
+          model: Model that produced the definition.
+          scored_at: UTC timestamp.
+      candidate_companies:
+        description: Company-looking names found in papers and news that are not in the gazetteer, with evidence and a review status (litradar candidates).
+        facets: [status]
+        sort_desc: score
+        columns:
+          name_norm: Normalised name (primary key).
+          display_name: Name as seen most often.
+          evidence_json: JSON list of evidence snippets and, after `promote`, the companies.yaml entry written.
+          first_seen: First paper/news date the name appeared.
+          last_seen: Most recent such date.
+          papers: Distinct papers/news items carrying the name.
+          score: Review score (higher = more corporate cues and more references).
+          status: new | ignored | promoted
 
     queries:
       search:
         title: Full-text search (FTS5 syntax)
-        description: Search title, abstract, Methods, funding, competing interests, affiliations and open-access body text. Use FTS5 syntax such as methods:Xenium, "spatial transcriptomics", NEAR(Visium Xenium, 10), NovaSeq*. Leave since blank for all dates. Highlights are marked with [ ].
+        description: Search title, abstract, Methods, funding, competing interests, affiliations and open-access body text. Use FTS5 syntax such as methods:Xenium, "spatial transcriptomics", Xenium NOT Visium (NOT is binary; there is no AND NOT), NEAR(Visium Xenium, 10), NovaSeq*. since = YYYY-MM-DD (not 90d) or blank for all dates. Highlights are marked with [ ].
         sql: |-
           select p.id, p.pub_date, p.kind, p.journal, p.title, p.url,
                  snippet(papers_fts, -1, '[', ']', ' … ', 18) as snippet,
@@ -151,7 +196,7 @@ databases:
 
       papers_naming_instrument_in_methods:
         title: Papers naming an instrument in their Methods
-        description: instrument = gazetteer id (e.g. txg-xenium, pacb-revio) or display name (e.g. Xenium). since = YYYY-MM-DD or blank.
+        description: instrument = gazetteer id (e.g. txg-xenium, pacb-revio) or display name (e.g. Xenium). since = YYYY-MM-DD (not 90d) or blank for all dates.
         sql: |-
           select p.pub_date, p.kind, p.journal, p.title, p.url, m.entity_id, m.count as mentions, m.snippet
           from mentions m join papers p on p.id = m.paper_id
@@ -163,7 +208,7 @@ databases:
 
       companies_by_role:
         title: Companies by role in a window
-        description: How each watched company appears in papers published between since and until (inclusive) - as author affiliation, funder/COI, subject of the paper, or supplier named in Methods.
+        description: How each watched company appears in papers published between since and until (inclusive; YYYY-MM-DD, either or both blank = no bound) - as author affiliation, funder/COI, subject of the paper, or supplier named in Methods.
         sql: |-
           select m.entity_id, m.entity_name, m.ticker,
                  count(distinct m.paper_id) as papers,
@@ -173,15 +218,15 @@ databases:
                  sum(case when m.section = 'methods' then 1 else 0 end) as as_supplier
           from mentions m join papers p on p.id = m.paper_id
           where m.kind = 'company'
-            and ((p.pub_date >= :since and p.pub_date <= :until)
-                 or (p.pub_date = '' and substr(p.first_seen, 1, 10) >= :since))
+            and (:since = '' or p.pub_date >= :since or (p.pub_date = '' and substr(p.first_seen, 1, 10) >= :since))
+            and (:until = '' or p.pub_date <= :until or p.pub_date = '')
           group by m.entity_id
           order by papers desc
           limit 200
 
       archive_experiments_per_model_per_week:
         title: Archive experiments per instrument model per week
-        description: Public archive deposits (SRA/ENA/GEO/PRIDE) grouped by ISO-style week (Monday start) and declared instrument model. model = substring of the model string or a gazetteer id; since/until = YYYY-MM-DD or blank.
+        description: Public archive deposits (SRA/ENA/GEO/PRIDE) grouped by ISO-style week (Monday start) and declared instrument model. model = substring of the model string or a gazetteer id; since/until = YYYY-MM-DD (not 90d) or blank for no bound.
         sql: |-
           select strftime('%Y-W%W', first_public) as week, instrument_model, vendor, ticker,
                  count(*) as experiments, count(distinct study_accession) as studies,
@@ -197,7 +242,7 @@ databases:
 
       tracked_author_hits:
         title: Tracked-author hits
-        description: Papers by authors on the watchlists in config/subgroups.yaml. subgroup = e.g. spatial, long_read, gene_editing, or blank for all.
+        description: Papers by authors on the watchlists in config/subgroups.yaml. subgroup = e.g. spatial, long_read, gene_editing, or blank for all; since = YYYY-MM-DD (not 90d) or blank.
         sql: |-
           select t.subgroup, t.author_name, t.matched_by, p.pub_date, p.kind, p.journal, p.title, p.url
           from tracked_author_hits t join papers p on p.id = t.paper_id
@@ -208,7 +253,7 @@ databases:
 
       news_by_company:
         title: News by company
-        description: Headlines tagged with a company id from config/companies.yaml (e.g. illumina, 10x-genomics). Blank company = every tagged item.
+        description: Headlines tagged with a company id from config/companies.yaml (e.g. illumina, 10x-genomics). Blank company = every tagged item; since = YYYY-MM-DD (not 90d) or blank.
         sql: |-
           select n.published, n.feed, n.title, n.url, n.companies_json as companies
           from news_items n
@@ -231,7 +276,7 @@ databases:
 
       top_scored_papers:
         title: Top scored papers
-        description: Highest final scores with the signals behind them and the instruments/companies detected. since/until = YYYY-MM-DD or blank.
+        description: Highest final scores with the signals behind them and the instruments/companies detected. since/until = YYYY-MM-DD (not 90d) or blank for no bound.
         sql: |-
           select round(s.final, 2) as score, p.pub_date, p.kind, p.journal, p.title, p.url, s.reasons,
                  (select group_concat(distinct m.entity_name) from mentions m where m.paper_id = p.id and m.kind = 'instrument') as instruments,
@@ -244,15 +289,15 @@ databases:
 
       unlisted_company_institutions:
         title: Company institutions not in the gazetteer (candidates for companies.yaml)
-        description: Comma-separated affiliation segments that carry a corporate cue (Inc, Ltd, GmbH, LLC, Corp, AG, plc, Biosciences, Therapeutics, Pharma ...) or are typed "company" by OpenAlex, where no watched company was matched in that affiliation. A bare suffix segment ("Inc.") is glued to the segment before it. Heuristic - review before adding entries to companies.yaml.
+        description: Comma-separated affiliation segments that carry a corporate cue (Inc, Ltd, GmbH, LLC, Corp, AG, plc, Biosciences, Therapeutics, Pharma ...) or are typed "company" by OpenAlex, where no watched company was matched in that affiliation. A bare suffix segment ("Inc.") is glued to the segment before it, and the academic exclusions (department, institute, laboratory, university ...) are applied to the glued string, so "National Laboratory ..., Inc." is dropped; a bare suffix needs at least two words before it, so a place name glued to "LLC" is dropped too. Line breaks inside affiliations are collapsed. since = YYYY-MM-DD or blank. Heuristic - review before adding entries to companies.yaml.
         sql: |-
           with recursive
           corporate(paper_id, pub_date, title, affiliation, evidence) as (
-            select p.id, p.pub_date, p.title, trim(j.value), 'affiliation_text'
+            select p.id, p.pub_date, p.title, trim(replace(replace(replace(j.value, char(10), ' '), char(13), ' '), char(9), ' ')), 'affiliation_text'
             from papers p, json_each(p.affiliations_json) j
             where j.value != ''
             union all
-            select p.id, p.pub_date, p.title, json_extract(i.value, '$.name'), 'openalex_type_company'
+            select p.id, p.pub_date, p.title, trim(replace(replace(json_extract(i.value, '$.name'), char(10), ' '), char(13), ' ')), 'openalex_type_company'
             from papers p, json_each(p.authors_json) a, json_each(a.value, '$.institutions') i
             where json_extract(i.value, '$.type') = 'company'
           ),
@@ -267,8 +312,9 @@ databases:
                    substr(rest, instr(rest, ',') + 1)
             from parts where rest != '' and instr(rest, ',') > 0
           ),
-          candidates as (
-            select paper_id, pub_date, title, evidence,
+          glued as (
+            select paper_id, pub_date, title, evidence, segment,
+                   lower(segment) in ('inc', 'inc.', 'llc', 'ltd', 'ltd.', 'gmbh', 'co.', 'corp', 'corp.', 'ag', 's.a.', 'b.v.', 'plc', 'limited', 'incorporated') as bare_suffix,
                    case when lower(segment) in ('inc', 'inc.', 'llc', 'ltd', 'ltd.', 'gmbh', 'co.', 'corp', 'corp.', 'ag', 's.a.', 'b.v.', 'plc', 'limited', 'incorporated')
                         then prev || ', ' || segment else segment end as institution
             from parts
@@ -284,11 +330,16 @@ databases:
                    or (' ' || segment || ' ') like '% Biosciences %' or (' ' || segment || ' ') like '% Therapeutics %'
                    or (' ' || segment || ' ') like '% Pharmaceuticals %' or (' ' || segment || ' ') like '% Pharma %'
                    or (' ' || segment || ' ') like '% Biotech %' or (' ' || segment || ' ') like '% Biotechnologies %')
-              and lower(segment) not like '%department%' and lower(segment) not like 'dept%' and lower(segment) not like '%institute%'
-              and lower(segment) not like '%school%' and lower(segment) not like '%faculty%' and lower(segment) not like '%center%'
-              and lower(segment) not like '%centre%' and lower(segment) not like '%university%' and lower(segment) not like '%division%'
-              and lower(segment) not like '%laboratory%' and lower(segment) not like '%program%' and lower(segment) not like '%graduate%'
-              and lower(segment) not like '%hospital%' and lower(segment) not like '%college%' and lower(segment) not like '%pharmacology%'
+          ),
+          candidates as (
+            select paper_id, pub_date, title, evidence, institution
+            from glued
+            where (not bare_suffix or instr(trim(substr(institution, 1, length(institution) - length(segment) - 2)), ' ') > 0)
+              and lower(institution) not like '%department%' and lower(institution) not like 'dept%' and lower(institution) not like '%institute%'
+              and lower(institution) not like '%school%' and lower(institution) not like '%faculty%' and lower(institution) not like '%center%'
+              and lower(institution) not like '%centre%' and lower(institution) not like '%university%' and lower(institution) not like '%division%'
+              and lower(institution) not like '%laboratory%' and lower(institution) not like '%program%' and lower(institution) not like '%graduate%'
+              and lower(institution) not like '%hospital%' and lower(institution) not like '%college%' and lower(institution) not like '%pharmacology%'
           )
           select institution, count(distinct paper_id) as papers, min(pub_date) as first_date, max(pub_date) as last_date,
                  group_concat(distinct evidence) as evidence, max(title) as example_title

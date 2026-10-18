@@ -97,7 +97,8 @@ def test_coverage_report_sections(store, settings):
     tz = {t["term"] for t in w["terms"]["zero"]}
     assert "spatial transcriptomics" not in tz and "single-cell" not in tz and "cryo-EM" in tz
 
-    assert r["errored_sources"] == [{"source": "europepmc", "error": "HTTP 500 boom"}, {"source": "feed Example Feed", "error": "timeout"}]
+    assert [(e["source"], e["source_id"], e["error"], e["config"]) for e in r["errored_sources"]] == [
+        ("europepmc", "europepmc", "HTTP 500 boom", False), ("feed Example Feed", "rss", "timeout", False)]
     sugg = "\n".join(r["suggestions"])
     assert "europepmc errored in the last run" in sugg
     assert "No OpenAlex key configured" in sugg
@@ -119,7 +120,7 @@ def test_suggestions_react_to_configuration(store, settings):
 def test_markdown_rendering(store, settings):
     md = C.render_coverage_markdown(store, SINCE, UNTIL, settings)
     assert md.startswith(f"## Coverage: {SINCE} to {UNTIL}")
-    for heading in ("### Records per source", "### Journals with zero items in the window", "### Watched entities with zero mentions",
+    for heading in ("### Records per source", "### Journals with zero items in the window", "### Watched entities with zero paper mentions",
                     "### Sources that errored in the last run", "### Suggestions"):
         assert heading in md
     assert "| biorxiv | 1 | 25% | 1 | 100% | 100 |" in md

@@ -127,12 +127,15 @@ def test_status_per_source_table_and_rates(tmp_path):
     assert rows["fetched.biorxiv"]["values"] == [150, 120, 100] and rows["fetched.biorxiv"]["delta"] == 30
     assert rows["archive.sra_new"]["delta"] == 50
     assert rows["archive.ena_new"]["values"] == [20, 0, 0]
-    assert rows["fetched.arxiv"]["values"] == [0, 3, 0] and rows["fetched.arxiv"]["delta"] == -3
+    # arxiv was not pulled by the latest run: no delta (not a -3), flagged so `status` prints n/a instead of a drop
+    assert rows["fetched.arxiv"]["values"] == [0, 3, 0] and rows["fetched.arxiv"]["delta"] is None and rows["fetched.arxiv"]["in_latest"] is False
+    assert rows["archive.ena_new"]["delta"] == 20 and rows["archive.ena_new"]["in_latest"] is True
     assert "news.excluded" not in rows and rows["news.gnews"]["values"] == [0, 0, 7]
     assert rep["papers"]["total"] == 4 and rep["papers"]["per_day"] == round(4 / 14, 1)  # first_seen is today for all four
     assert rep["per_source"]["runs"][0]["since"] == "2026-10-13"
     text = incremental.format_status(rep)
     assert "fetched.biorxiv" in text and "(+30)" in text and "OK" in text
+    assert "fetched.arxiv" in text and "(n/a: not in latest run)" in text and "(-3)" not in text
 
 
 def test_status_gaps_respect_coverage_start(tmp_path):
@@ -255,3 +258,54 @@ def test_update_failure_leaves_a_summary_and_records_nothing(live_env, capsys, m
     assert summary["failed"].startswith("RuntimeError") and summary["error_sources"] == ["biorxiv"]
     st = Store(live_env["db"])
     assert incremental.last_run(st.conn) is None
+
+
+# ---------------------------------------------------------------- shakedown: honest counters -----
+def test_skipped_news_queries_are_not_new_items():
+    report = {"since": "2026-10-15", "until": "2026-10-17", "counts": {"news.gdelt": 0, "news.press": 0, "news.gdelt_skipped": 72, "news.gnews_skipped": 8,
+                                                                       "news.excluded": 4, "news.offtopic": 2, "papers.unique": 3, "papers.new": 3},
+              "errors": [], "http": {"requests": 10, "failures": 0}}
+    plan = incremental.compute_window("2026-10-16", today=TODAY, overlap_days=2)
+    s = incremental.summarize_update(report, plan, "a", "b", __import__("pathlib").Path("/nonexistent/radar.sqlite"), None)
+    assert s["news_new"] == 0 and s["news_new_by_source"] == {"gdelt": 0, "press": 0}
+    assert s["news_queries_skipped"] == {"gdelt": 72, "gnews": 8}
+    text = incremental.summary_paragraph(s)
+    assert "0 new news items (gdelt 72 queries skipped, gnews 8 queries skipped);" in text and "80" not in text
+    assert incremental.is_news_insert_counter("news.gdelt") and not incremental.is_news_insert_counter("news.gdelt_skipped")
+    assert not incremental.is_news_insert_counter("news.excluded")
+
+
+def test_key_presence_mirrors_env_example_and_needs_non_empty_values(monkeypatch):
+    class S:
+        contact_email = "  "
+        ncbi_api_key = "k"
+        openalex_api_key = ""
+        semantic_scholar_api_key = ""
+        anthropic_api_key = ""
+        smtp_host = ""
+        slack_webhook_url = ""
+
+    monkeypatch.setenv("OPENFDA_API_KEY", "fda-key")
+    keys = incremental.key_presence(S())
+    assert keys["LITRADAR_CONTACT_EMAIL"] is False and keys["NCBI_API_KEY"] is True and keys["OPENFDA_API_KEY"] is True
+    assert "ALTMETRIC_API_KEY" not in keys
+    monkeypatch.setenv("OPENFDA_API_KEY", "")
+    assert incremental.key_presence(S())["OPENFDA_API_KEY"] is False
+
+
+def test_status_carries_errors_from_earlier_recent_runs_and_skipped_queries(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    _seed_run(st, "2026-10-10", "2026-10-17", NOW - timedelta(hours=2), counts={"fetched.biorxiv": 50, "news.gdelt_skipped": 70},
+              errors=["openalex: HTTP 429: Insufficient budget"])
+    _seed_run(st, "2026-10-15", "2026-10-17", NOW - timedelta(hours=1), counts={"fetched.rss": 9, "news.gdelt_skipped": 72, "news.gnews_skipped": 8})
+    rep = incremental.health(st.conn, st.path, now=NOW)
+    assert rep["ok"] is True and rep["last_update"]["errors"] == []
+    assert rep["last_update"]["news_queries_skipped"] == {"gdelt": 72, "gnews": 8}
+    assert [e["error_sources"] for e in rep["earlier_errors"]] == [["openalex"]]
+    text = incremental.format_status(rep)
+    assert "errors in last run: none" in text and "earlier run" in text and "Insufficient budget" in text
+    assert "news queries skipped in last run (not inserted items): gdelt 72, gnews 8" in text
+    assert "last update (the most recent run only)" in text
+    rows = {r["source"]: r for r in rep["per_source"]["rows"]}
+    assert rows["fetched.biorxiv"]["delta"] is None and rows["fetched.biorxiv"]["in_latest"] is False
+    assert "news.gdelt_skipped" not in rows

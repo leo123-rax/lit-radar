@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .. import incremental
+from .. import query as Q
 from ..config import Settings
 from ..pipeline import Pipeline
 from ..store import Store
@@ -84,8 +85,8 @@ def register(sub) -> None:
     p = sub.add_parser("update", help="extend the corpus from the last run forward (daily live mode; no digest)")
     p.add_argument("--overlap-days", type=int, default=incremental.DEFAULT_OVERLAP_DAYS, help=f"re-fetch this many days before the last run's end (default {incremental.DEFAULT_OVERLAP_DAYS})")
     p.add_argument("--max-days", type=int, default=incremental.DEFAULT_MAX_DAYS, help=f"cap on the window length (default {incremental.DEFAULT_MAX_DAYS}); repair a longer outage with --since")
-    p.add_argument("--since", help="override the window start (YYYY-MM-DD)")
-    p.add_argument("--until", help="override the window end (YYYY-MM-DD; default today UTC)")
+    p.add_argument("--since", type=Q.iso_date_arg, help="override the window start (YYYY-MM-DD)")
+    p.add_argument("--until", type=Q.iso_date_arg, help="override the window end (YYYY-MM-DD; default today UTC)")
     p.add_argument("--sources", help="comma-separated subset: biorxiv,europepmc,openalex,crossref,arxiv,rss,sra,ena")
     p.add_argument("--llm", action="store_true", help="score the shortlist with Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--no-fulltext", action="store_true", help="skip full-text retrieval (default: on)")

@@ -328,10 +328,16 @@ def test_sec_ticker_hint_offline(tmp_path):
 
 # ---- CLI --------------------------------------------------------------------------------------
 def test_cli_candidates_roundtrip(tmp_path, monkeypatch, capsys):
+    import shutil
+
     from litradar.cli import main
+    from litradar.config import DEFAULT_CONFIG_DIR
 
     st = _seed(tmp_path)
     st.close()
+    # `promote` now really appends to companies.yaml, so the command runs against a scratch copy of config/
+    shutil.copytree(DEFAULT_CONFIG_DIR, tmp_path / "config")
+    monkeypatch.setenv("LITRADAR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "d.sqlite"))
     monkeypatch.setenv("LITRADAR_CACHE_DIR", str(tmp_path / ".cache"))
     assert main(["candidates", "refresh", "--since", "2026-10-01", "--until", "2026-10-17"]) == 0
@@ -344,10 +350,19 @@ def test_cli_candidates_roundtrip(tmp_path, monkeypatch, capsys):
     assert "status -> ignored" in capsys.readouterr().out
     assert main(["candidates", "promote", "proteolyze", "--type", "pharma"]) == 0
     out = capsys.readouterr().out
-    assert "status -> promoted" in out and "- {id: proteolyze-therapeutics" in out
+    assert "status -> promoted" in out and "- {id: proteolyze-therapeutics" in out and "appended to" in out
+    companies_yaml = (tmp_path / "config" / "companies.yaml").read_text(encoding="utf-8")
+    assert "id: proteolyze-therapeutics" in companies_yaml and "type: pharma" in companies_yaml  # the hand-off really wrote the entry
+    assert "proteolyze" not in DEFAULT_CONFIG_DIR.joinpath("companies.yaml").read_text(encoding="utf-8").lower()  # and not into the repository
     assert main(["candidates", "show", "proteolyze", "--json"]) == 0
     row = json.loads(capsys.readouterr().out)
-    assert row["status"] == "promoted" and row["promotion"]["entry"]["type"] == "pharma"
+    assert row["status"] == "promoted" and row["promotion"]["entry"]["type"] == "pharma" and row["promotion"]["tracked"] is True
+    # promoting again collides with the id just written: the status flip is reported, the failed write is exit 1 with the line to paste
+    assert main(["candidates", "reset", "proteolyze"]) == 0
+    capsys.readouterr()
+    assert main(["candidates", "promote", "proteolyze", "--type", "pharma"]) == 1
+    captured = capsys.readouterr()
+    assert "writing companies.yaml failed" in captured.err and "- {id: proteolyze-therapeutics" in captured.out
     assert main(["candidates", "--since", "2026-10-01", "--min-score", "0", "--json"]) == 0
     names = {r["name_norm"] for r in json.loads(capsys.readouterr().out)}
     assert "proteolyzetherapeutics" not in names and "lactigaus" not in names and "acmespatial" in names

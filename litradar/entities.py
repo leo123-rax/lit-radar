@@ -44,9 +44,12 @@ an entity id that exists only in the mentions table (e.g. `unlisted:<slug>` inst
 (tracked author in config, tracked_author_hits, or any paper's author list). Ties return the best match
 and list the others under `candidates`.
 
-Full-text watch terms use the FTS5 index (`papers_fts`, porter + unicode61 tokenizer). Terms containing
+Full-text watch terms use the FTS5 index (`papers_fts`, porter + unicode61 tokenizer). A plain multi-word
+term is matched as a phrase (the words adjacent, in order; see `litradar.query.auto_phrase`); a term that
+uses FTS5 syntax (quotes, column filters, AND/OR/NOT, prefix*) is passed through as written. Terms containing
 CJK characters bypass FTS (unicode61 does not segment CJK text) and are matched as exact substrings of
-title / abstract / methods / body instead.
+title / abstract / methods / body instead. `watch_remove` accepts the same spellings `watch_add` resolved
+(a name, alias or ticker removes the entity row it was stored under).
 """
 from __future__ import annotations
 
@@ -58,6 +61,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import query as Q
 from .extract.gazetteer import Entry, Gazetteer
 from .store import Store
 
@@ -392,6 +396,40 @@ def resolve(store: Store, query: str, instruments: Optional[Gazetteer] = None, c
     return res
 
 
+# ---------------------------------------------------------------------------------- entity papers
+def entity_papers(store: Store, entity_id: str, since: Optional[str] = None, limit: int = 100,
+                  kind: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+    """Distinct papers mentioning one gazetteer id, newest first: ``(rows, total, kind)``.
+
+    One row per paper (sections grouped into ``sections``, mention counts summed into ``mentions``, the
+    best snippet kept), at most ``limit`` rows; ``total`` is the full distinct count in the window, never
+    capped by ``limit``. ``kind`` is the entity kind recorded in the mentions table (``None`` when the id
+    has no stored mention at all, which a caller can distinguish from a known entity with zero papers).
+    """
+    where = "FROM mentions m JOIN papers p ON p.id = m.paper_id WHERE m.entity_id = ? COLLATE NOCASE"
+    params: List[Any] = [entity_id]
+    if kind:
+        where += " AND m.kind = ?"
+        params.append(kind)
+    if since:
+        where += " AND (p.pub_date >= ? OR (p.pub_date = '' AND substr(p.first_seen, 1, 10) >= ?))"
+        params += [since, since]
+    found_kind = store.conn.execute(
+        "SELECT kind FROM mentions WHERE entity_id = ? COLLATE NOCASE" + (" AND kind = ?" if kind else "") + " LIMIT 1",
+        [entity_id] + ([kind] if kind else []),
+    ).fetchone()
+    if not found_kind:
+        return [], 0, None
+    total = store.conn.execute(f"SELECT COUNT(DISTINCT p.id) {where}", params).fetchone()[0]
+    rows = _rows(store.conn.execute(
+        f"SELECT p.id, p.doi, p.title, p.journal, p.pub_date, p.url, p.kind, p.source, "
+        f"GROUP_CONCAT(DISTINCT m.section) AS sections, SUM(m.count) AS mentions, MIN(m.snippet) AS snippet "
+        f"{where} GROUP BY p.id ORDER BY ({_EFFECTIVE_DATE}) DESC, p.id LIMIT ?", (*params, limit)))
+    for r in rows:
+        r["sections"] = [x for x in str(r.get("sections") or "").split(",") if x]
+    return rows, int(total), str(found_kind[0])
+
+
 # ---------------------------------------------------------------------------------- dossier
 def _fill_scratch(store: Store, res: Resolution, since: str, until: str, subgroups: Optional[Sequence[Dict[str, Any]]]) -> None:
     conn = store.conn
@@ -469,6 +507,14 @@ def _trend(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, Any]:
     prior = conn.execute(sql, (p0.isoformat(), p1.isoformat())).fetchone()[0]
     out["prior_30d"] = prior
     out["change_pct"] = round(100.0 * (recent - prior) / prior, 1) if prior else None
+    corpus_start = conn.execute(
+        "SELECT MIN(CASE WHEN pub_date = '' THEN substr(first_seen, 1, 10) ELSE pub_date END) FROM papers WHERE pub_date != '' OR first_seen != ''"
+    ).fetchone()[0]
+    cs = _iso_date(corpus_start or "")
+    if cs and cs > p1:
+        # the store holds nothing from the prior period: a zero there is a corpus boundary, not a trend
+        out["note"] = f"the corpus starts {cs.isoformat()}, after the prior period ({p0.isoformat()}..{p1.isoformat()}); the comparison is not meaningful yet"
+        out["change_pct"] = None
     return out
 
 
@@ -594,6 +640,8 @@ def dossier(store: Store, res: Resolution, since: str, until: Optional[str] = No
         for r in recent:
             r["venue"] = (r.get("journal") or r.get("source") or "") + (" (preprint)" if r.get("kind") == "preprint" else "")
             r["sections"], r["snippet"] = [], ""
+            sc = store.get_score(r["id"])
+            r["score"] = {"final": sc.get("final"), "heuristic": sc.get("heuristic"), "reasons": sc.get("reasons")} if sc else None
             if res.kind in ENTITY_KINDS:
                 ms = _rows(conn.execute("SELECT section, snippet, count FROM mentions WHERE paper_id = ? AND kind = ? AND entity_id = ? ORDER BY count DESC, section",
                                         (r["id"], res.kind, res.entity_id)))
@@ -686,6 +734,8 @@ def render_dossier(d: Dict[str, Any]) -> str:
     chg = f" ({t['change_pct']:+.1f}%)" if t.get("change_pct") is not None else ""
     prior = f"prior 30 days {t['prior_30d']}" if t.get("prior_30d") is not None else f"prior 30 days n/a (window starts {w.get('since')})"
     lines.append(f"  trend: last {t.get('recent_days', 30)} days {t.get('recent_30d', 0)} vs {prior}{chg}")
+    if t.get("note") and t.get("prior_30d") is not None:
+        lines.append(f"  note: {t['note']}")
     if d.get("papers_out_of_range"):
         lines.append(f"  note: {d['papers_out_of_range']} paper(s) dated outside the window months (undated items first seen after --until, "
                      "or malformed dates) are in the total but not in the series")
@@ -697,7 +747,9 @@ def render_dossier(d: Dict[str, Any]) -> str:
         lines.append("  none in the window")
     for r in recent:
         secs = "/".join(r.get("sections") or []) or "-"
-        lines.append(f"  {r.get('pub_date') or 'n.d.'}  [{secs}]  {r.get('title') or '(untitled)'}")
+        sc = r.get("score") or {}
+        score = f"  (score {sc['final']:.2f})" if isinstance(sc.get("final"), (int, float)) else ""
+        lines.append(f"  {r.get('pub_date') or 'n.d.'}  [{secs}]  {r.get('title') or '(untitled)'}{score}")
         lines.append(f"              {r.get('venue') or ''}  {r.get('url') or ''}".rstrip())
         if r.get("snippet"):
             lines.append(f"              …{r['snippet'][:220]}…")
@@ -806,12 +858,30 @@ def watch_add(store: Store, term: str, kind: Optional[str] = None, instruments: 
     return out
 
 
-def watch_remove(store: Store, term: str) -> bool:
+def watch_remove(store: Store, term: str, instruments: Optional[Gazetteer] = None, companies: Optional[Gazetteer] = None,
+                 subgroups: Optional[Sequence[Dict[str, Any]]] = None) -> Optional[str]:
+    """Remove a watched term. Tries the text as stored first, then the same resolution `watch_add` applied
+    (a gazetteer name/alias/ticker -> its id; a person -> the tracked display name). Returns the stored
+    term that was removed, or None when nothing matched."""
     if not ensure_watchlist_schema(store):
         raise sqlite3.OperationalError("the database is read-only; the watchlist cannot be changed")
-    cur = store.conn.execute("DELETE FROM watchlist WHERE term = ?", ((term or "").strip(),))
-    store.conn.commit()
-    return cur.rowcount > 0
+    text = (term or "").strip()
+    candidates = [text]
+    if text and (instruments is not None or companies is not None or subgroups is not None):
+        res = resolve(store, text, instruments, companies, subgroups)
+        if res.kind in ENTITY_KINDS and res.entity_id:
+            candidates.append(res.entity_id)
+        elif res.kind == "person" and res.name:
+            candidates.append(res.name)
+    for cand in candidates:
+        if not cand:
+            continue
+        row = store.conn.execute("SELECT term FROM watchlist WHERE term = ?", (cand,)).fetchone()
+        if row:
+            store.conn.execute("DELETE FROM watchlist WHERE term = ?", (cand,))
+            store.conn.commit()
+            return str(row[0])
+    return None
 
 
 _ITEM_COLS = "p.id, p.pub_date, p.title, p.journal, p.source, p.kind, p.url"
@@ -838,10 +908,12 @@ def _substring_matches(store: Store, term: str, since: str, until: str, limit: i
 
 
 def _fts_matches(store: Store, term: str, since: str, until: str, limit: int) -> Tuple[List[Dict[str, Any]], int]:
-    """Newest `limit` papers in the window matching an FTS5 query, plus the total count (not capped by `limit`).
-    Text that is not valid FTS5 syntax falls back to a phrase query, exactly as Store.search does."""
+    """Newest `limit` papers in the window matching a watch term, plus the total count (not capped by `limit`).
+    A plain multi-word term is matched as a phrase (`litradar.query.auto_phrase`); text that uses FTS5 syntax is
+    passed through, and text that is not valid FTS5 falls back to a phrase query, exactly as Store.search does."""
     if CJK_RE.search(term):
         return _substring_matches(store, term, since, until, limit)
+    term = Q.auto_phrase(term)
     sql_from = f"FROM papers_fts JOIN papers p ON p.id = papers_fts.id WHERE papers_fts MATCH ? AND {_WINDOW}"
     select = f"SELECT {_ITEM_COLS}, snippet(papers_fts, -1, '[', ']', ' … ', 18) AS snippet {sql_from} ORDER BY ({_EFFECTIVE_DATE}) DESC LIMIT ?"
 

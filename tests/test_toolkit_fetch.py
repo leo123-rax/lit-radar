@@ -353,3 +353,72 @@ def test_make_http_builds_a_plain_client_by_default():
 
     h = toolkit.make_http(Settings(contact_email="a@b.c"))
     assert isinstance(h, Http) and "a@b.c" in h.session.headers["User-Agent"]  # SEC-style "<tool> <email>" UA
+
+
+# ------------------------------------------------------------------ exit codes: hard failures are never "0 records, exit 0"
+
+
+def test_zero_records_after_failed_requests_exits_1(fake, tmp_path, capsys):
+    http = fake([[]])  # the adapter yields nothing ...
+    http.stats["failures"] = 1  # ... because its one request failed (HTTP 400 after retries, say)
+    assert cli.main(["fetch", "ena", "--days", "1", "--out", str(tmp_path / "e.jsonl")]) == 1
+    err = capsys.readouterr().err
+    assert "litradar fetch ena: FAILED: 0 records and 1 failed request(s)" in err and "Traceback" not in err
+
+
+def test_skipped_host_exits_1_even_with_partial_output(fake, tmp_path, capsys):
+    http = fake([[{"experiment_accession": "ERX1", "study_accession": "ERP1", "instrument_model": "Revio", "instrument_platform": "PACBIO_SMRT",
+                   "library_strategy": "WGS", "scientific_name": "x", "center_name": "", "first_public": "2026-10-16", "study_title": "T"}]])
+    http.blocked_hosts = {"www.ebi.ac.uk"}
+    out = tmp_path / "e.jsonl"
+    assert cli.main(["fetch", "ena", "--days", "1", "--out", str(out)]) == 1
+    err = capsys.readouterr().err
+    assert "host(s) skipped for the rest of the run after repeated 429s: www.ebi.ac.uk" in err and "1 record(s) were written" in err
+    assert len(_lines(out)) == 1  # partial output is kept
+
+
+def test_an_empty_window_without_failures_is_a_clean_exit(fake, tmp_path, capsys):
+    fake([[]])
+    assert cli.main(["fetch", "ena", "--days", "1", "--out", str(tmp_path / "e.jsonl")]) == 0
+    assert "0 ArchiveRecord records" in capsys.readouterr().err
+
+
+def test_fetch_exit_code_helper(capsys):
+    assert toolkit.fetch_exit_code("sra", 0, {"failures": 0}) == 0
+    assert toolkit.fetch_exit_code("sra", 12, {"failures": 3}) == 0  # partial failures with records: reported in the stats line only
+    assert toolkit.fetch_exit_code("sra", 0, {"failures": 1}) == 1
+    assert toolkit.fetch_exit_code("sra", 5, {"failures": 0}, blocked_hosts={"eutils.ncbi.nlm.nih.gov"}) == 1
+    assert toolkit.fetch_exit_code("sra", 0, {}) == 0
+    capsys.readouterr()
+
+
+def test_openalex_early_stop_is_reported_and_exits_1(fake, tmp_path, capsys, monkeypatch):
+    def works(http, filters, state=None, **kw):
+        if state is not None:
+            state["error"] = "HTTP 429: Insufficient budget"
+        return iter(())
+
+    monkeypatch.setattr(toolkit.openalex, "works", works)
+    fake([])
+    assert cli.main(["fetch", "openalex", "--days", "1", "--out", str(tmp_path / "o.jsonl")]) == 1
+    err = capsys.readouterr().err
+    assert "OpenAlex stopped early: HTTP 429: Insufficient budget" in err and "no OPENALEX_API_KEY configured" in err
+
+
+def test_bad_dates_are_usage_errors(fake, tmp_path, capsys):
+    fake([[]])
+    out = str(tmp_path / "e.jsonl")
+    assert cli.main(["fetch", "ena", "--since", "yesterday", "--out", out]) == 2
+    assert "--since must be YYYY-MM-DD or Nd (for example 90d)" in capsys.readouterr().err
+    assert cli.main(["fetch", "ena", "--until", "2026-13-45", "--out", out]) == 2
+    assert "not a real calendar date" in capsys.readouterr().err
+    assert cli.main(["fetch", "ena", "--since", "2026-10-10", "--until", "2026-10-01", "--out", out]) == 2
+    assert "is after --until" in capsys.readouterr().err
+    assert cli.main(["fetch", "ena", "--since", "3d", "--out", out]) == 0  # Nd works here too
+
+
+def test_europepmc_usage_error_lists_the_three_selectors(fake, tmp_path, capsys):
+    fake([])
+    assert cli.main(["fetch", "europepmc", "--days", "3", "--out", str(tmp_path / "x.jsonl")]) == 2
+    err = capsys.readouterr().err
+    assert "--query" in err and "--issn" in err and "--section METHODS --terms" in err and err.count("\n") >= 3

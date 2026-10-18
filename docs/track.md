@@ -25,6 +25,14 @@ python -m litradar coverage --days 7 --json
 After adding or removing gazetteer entries run `python -m litradar rematch --since 90d` so stored papers are
 re-annotated; scores (and therefore priorities) are recomputed by `rematch` and by every `run`.
 
+(`python -m litradar` and `litradar` are the same program; the short form exists once the package is installed
+with `pip install -e .`. The docs use either.)
+
+To **see** a priority or gazetteer change land, look at the scores: `python -m litradar show illumina --json`
+lists the recent papers with `score: {final, heuristic, reasons}` (the terminal view prints `(score 6.10)`
+per paper), `python -m litradar search Illumina --since 30d --json` and `python -m litradar entity illumina
+--json` carry the same `score` object per row, and `reasons` gains `priority x2` after a `rematch`.
+
 ## How the files are edited
 
 The config files are documents, with comments and section headers that carry meaning, so the editor never
@@ -77,7 +85,8 @@ Add archive vocabulary to `config/archive_models.yaml` by hand if the instrument
 Appends to the subgroup's `tracked_authors`. The pipeline matches tracked authors by OpenAlex id when one is
 present and by normalised display name otherwise, so an id makes matching exact.
 
-* `--openalex A...` records the id directly.
+* `--openalex A...` records the id directly; `--orcid 0000-0002-...` records an ORCID iD directly (no lookup);
+  `--institution "..."` sets the institution string stored with the author (otherwise the lookup's answer is used).
 * Otherwise, if `OPENALEX_API_KEY` is set, `authors?search=<name>` is queried and the top profile is proposed
   with its works count, citations and last known institution; `--yes` accepts it, an interactive terminal is
   asked, a non-interactive run records the name only. Anonymous OpenAlex traffic is metered per IP and
@@ -160,21 +169,29 @@ the config. It reports:
 
 * **Records per source and share**: papers in the window by `source` (RSS feeds collapsed into one row),
   how many have parsed full text and the full-text share, plus the records each source pulled in the last
-  run (from `runs.counts_json`, before de-duplication).
+  run (from `runs.counts_json`, before de-duplication). Everything taken from the `runs` table ("Pulled in
+  last run", "Sources that errored in the last run") describes the **most recent run only**, not every run
+  behind the window; the header says so.
 * **Journals with zero items in the window**: every journal in `journals.yaml` with no paper whose
   `journal` matches its name or whose stored ISSN list matches (so abbreviated titles from Europe PMC still
   count), with its tier, ISSNs, the last date it was seen in the store (or `never`) and its trailing
   13-week average per week.
-* **Watched entities with zero mentions**: companies with `watch_news: true` (with their news-item count in
-  the window and trailing 13-week paper average), current instrument platforms (the `is_platform()`
-  categories, not discontinued) with neither a paper mention nor an archive deposit in the window, tracked
-  authors with no new paper (and how many lack an OpenAlex id), and watchlist terms that matched no
-  title/abstract.
+* **Watched entities with zero paper mentions**: companies with `watch_news: true` that no paper mentioned
+  (with their news-item count in the window, those with news listed first, and the trailing 13-week paper
+  average), current instrument platforms (the `is_platform()` categories, not discontinued) with neither a
+  paper mention nor an archive deposit in the window, tracked authors with no new paper (and how many lack
+  an OpenAlex id), and watchlist terms that matched no title/abstract.
 * **Sources that errored in the last run**, from the `errors` array the pipeline stores with each run.
-* **Suggestions**: errored sources to re-run alone, missing OpenAlex key or contact e-mail, enabled sources
-  that contributed nothing, journals whose ISSN pull returned 0 and have never been seen ("check the ISSN"),
-  journals silent for 13+ weeks, watched companies with no aliases and no mentions ("add an alias"),
-  tracked authors without ids, watchlist terms that never match, preprints without full text.
+  An error that names configuration rather than an outage (a missing contact e-mail or key, an exhausted
+  budget) is tagged as such.
+* **Suggestions**: errored sources to re-run alone (`litradar run --sources <id> -v`, with the real source id,
+  so an SEC feed skipped for a missing contact address points at `.env`, not at a made-up source), missing
+  OpenAlex key or contact e-mail, enabled sources that contributed nothing (and whether the last run pulled
+  them at all, which a `--sources` subset would not), journals whose ISSN pull returned 0 and have never been
+  seen ("check the ISSN", only after a run that pulled the ISSN sources over a full week), journals silent for
+  13+ weeks, watched companies with no aliases and no mentions (add an alias by editing the entry's
+  `aliases:` list, which keeps ticker/type/watch_news; `untrack` + `track` would drop them), tracked authors
+  without ids, watchlist terms that never match, preprints without full text.
 
 The window follows the digest: dated papers by `pub_date`, undated ones by `first_seen`. "Trailing 13 weeks"
 is the 91 days before `since`, divided by 13 to give a per-week rate.
