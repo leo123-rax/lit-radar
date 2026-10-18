@@ -351,3 +351,14 @@ have separate budgets (`digest.platforms_table_n`, default `instruments_table_n`
 `digest.lab_tools_table_n`, default 25). A cut table ends with "… and N more ... named in the window". The
 summary JSON carries `platforms`, `lab_tools`, `platforms_total`, `lab_tools_total` and the combined
 `instruments` list.
+
+
+## Topical gate
+
+A tier-A or tier-B venue prior is worth more than most topical signals, so a general-science journal issue would
+otherwise push off-topic articles (weather forecasting, quantum hardware) into the shortlist on venue alone. The
+scorer therefore withholds a tier-A or tier-B prior (it falls back to the unranked-venue floor, +0.5; tier C and
+preprint priors are small and stay) when none of the
+topical components fire: a platform or lab tool named, a company named or affiliated, a watchlist term, a tracked
+author, a new-platform cue or a first-in-corpus concept. The reason string says "prior withheld" so the reader can
+see why a prestigious venue scored low. `ranking.weights.topical_gate: false` restores the plain prior.

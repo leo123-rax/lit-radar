@@ -224,11 +224,12 @@ def test_citation_components_are_age_aware():
 
 
 def test_preprint_conversion_and_venue_via_published_version():
-    pre = dict(BASE, id="doi:10.1101/p", kind="preprint", published_doi="10.1038/s41592-026-1")
-    plain = H.score_paper_v2(pre, [], "", [], False)
+    # the abstract carries a watchlist term so the topical gate lets the published venue's tier-A prior through
+    pre = dict(BASE, id="doi:10.1101/p", kind="preprint", published_doi="10.1038/s41592-026-1", abstract="A long-read sequencing method.")
+    plain = H.score_paper_v2(pre, [], "", ["long-read"], False)
     assert "preprint (+1.0)" in plain.reasons and "preprint published as a journal article (+1.0)" in plain.reasons
     ctx = H.RankContext(published_venues={"doi:10.1101/p": ("Nature Methods", "A")})
-    pub = H.score_paper_v2(pre, [], "", [], False, context=ctx)
+    pub = H.score_paper_v2(pre, [], "", ["long-read"], False, context=ctx)
     assert "journal tier A via published version Nature Methods (+5.0)" in pub.reasons
     assert "preprint published as a journal article (Nature Methods) (+1.0)" in pub.reasons
     assert pub.facts["published_in"] == "Nature Methods" and pub.raw == plain.raw - 1.0 + 5.0
@@ -438,3 +439,20 @@ def test_render_uses_v2_shows_why_and_subgroup_and_can_fall_back(tmp_path):
     md4 = render(st, *WINDOW, {"digest": {"why_it_matters": False, "show_subgroup": False}}, config_dir=CONFIG)["markdown"]
     assert "(from the score components; no LLM)" not in md4 and " · spatial_" not in md4
     st.close()
+
+
+def test_topical_gate_withholds_the_venue_prior_for_off_topic_tier_a_papers():
+    from litradar.rank.heuristics import DEFAULT_WEIGHTS, score_paper_v2
+
+    off_topic = {"kind": "article", "title": "Advancing subseasonal forecasting with machine learning",
+                 "abstract": "Weather models improve with learned corrections over two to six weeks.", "cited_by_count": 0}
+    res = score_paper_v2(off_topic, [], "A", ["spatial transcriptomics"], None)
+    venue = [c for c in res.components if c.key == "venue"][0]
+    assert res.facts["topical"] is False and venue.points == DEFAULT_WEIGHTS["tier_unknown"] and "prior withheld" in venue.label
+    on_topic = dict(off_topic, abstract="A spatial transcriptomics atlas of the gut built on a commercial platform.")
+    res2 = score_paper_v2(on_topic, [], "A", ["spatial transcriptomics"], None)
+    venue2 = [c for c in res2.components if c.key == "venue"][0]
+    assert res2.facts["topical"] is True and venue2.points == DEFAULT_WEIGHTS["tier_A"] and "withheld" not in venue2.label
+    # the gate can be switched off
+    res3 = score_paper_v2(off_topic, [], "A", ["spatial transcriptomics"], None, weights={"topical_gate": False})
+    assert [c for c in res3.components if c.key == "venue"][0].points == DEFAULT_WEIGHTS["tier_A"]

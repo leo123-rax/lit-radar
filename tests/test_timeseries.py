@@ -256,22 +256,24 @@ def test_all_entities_and_warm_cache_request_budget(tmp_path):
     jobs = ts.plan_jobs(specs, ids, months, ts.SOURCES)
     series = {(j.source, j.entity_id, j.model) for j in jobs}
     per_source = {s: sum(1 for k in series if k[0] == s) for s in ts.SOURCES}
-    assert per_source == {"sra": 24, "ena": 24, "epmc": 26} and len(series) == 74
+    # one series per entity per source that lists strings for it; the exact digits move with the gazetteer
+    assert per_source["sra"] >= 24 and per_source["ena"] >= 24 and per_source["epmc"] >= 26
+    assert len(series) == sum(per_source.values())
     # a warm cache with --refresh-months 2 asks only for the current month and the two before it:
-    # 74 series x 3 months = 222 requests, inside the (entities x sources x 3) = 243 budget
+    # series x 3 months of requests (74 x 3 = 222 at the time of writing), inside the (entities x sources x 3) budget
     store = Store(tmp_path / "warm.sqlite")
     for j in jobs:
         store.put_timeseries_count(j.source, j.entity_id, j.model, j.month, 1)
     store.commit()
     today = date(2026, 10, 18)
     plan = ts.backfill(FakeHttp([]), store, jobs, refresh_months=2, today=today, dry_run=True)
-    assert plan["cutoff"] == "2026-08" and plan["requests"] == 74 * 3 == 222 and plan["cached"] == len(jobs) - 222
-    assert plan["requests"] <= len(ids) * len(ts.SOURCES) * 3 == 243
+    assert plan["cutoff"] == "2026-08" and plan["requests"] == len(series) * 3 and plan["cached"] == len(jobs) - plan["requests"]
+    assert plan["requests"] <= len(ids) * len(ts.SOURCES) * 3
     # the same through run(): --all, dry run, no network, and the output stem is "_all"
     rep = ts.run(CONFIG, tmp_path / "warm.sqlite", tmp_path / "out", all_entities=True, start="2023-01", end="2026-10",
                  refresh_months=2, dry_run=True, http=FakeHttp([]), store=store, today=today)
-    assert rep["errors"] == [] and rep["entities"] == ids and rep["series"] == 74 and rep["dry_run"] is True
-    assert rep["backfill"]["requests"] == 222 and rep["backfill"]["cached"] == 3182 and rep["consolidated"]["derived"] == 0
+    assert rep["errors"] == [] and rep["entities"] == ids and rep["series"] >= 74 and rep["dry_run"] is True
+    assert rep["backfill"]["requests"] == len(series) * 3 and rep["backfill"]["cached"] == len(series) * len(ts.month_range("2023-01", "2026-10")) - rep["backfill"]["requests"] and rep["consolidated"]["derived"] == 0
     assert ts.output_stem("2023-01", "2026-10", (), (), ids) == "timeseries_2023-01_2026-10_all"
 
 

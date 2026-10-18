@@ -5,7 +5,8 @@ ranking.weights). Every component is exposed in the reasons string as `label (+p
 `score_paper_v2` returns them as structured `Component`s so the digest can build a "why it matters" line
 without a language model.
 
-  venue prior         tier A +5.0, tier B +3.0, tier C +1.0, preprint +1.0, unknown venue +0.5. A preprint whose
+  venue prior         tier A +5.0, tier B +3.0, tier C +1.0, preprint +1.0, unknown venue +0.5. Tier A/B is withheld (floor +0.5)
+                      when no topical signal fires (`topical_gate`). A preprint whose
                       `published_doi` resolves to a stored journal article takes that journal's tier instead.
   first platform      +1.0 for the FIRST platform entity named (sequencers, single-cell, spatial, proteomics,
                       cryo-EM, arrays, synthesis, cell engineering); further platforms are listed, not scored
@@ -61,6 +62,7 @@ DEFAULT_WEIGHTS = {
     # venue prior (tier from config/journals.yaml)
     "tier_A": 5.0,
     "tier_B": 3.0,
+    "topical_gate": True,           # venue prior is withheld when no topical signal (platform, company, watchlist, tracked author, concept) fires
     "tier_C": 1.0,
     "tier_preprint": 1.0,
     "tier_unknown": 0.5,
@@ -294,6 +296,12 @@ def _news_hits(platforms: Sequence[Dict[str, Any]], subject_company_ids: Iterabl
     return _ordered(hits)
 
 
+# component keys that tie a paper to the radar's subject matter; a tier-A/B venue prior alone must not carry an
+# off-topic paper (weather forecasting in a tier-A journal) into the shortlist
+TOPICAL_KEYS = frozenset({"platforms", "platform_central", "lab_tools", "companies", "company_author", "watchlist",
+                          "tracked_author", "new_platform", "first_concept"})
+
+
 def score_paper_v2(
     paper: Dict[str, Any],
     mentions: Sequence[Dict[str, Any]],
@@ -484,6 +492,16 @@ def score_paper_v2(
         elif str(extra.get("type") or "").lower() == "withdrawn":  # bioRxiv marks withdrawn preprints in the record type
             comps.append(Component("notice", "withdrawn preprint", float(w["notice_penalty"]), "withdrawn"))
             facts["notice"] = True
+
+    # ---- topical gate
+    topical = any(c.key in TOPICAL_KEYS for c in comps)
+    facts["topical"] = topical
+    if w.get("topical_gate", True) and not topical:
+        floor = float(w["tier_unknown"])
+        for i, c in enumerate(comps):
+            if c.key == "venue" and c.points > floor and isinstance(c.detail, dict) and c.detail.get("tier") in ("A", "B"):
+                comps[i] = Component("venue", c.label + "; prior withheld: no platform, company, watchlist term, tracked author or new concept",
+                                     floor, c.detail)
 
     raw = sum(c.points for c in comps)
     scaled = max(0.0, min(10.0, 10.0 * raw / float(w["scale_max_raw"])))
