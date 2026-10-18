@@ -179,7 +179,8 @@ uploads and deploys with `actions/upload-pages-artifact` and `actions/deploy-pag
 a fresh fork that has not run the digest — the workflow posts a notice and finishes green without
 deploying, rather than failing. If the snapshot is unreadable the build step fails red (see *What it
 reads*), and the previous deployment stays up. The `weeks` dispatch input reaches the shell through an
-environment variable (`WEEKS`), never by interpolation into the command line.
+environment variable (`WEEKS_INPUT`, validated as an integer before use), never by interpolation into the
+command line.
 
 Notes and limits:
 

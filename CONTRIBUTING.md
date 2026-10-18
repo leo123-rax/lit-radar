@@ -17,9 +17,12 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev,llm]"
 cp .env.example .env                   # fill in what you have; everything is optional
 python -m litradar check-config         # validates the YAML gazetteers
-python -m pytest -q -p no:warnings      # offline tests, no network needed
+python -m pytest -p no:warnings         # offline tests, no network needed (-q is already in pyproject.toml)
 ruff check litradar tests
 ```
+
+`pyproject.toml` sets `addopts = "-q"`, so `pytest -q` on the command line becomes `-qq` and hides the
+`N passed` summary line; run `python -m pytest -p no:warnings` as above, or `-o addopts=` to override.
 
 ## Where things live
 
@@ -76,5 +79,5 @@ ruff check litradar tests
   documented exception), and never print a secret's value, length or prefix (the presence step
   prints names only).
 * Keep Python 3.9 compatibility (no `match`, no `X | Y` unions at runtime).
-* Run `ruff check litradar tests` and `python -m pytest -q -p no:warnings` before opening a pull
+* Run `ruff check litradar tests` and `python -m pytest -p no:warnings` before opening a pull
   request. Security problems go to `SECURITY.md`, not the issue tracker.

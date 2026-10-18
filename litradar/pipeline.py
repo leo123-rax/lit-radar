@@ -12,7 +12,8 @@ import re
 import unicodedata
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from urllib.parse import urlsplit
 
 from . import gsa_snapshots, policy
 from .config import Settings
@@ -269,6 +270,13 @@ class Pipeline:
             else:
                 papers[p.id] = p
 
+        def pulled(*srcs: str) -> None:
+            """Record that a pull completed, even with zero records: `fetched.<src>` = 0 is "pulled, nothing in the
+            window", its absence is "not pulled" (a --sources subset, or a failure before anything came back).
+            `litradar coverage` and `status` tell the two apart only because the zero is written."""
+            for src in srcs:
+                self.counts.setdefault(f"fetched.{src}", 0)
+
         # 1. bioRxiv / medRxiv
         if self._enabled("biorxiv", only):
             cfg = self._src("biorxiv")
@@ -277,6 +285,7 @@ class Pipeline:
                 try:
                     for p in biorxiv_src.fetch(self.http, since, until, server=server, categories=cats):
                         add(p, server)
+                    pulled(server)
                 except Exception as exc:  # noqa: BLE001 - a dead source must not kill the run
                     self.errors.append(f"{server}: {exc}")
                     log.exception("%s failed", server)
@@ -291,6 +300,7 @@ class Pipeline:
                     for chunk in epmc_src.chunked(issns, 25):
                         for rec in epmc_src.search(self.http, epmc_src.journal_query(chunk, since, until), max_records=maxr):
                             add(epmc_src.to_paper(rec), "europepmc.journals")
+                    pulled("europepmc.journals")
                 if cfg.get("methods_search", True):
                     pull_cats = tuple(cfg.get("methods_search_categories") or ["sequencer", "single_cell", "spatial", "proteomics", "synthesis", "cryo_em", "array", "cell_engineering"])
                     terms = sorted({a for e in self.instruments.entries if e.category.startswith(pull_cats)
@@ -300,6 +310,7 @@ class Pipeline:
                         q = epmc_src.section_query("METHODS", chunk, since, until)
                         for rec in epmc_src.search(self.http, q, max_records=maxr):
                             add(epmc_src.to_paper(rec), "europepmc.methods")
+                    pulled("europepmc.methods")
                 if cfg.get("coi_search", True):
                     names = sorted({e.name for e in self.companies.entries if len(e.name) >= 5})
                     for chunk in epmc_src.chunked(names, 40):
@@ -307,6 +318,7 @@ class Pipeline:
                             q = epmc_src.section_query(field, chunk, since, until)
                             for rec in epmc_src.search(self.http, q, max_records=maxr):
                                 add(epmc_src.to_paper(rec), f"europepmc.{field.lower()}")
+                    pulled("europepmc.comp_int", "europepmc.ack_fund")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"europepmc: {exc}")
                 log.exception("europepmc failed")
@@ -344,6 +356,8 @@ class Pipeline:
                     oa_failed[group] += 1
                     oa_first_error.setdefault(group, str(err))
                     log.warning("openalex %s query failed: %s (%d record(s) before the failure)", group, err, n)
+                else:
+                    pulled(f"openalex.{group}")
 
             try:
                 if cfg.get("topics", True):
@@ -394,6 +408,7 @@ class Pipeline:
                         p.extra["issn"] = j.get("issn") or []
                         p.journal = j["name"]
                         add(p, "crossref")
+                pulled("crossref")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"crossref: {exc}")
                 log.exception("crossref failed")
@@ -404,6 +419,7 @@ class Pipeline:
             try:
                 for p in arxiv_src.fetch(self.http, since, until, cfg.get("categories") or ["q-bio.GN"]):
                     add(p, "arxiv")
+                pulled("arxiv")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"arxiv: {exc}")
                 log.exception("arxiv failed")
@@ -425,6 +441,7 @@ class Pipeline:
                         add(p, "rss.subjects")
                 except Exception as exc:  # noqa: BLE001
                     self.errors.append(f"subject feed {f['name']}: {exc}")
+            pulled("rss.journals", "rss.subjects")  # per-feed failures are listed above; the layer itself ran
 
         # 7. ChinaXiv (Chinese Academy of Sciences preprints) through the global aggregator's OAI-PMH endpoint; metadata only,
         #    mostly Chinese titles; the derived 10.12074 DOI never collides with Crossref/DataCite records (docs/sources/china.md)
@@ -436,6 +453,7 @@ class Pipeline:
                     life_science_only=bool(cfg.get("life_science_only", True)),
                 ):
                     add(p, "chinaxiv")
+                pulled("chinaxiv")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"chinaxiv: {exc}")
                 log.exception("chinaxiv failed")
@@ -452,6 +470,7 @@ class Pipeline:
                     max_articles=int(cfg.get("max_articles", 2000)), stats=scielo_stats,
                 ):
                     add(p, "scielo")
+                pulled("scielo")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"scielo: {exc}")
                 log.exception("scielo failed")
@@ -472,6 +491,7 @@ class Pipeline:
                     min_pub_year=cfg.get("min_pub_year"), max_pages=int(cfg.get("max_pages", 10)), stats=kci_stats,
                 ):
                     add(p, "kci")
+                pulled("kci")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"kci: {exc}")
                 log.exception("kci failed")
@@ -493,6 +513,7 @@ class Pipeline:
                     max_records=int(jstage_cfg.get("max_records_per_query", 5000)), stats=jstage_stats,
                 ):
                     add(p, "jstage")
+                pulled("jstage")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"jstage: {exc}")
                 log.exception("jstage failed")
@@ -812,9 +833,12 @@ class Pipeline:
         * publisher RSS / press-wire RSS from config/feeds.yaml (kinds ``news`` and ``press``);
         * SEC EDGAR 8-K Atom per watched company with a plain US ticker (kind ``sec``; needs
           LITRADAR_CONTACT_EMAIL because EDGAR requires ``<tool> <e-mail>`` in the User-Agent);
-        * GDELT DOC 2.0 per watched company (kind ``gdelt``; feed name ``gdelt:<company>``), query =
-          ``"<company name>"`` + the sector clause from ``news.query_context`` (or the company's own
-          ``news_query``). Built for programmatic use; one request per 5 s;
+        * GDELT DOC 2.0 for the watched companies (kind ``gdelt``; feed name ``gdelt:<company>``): the
+          companies that share a sector clause from ``news.query_context`` are batched into OR'd queries
+          (``gdelt.batch_companies``: at most ``news.gdelt_max_query_chars`` characters and
+          ``news.gdelt_batch_size`` names per request), a company with its own ``news_query`` is queried
+          alone, and every article is attributed to the batch member(s) the gazetteer finds in its title.
+          Built for programmatic use; one request per 5 s, so ~70 companies are ~10 requests;
         * Google News RSS (kind ``gnews``) only when ``news.google_news: true``: news.google.com/robots.txt
           disallows ``/rss/`` and Google's Terms prohibit automated access that ignores it, so this is an
           explicit opt-in for the fork owner.
@@ -832,6 +856,8 @@ class Pipeline:
         gdelt_on = bool(news_cfg.get("gdelt", True))
         gdelt_timespan = str(news_cfg.get("gdelt_timespan") or "7d")
         gdelt_language = str(news_cfg.get("gdelt_language") or "english")
+        gdelt_max_chars = int(news_cfg.get("gdelt_max_query_chars") or gdelt_src.MAX_QUERY_CHARS)
+        gdelt_batch_size = int(news_cfg.get("gdelt_batch_size", gdelt_src.DEFAULT_BATCH_SIZE) or 0)
         feeds: List[Dict[str, Any]] = []
         for f in self.feeds:
             if f.get("kind") == "gnews" and not google_on:
@@ -862,27 +888,43 @@ class Pipeline:
         if pats:
             exclude_re = re.compile("|".join(pats), re.I)
 
-        def keep(it: NewsItem, company: Optional[str]) -> bool:
-            """Exclusion patterns + gazetteer gating; sets it.companies. False = drop."""
+        def keep(it: NewsItem, company: Optional[Union[str, Set[str]]]) -> bool:
+            """Exclusion patterns + gazetteer gating; sets it.companies. False = drop.
+
+            ``company`` is the id (or the set of ids, for a batched GDELT query) the item was searched for: the
+            item is kept only when the gazetteer actually finds one of them in its text."""
             if exclude_re and exclude_re.search(it.title or ""):
                 self.counts["news.excluded"] += 1
                 return False
             text = f"{it.title} {it.summary}"
             comps = {m.entity_id for m in self.companies.find(text)}
-            if company and company not in comps:
+            wanted = {company} if isinstance(company, str) else set(company or ())
+            if wanted and not (wanted & comps):
                 self.counts["news.offtopic"] += 1
                 return False  # a company query whose text never names the company (e.g. "holy grail")
             it.companies = sorted(comps)
             return True
 
-        company_feeds: List[Dict[str, Any]] = []
+        # GDELT: watched companies grouped by their context clause (a per-company news_query is its own group,
+        # so it is never batched), then packed into OR'd queries under the API's query-length limit
+        gdelt_groups: Dict[str, List[Tuple[str, str]]] = {}
+        gdelt_group_order: List[str] = []
+        gdelt_display: Dict[str, str] = {}  # company id -> name shown in the feed label (the phrase may be an alias)
         for e in self.companies.entries:
             raw = raw_by_id.get(e.id, {})
             if not raw.get("watch_news"):
                 continue
             ctx = raw.get("news_query") or context_by_type.get(raw.get("type") or "tools", "")
             if gdelt_on:
-                company_feeds.append({"name": f"gdelt:{e.name}", "kind": "gdelt", "company": e.id, "company_name": e.name, "context": ctx})
+                key = f"own:{e.id}" if raw.get("news_query") else f"ctx:{ctx}"
+                if key not in gdelt_groups:
+                    gdelt_group_order.append(key)
+                # a name the API rejects as too short ("Seer") is searched by its first long-enough alias ("Seer Bio")
+                phrase = e.name
+                if gdelt_src.too_short(phrase):
+                    phrase = next((str(a) for a in (raw.get("aliases") or []) if not gdelt_src.too_short(str(a))), e.name)
+                gdelt_groups.setdefault(key, []).append((phrase, e.id))
+                gdelt_display[e.id] = e.name
             if google_on:
                 q = f'"{e.name}" {ctx} when:7d'.strip()
                 feeds.append({"name": f"news:{e.name}", "kind": "gnews", "company": e.id,
@@ -906,25 +948,58 @@ class Pipeline:
                 self.counts[f"news.{f['kind']}"] += added
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"feed {f['name']}: {exc}")
-        for f in company_feeds:
-            if gdelt_src.DOC_API.split("/")[2] in getattr(self.http, "blocked_hosts", set()):
-                self.counts["news.gdelt_skipped"] += 1
-                continue
-            try:
-                items = []
-                for it in gdelt_src.company_news(self.http, f["company_name"], f["company"], context=f["context"],
-                                                 timespan=gdelt_timespan, language=gdelt_language, since=since):
-                    if keep(it, f["company"]):
+        if gdelt_on:
+            batches: List[Tuple[str, List[Tuple[str, str]]]] = []
+            short_names: List[str] = []
+            for key in gdelt_group_order:
+                members = gdelt_groups[key]
+                ctx = key[len("ctx:"):] if key.startswith("ctx:") else str(raw_by_id.get(key[len("own:"):], {}).get("news_query") or "")
+                short_names.extend(name for name, _ in members if gdelt_src.too_short(name))
+                for batch in gdelt_src.batch_companies(members, ctx, language=gdelt_language, max_chars=gdelt_max_chars, batch_size=gdelt_batch_size):
+                    batches.append((ctx, batch))
+            if short_names:
+                # the API rejects a quoted phrase under MIN_PHRASE_CHARS and voids the whole query with it, so a company whose
+                # name AND every alias are that short is never sent; add a longer alias in companies.yaml to search it
+                self.counts["news.gdelt_short_names"] = len(short_names)
+                log.info("GDELT: %d company name(s) shorter than %d characters not searched (the API rejects short phrases): %s",
+                         len(short_names), gdelt_src.MIN_PHRASE_CHARS, ", ".join(short_names))
+            # zero counters: a run that asked GDELT and stored nothing is "pulled 0", not "not pulled"
+            self.counts["news.gdelt_queries"] = len(batches)
+            self.counts.setdefault("news.gdelt", 0)
+            skipped_companies = 0
+            for ctx, batch in batches:
+                if gdelt_src.HOST in getattr(self.http, "blocked_hosts", set()):
+                    self.counts["news.gdelt_skipped"] += 1  # queries (requests) never sent
+                    skipped_companies += len(batch)
+                    continue
+                ids = {cid for _, cid in batch}
+                name_by_id = {cid: gdelt_display.get(cid, phrase) for phrase, cid in batch}
+                try:
+                    items = []
+                    outcome: Dict[str, Any] = {}
+                    for it in gdelt_src.batch_news(self.http, batch, context=ctx, timespan=gdelt_timespan, language=gdelt_language,
+                                                   since=since, outcome=outcome):
+                        if not keep(it, ids):
+                            continue
+                        # the feed label names the company (first batch member the gazetteer found), never the search alias
+                        matched = next((cid for _, cid in batch if cid in it.companies), None)
+                        it.feed = f"gdelt:{name_by_id[matched]}" if matched else "gdelt"
                         items.append(it)
-                added = self.store.upsert_news(items)
-                n += added
-                self.counts["news.gdelt"] += added
-            except Exception as exc:  # noqa: BLE001
-                self.errors.append(f"feed {f['name']}: {exc}")
-        if self.counts.get("news.gdelt_skipped"):
-            msg = f"gdelt: host rate-limited (HTTP 429) during the run; {self.counts['news.gdelt_skipped']} company quer(y/ies) skipped"
-            log.warning(msg)
-            self.errors.append(msg)
+                    if not outcome.get("answered", True):
+                        self.counts["news.gdelt_failed_queries"] += 1
+                    added = self.store.upsert_news(items)
+                    n += added
+                    self.counts["news.gdelt"] += added
+                except Exception as exc:  # noqa: BLE001
+                    label = batch[0][0] if len(batch) == 1 else f"{len(batch)} companies ({batch[0][0]} ...)"
+                    self.errors.append(f"feed gdelt:{label}: {exc}")
+            if self.counts.get("news.gdelt_skipped"):
+                self.counts["news.gdelt_companies_skipped"] = skipped_companies
+                # one line for the run report (status files it under "degraded", not "failed") and one WARNING
+                msg = (f"gdelt: host rate-limited (HTTP 429) during the run; {self.counts['news.gdelt_skipped']} of {len(batches)} "
+                       f"quer(y/ies) skipped ({skipped_companies} compan{'y' if skipped_companies == 1 else 'ies'} not searched)")
+                log.warning("news degraded: %s", msg)
+                self.errors.append(msg)
         self.store.commit()
         return n
 
@@ -1287,6 +1362,26 @@ class Pipeline:
         except Exception:  # noqa: BLE001 - accounting must never fail the run
             return {}
 
+    def _feed_hosts(self) -> Set[str]:
+        """Hosts of every configured RSS/Atom feed (journals.yaml rss + subject_feeds, feeds.yaml): a dead one is an
+        `rss` problem, so its host label maps back to the source id that `--sources rss` re-runs."""
+        hosts: Set[str] = set()
+        urls = [j.get("rss") for j in self.journals] + [f.get("url") for f in self.feeds]
+        urls += [f.get("url") for f in (self.settings.yaml("journals") or {}).get("subject_feeds", []) or []]
+        for u in urls:
+            try:
+                host = urlsplit(str(u or "")).netloc.lower()
+            except ValueError:
+                continue
+            if host:
+                hosts.add(host)
+        return hosts
+
+    def _host_source(self, host: str, feed_hosts: Set[str]) -> str:
+        """The source id that owns a host: the HOST_SOURCES table, else `rss` for a configured feed host, else the
+        host itself (printed plainly; never turned into a bogus `--sources` value by the reporting tools)."""
+        return HOST_SOURCES.get(host) or ("rss" if host.lower() in feed_hosts else host)
+
     def _fold_http_errors(self) -> None:
         """Put silently dead sources into the run's error list: a host the client skipped after repeated 429s, and
         a host that was asked but never answered successfully. Skipped when the source already reported an error
@@ -1294,9 +1389,10 @@ class Pipeline:
         r = self._host_report()
         if not r:
             return
+        feed_hosts = self._feed_hosts()
         covered = {str(e).split(":", 1)[0].strip().lower() for e in self.errors}
         for host in r.get("blocked_hosts") or []:
-            src = HOST_SOURCES.get(host, host)
+            src = self._host_source(host, feed_hosts)
             if src in covered:
                 continue
             skipped = int((r.get("blocked_skips_by_host") or {}).get(host, 0) or 0)
@@ -1307,7 +1403,7 @@ class Pipeline:
             self.errors.append(msg)
             covered.add(src)
         for host in r.get("failed_only_hosts") or []:
-            src = HOST_SOURCES.get(host, host)
+            src = self._host_source(host, feed_hosts)
             if src in covered:
                 continue
             n = int((r.get("failures_by_host") or {}).get(host, 0) or 0)

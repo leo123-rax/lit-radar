@@ -34,18 +34,36 @@ counts the drops), so a query for "GRAIL" cannot store "the holy grail of cookin
 
 `GET https://api.gdeltproject.org/api/v2/doc/doc?query=<q>&mode=ArtList&format=json&timespan=7d&maxrecords=250&sort=DateDesc`
 
-* `query` = `"<company name>" <query_context[type]> sourcelang:<gdelt_language>`, e.g.
-  `"Illumina" (sequencing OR genomics OR proteomics OR "life sciences" OR instrument OR biotech) sourcelang:english`.
-  OR groups **must** be parenthesised (the API otherwise answers `Queries containing OR'd terms must be
-  surrounded by ().` as a 200 text/html body — treated as a rejected query). Per-company overrides go in
-  `companies.yaml` → `news_query`.
+* `query` = `("<company A>" OR "<company B>" OR ...) <query_context[type]> sourcelang:<gdelt_language>`, e.g.
+  `("Illumina" OR "10x Genomics" OR "Oxford Nanopore") (sequencing OR genomics OR proteomics OR "life sciences" OR instrument OR biotech) sourcelang:english`.
+  **Companies are batched**: the watched companies that share a context clause are packed greedily into
+  OR groups (`gdelt.batch_companies`) under the API's **250-character query limit** (`news.gdelt_max_query_chars`)
+  and at most `news.gdelt_batch_size` (8) names per request, so ~70 companies are ~10 requests instead of 70.
+  A batch of one is the bare phrase `"<company>"`, and a company with its own `news_query` in `companies.yaml`
+  is always queried alone. OR groups **must** be parenthesised (the API otherwise answers `Queries containing
+  OR'd terms must be surrounded by ().` as a 200 text/html body — treated as a rejected query). A quoted phrase
+  under **five characters** is rejected the same way (`The specified phrase is too short.`) and voids the whole
+  query it sits in, so a short company name is searched by its first alias of five or more characters
+  (`"Seer"` → `"Seer Inc"`; the stored feed label is still the company name) and a company with no such alias is
+  left out and counted in `news.gdelt_short_names`.
+* Attribution: every article from a batch runs through the company gazetteer; it is stored only when the
+  title names at least one batch member (`news.offtopic` counts the rest), tagged with every company found,
+  and filed under `gdelt:<first matched batch member>`. Trade-off: `maxrecords` (250, sorted newest first)
+  is shared by the batch, so over a 7-day window a very newsworthy member can crowd out a quiet one; a
+  smaller `gdelt_batch_size` trades requests for completeness.
 * `timespan` accepts `15min` .. `3m`; keep `news.gdelt_timespan` aligned with `window_days`.
 * Response: `{"articles": [{url, url_mobile, title, seendate: "20261015T143000Z", socialimage, domain,
   language, sourcecountry}]}`; the literal body `{}` means no results.
 * **Rate limit: one request every 5 seconds** (HTTP 429 with a plain-text body otherwise). The client paces
-  `api.gdeltproject.org` at 5.5 s and backs off 5 s on a 429; two consecutive 429s block the host for the run
-  and the pipeline records `gdelt: host rate-limited (HTTP 429) ...; N company queries skipped` in the
-  digest's error list rather than failing silently. ~75 watched companies take about seven minutes.
+  `api.gdeltproject.org` at 8 s between request starts (an answer takes 2–12 s, so 5.5 s left no margin on the
+  slow path), backs off 10 s / 20 s / 30 s on consecutive 429s and blocks the host only after **four** in a row
+  (default hosts: two), because GDELT's 429s arrive in bursts that often clear within a minute. When the host is
+  blocked the remaining batches are skipped without a request and the run records one line,
+  `gdelt: host rate-limited (HTTP 429) during the run; N of M quer(y/ies) skipped (K companies not searched)`,
+  logged once as `news degraded: ...`; `litradar status` files it under *degraded*, not *failed*
+  (docs/live.md, "Which errors make `status` exit 1"). Counters: `news.gdelt_queries` (batches planned),
+  `news.gdelt` (items stored, written as 0 when GDELT was asked and nothing came back), `news.gdelt_skipped`
+  (batches never sent), `news.gdelt_companies_skipped`, `news.gdelt_failed_queries` (sent, no usable answer).
 * Feed name is `gdelt:<company name>`; `NewsItem.summary` is empty (the digest links out).
 
 ### Live observations (2026-10-17, from one egress IP)
@@ -63,6 +81,24 @@ earlier the same day. The adapter is therefore built to degrade: a
 rate-limited run stores nothing from GDELT, says so in the digest, and the other layers still run. Re-probe
 from a CI runner or another network before relying on GDELT volume; the numbers above are what this
 machine saw, not a measurement of the API's normal behaviour.
+
+### Live observations (2026-10-18, same egress IP; before and after batching)
+
+* **The IP was still being shed.** The first request after more than seven hours of silence answered 429 after
+  11.5 s; a second one 10 s later, 429 after 11.4 s; a single request after a further six minutes of silence,
+  429 after 7.0 s. No `Retry-After` header. Pacing alone cannot fix this from here: the limit is not a simple
+  per-request interval from this address, and the same body (`Please limit requests to one every 5 seconds`) is
+  returned whether or not the client was fast.
+* **Before** (per-company queries, 5.5 s pacing, two 429s block): `run --days 1 --sources rss` sent **2** GDELT
+  requests, both **429**, host blocked, **0** news items, `72 company quer(y/ies) skipped`.
+* **After** (batched, 8 s pacing, 10/20/30 s back-offs, four 429s block): the same command planned **14**
+  queries for the 72 watched companies and sent **8** requests: three answered 200 (6 companies → 0 articles;
+  8 companies → 3 articles, 1 stored after gazetteer gating; 8 companies → rejected, `The specified phrase is too
+  short.`, the "Seer" case now handled by the alias rule), then one dropped connection and **4 × 429** on the
+  fourth query, host blocked, `10 of 14 quer(y/ies) skipped (44 companies not searched)`, **1** news item
+  stored. Not a volume you can plan on, but the layer is no longer dead by construction: on a network GDELT
+  serves normally the whole watchlist is ~14 requests (about two minutes), and `status` treats a shed run as
+  degraded rather than failed.
 
 ### Coverage caveat
 
@@ -105,7 +141,7 @@ Enabling this is the fork owner's decision and risk.
 * Article links lose feed-reader tracking parameters before they are stored (`af=R` on ascopubs,
   `dgcid=rss_...` on Nature, the `utm_*` family, Mailchimp/Facebook/Google click ids), so the digest and the
   dashboard carry canonical URLs. Every other query parameter is kept exactly as the feed served it.
-* GDELT: once the host answers 429 twice in a row the shared client blocks it; the remaining company
+* GDELT: once the host answers 429 four times in a row the shared client blocks it; the remaining batched
   queries are skipped without a request and the run records one error line, `gdelt: host rate-limited
-  (HTTP 429) during the run; N company quer(y/ies) skipped`, which the digest's coverage block lists under
-  the errored sources.
+  (HTTP 429) during the run; N of M quer(y/ies) skipped (K companies not searched)`, which the digest's
+  coverage block lists under the errored sources tagged "(rate-limited: degraded, not an outage)".

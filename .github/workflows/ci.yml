@@ -35,4 +35,4 @@ jobs:
           if [ -n "$bad" ]; then printf '::error::tracked runtime or secret files:\n%s\n' "$bad"; exit 1; fi
       - run: ruff check .
       - run: python -m litradar check-config
-      - run: python -m pytest -q -p no:warnings
+      - run: python -m pytest -p no:warnings  # -q comes from pyproject.toml; a second -q would hide the "N passed" line

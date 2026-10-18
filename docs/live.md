@@ -42,7 +42,9 @@ pull of SRA (a week is roughly 120k experiments). Repair deliberately instead:
 `litradar update --since 2026-08-15` (see "Backfilling" below).
 
 `litradar update --dry-run` prints the window it would use, the last run it is continuing from,
-and the sources, then exits without a single request.
+and the sources, then exits without a single request and without touching the database: it reads an
+existing `data/radar.sqlite` read-only and creates nothing when there is none (the store is opened
+only on the fetching path).
 
 ## Why the overlap: measured lags (checked live on 2026-10-17)
 
@@ -161,7 +163,9 @@ successive runs that covered it.
    `last_update`, including on failure (the update command writes a failure summary).
 5. **Freshness check.** `python -m litradar status` ends the job; its exit code is the job's.
    A red daily run therefore means one of: the update crashed, the last run is more than three days
-   old, or more than two sources failed.
+   old, or more than two sources **failed** (configuration skips and rate limiting are reported but
+   not counted; see "Which errors make `status` exit 1" below), so a keyless fork is green on a day
+   when nothing upstream is actually down.
 
 Secrets and variables are the same set as the weekly workflow (`LITRADAR_CONTACT_EMAIL`,
 `NCBI_API_KEY`, `OPENALEX_API_KEY`, `SEMANTIC_SCHOLAR_API_KEY`, `ANTHROPIC_API_KEY`,
@@ -237,10 +241,16 @@ python -m litradar digest --since 2026-10-06 --until 2026-10-12 --print
 python -m litradar run --days 7 --email             # the full weekly pass: fetch + render + deliver
 ```
 
+`digest` renders what the database holds. Before the first run there is nothing to render, so it
+prints `no runs yet; run \`litradar run --days 7\` first` and exits 1 instead of creating an empty
+database and writing a digest full of "nothing in this window"; `--allow-empty` restores the old
+behaviour for a deliberately empty render.
+
 `update` prints one paragraph: the window and its basis, papers fetched / new to the store, new
 archive records per archive, new news items (inserted rows only; news queries the run skipped, for
 example GDELT after a 429 or Google News while it is opt-in, are listed separately in parentheses and
-never counted as items), errors by source, request counts and database size.
+never counted as items), errors by source (with the sources that are only degraded or skipped by
+configuration named as such), request counts and database size.
 The same facts are in `digests/_work/last_update.json`:
 
 ```json
@@ -255,6 +265,7 @@ The same facts are in `digests/_work/last_update.json`:
  "fulltext": {"europepmc": 388, "biorxiv_failed": 2},
  "mentions": 4120, "tracked_hits": 9, "llm_scored": 0,
  "errors": ["rss Example Journal: HTTP 404"], "error_sources": ["rss"],
+ "sources_by_class": {"failed": ["rss"], "degraded": [], "config": []},
  "http": {"requests": 1543, "cache_hits": 920, "retries": 3, "failures": 1, "blocked_skips": 0},
  "db_path": "data/radar.sqlite", "db_bytes": 734003200
 }
@@ -269,8 +280,10 @@ added to `runs`, so the next update re-covers the same window.
 ```
 lit-radar status  (2026-10-17T07:02:11Z)  OK
 last update (the most recent run only): finished 2026-10-17T06:41:50Z (0.01 days ago), window 2026-10-14..2026-10-17 (3 days), 2210 papers fetched / 1480 new
-  errors in last run (1, sources: rss):
+  errors in last run (2, sources: rss, sec):
     - rss Example Journal: HTTP 404
+    - sec: SEC 8-K feeds skipped (LITRADAR_CONTACT_EMAIL not set; ...)  [configuration, not counted]
+  failing sources counted against the limit: rss; configuration skips: sec
   news queries skipped in last run (not inserted items): gnews 8
   earlier run 40 (finished 2026-10-16T06:41:12Z, window 2026-10-13..2026-10-16) had 1 error(s) on openalex:
     - openalex: HTTP 429: Insufficient budget
@@ -307,11 +320,35 @@ next scheduled runs (UTC, as documented): daily corpus update 2026-10-18T06:20Z 
   (`NCBI_API_KEY=`), even with a comment after it, is "no". The list mirrors the keys in `.env.example`
   that a source reads (`OPENFDA_API_KEY` included; the reserved Altmetric key is not listed). Values never
   appear in `status` output or in `last_update.json`.
-* Exit code 1 when the last run finished more than `--stale-days` (3) ago or had errors on more
-  than `--max-failing-sources` (2) distinct sources. Per-feed RSS failures count as one source
-  (`rss`), so a handful of dead journal feeds does not page anyone.
+* Exit code 1 when the last run finished more than `--stale-days` (3) ago or had **failures** on
+  more than `--max-failing-sources` (2) distinct sources. Per-feed RSS failures count as one source
+  (`rss`), so a handful of dead journal feeds does not page anyone. Identical error lines are
+  collapsed with a count (`(x7)`), and each line is tagged when it is not counted.
 * The *next scheduled runs* line is computed from the two cron expressions as documented in the
   workflow files; it does not query GitHub.
+
+### Which errors make `status` exit 1
+
+Every error line in a run report starts with the source that produced it. `status` sorts the lines
+into three classes (`incremental.classify_error`) and counts only the first against the limit:
+
+| Class | Recognised by | Examples | Counted? | Why |
+|---|---|---|---|---|
+| **failed** | everything else | `europepmc: HTTP 500`, `nih_reporter: system unavailable`, `rss: all 3 request(s) to www.example.com failed` | yes | the source was asked and did not deliver; data for the window may be missing until a re-run succeeds |
+| **degraded** (rate-limited) | `rate-limited`, `HTTP 429`, `too many requests` | `gdelt: host rate-limited (HTTP 429) during the run; 9 of 10 quer(y/ies) skipped`, `arxiv: host export.arxiv.org rate-limited (HTTP 429 2 times in a row)` | no | the host throttled this client and the pipeline backed off deliberately, reported exactly what it skipped and kept the rest of the run; the next scheduled run retries. An alarm that fires on every throttle trains people to ignore the alarm |
+| **configuration** | `not set`, `not configured`, `api key`, `contact_email`, `LITRADAR_`, `budget`, `insufficient` | `sec: SEC 8-K feeds skipped (LITRADAR_CONTACT_EMAIL not set ...)`, `openalex: HTTP 429: Insufficient budget` | no | nothing upstream is down and no re-run changes it; the fix is a key or an e-mail address, which `keys configured` already shows and `litradar coverage` tags "(configuration, not an outage)" |
+
+Two more rules keep the count honest. A source is counted once however many lines it produced
+(`rss Nature: 404` and `rss Cell: timeout` are one failing source). And a host the HTTP client gave up
+on is labelled by the **source that owns it**, not by its hostname: the pipeline maps API hosts
+through `pipeline.HOST_SOURCES` and every configured feed host to `rss`, so a dead publisher CDN is
+one `rss` failure and never a source of its own (`coverage` prints an unknown host plainly rather
+than inventing a `--sources www` value from it).
+
+The consequence for a keyless fork: a run whose only errors are the SEC skip and a GDELT 429 is
+green. `--max-failing-sources` still exists for installations that want a different tolerance for
+real failures, and the degraded and configuration lines stay in the output, tagged, so they are
+never hidden; they just do not page anyone.
 
 ## Backfilling and repairs
 

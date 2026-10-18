@@ -52,6 +52,28 @@ def test_user_agent_is_tool_plus_bare_email_without_any_url():
     assert Http().session.headers["User-Agent"] == "lit-radar/0.1 (no contact configured)"
 
 
+def test_gdelt_is_paced_at_eight_seconds_and_trips_only_after_four_429s(monkeypatch):
+    url = "https://api.gdeltproject.org/api/v2/doc/doc"
+    # pacing: the second request start waits out the 8 s interval measured from the previous start
+    h = Http()
+    sleeps = []
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(http_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(http_mod.time, "sleep", lambda s: sleeps.append(s))
+    assert h.min_interval["api.gdeltproject.org"] == 8.0
+    h._pace(url)
+    clock["t"] += 1.5
+    h._pace(url)
+    assert sleeps == [6.5]
+    # breaker: three 429s back off 10 / 20 / 30 s and the fourth attempt may still succeed; four in a row block the host
+    h, sleeps = _http([_resp(429, url=url)] * 3 + [_resp(200, url=url)], monkeypatch, max_retries=5)
+    r = h.get(url)
+    assert r is not None and r.status_code == 200 and h.blocked_hosts == set() and sleeps == [10.0, 20.0, 30.0]
+    h, sleeps = _http([_resp(429, url=url)] * 4, monkeypatch, max_retries=5)
+    assert h.get(url).status_code == 429 and "api.gdeltproject.org" in h.blocked_hosts and len(h.session.gets) == 4
+    assert h.get(url) is None and h.stats["blocked_skips"] == 1  # later calls are skipped without a request
+
+
 def test_sec_and_gdelt_hosts_are_paced():
     h = Http()
     assert h.min_interval["www.sec.gov"] == 0.11

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -30,8 +31,30 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _last_run_readonly(db_path: Path) -> Optional[dict]:
+    """The newest run without creating or writing the database (a missing file, or one without a `runs` table, is
+    simply "no run yet"). Used by --dry-run, which must leave no file behind."""
+    conn = incremental.open_readonly(db_path)
+    if conn is None:
+        return None
+    try:
+        return incremental.last_run(conn)
+    except sqlite3.OperationalError:  # older schema without a runs table
+        return None
+    finally:
+        conn.close()
+
+
 def cmd_update(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
+    only: Optional[List[str]] = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
+    if args.dry_run:
+        # read-only on purpose: the store is opened only on the fetching path, so a dry run creates no data/radar.sqlite
+        last = _last_run_readonly(Path(settings.db_path))
+        plan = incremental.compute_window(last["until"] if last else None, overlap_days=args.overlap_days, max_days=args.max_days, since=args.since, until=args.until)
+        print(json.dumps({"dry_run": True, "plan": plan, "sources": only or "all", "db_path": str(settings.db_path), "last_run": last}, indent=1, default=str))
+        return 0
+
     store = Store(settings.db_path)
     last = incremental.last_run(store.conn)
     plan = incremental.compute_window(
@@ -41,12 +64,6 @@ def cmd_update(args) -> int:
         since=args.since,
         until=args.until,
     )
-    only: Optional[List[str]] = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
-    if args.dry_run:
-        print(json.dumps({"dry_run": True, "plan": plan, "sources": only or "all", "db_path": str(settings.db_path), "last_run": last}, indent=1, default=str))
-        store.close()
-        return 0
-
     log.info("update window %s..%s (%s days, basis=%s%s)", plan["since"], plan["until"], plan["days"], plan["basis"], ", capped" if plan["capped"] else "")
     started = _now()
     pipe = Pipeline(settings, store=store)
