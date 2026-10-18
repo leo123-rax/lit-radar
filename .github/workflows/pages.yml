@@ -1,11 +1,22 @@
 # Publishes the static trends dashboard to GitHub Pages.
 #
 # Runs after the weekly digest finishes (workflow_run) so the site is rebuilt from the database the
-# digest just updated, and on demand (workflow_dispatch). The database is restored from the same
-# Actions cache the digest workflow writes; nothing here fetches from any API.
+# digest just published, and on demand (workflow_dispatch). The database is restored from the
+# `radar.sqlite.zst` asset on the rolling `db-latest` release that the weekly and daily workflows
+# publish; nothing here fetches from any API and nothing here writes to the repository.
+#
+# The build is not in the `lit-radar-db` concurrency group, so a manual dispatch could in principle
+# download the asset while the daily job replaces it (--clobber). A torn or missing download fails
+# this job loudly (download error, zstd, or PRAGMA integrity_check) instead of deploying a broken or
+# empty site; re-run it when that happens. The workflow_run trigger fires right after the weekly
+# job, which cannot overlap the daily job (they share the lit-radar-db group).
+#
+# Every third-party action is pinned to a full commit SHA (the tag it came from is in the comment);
+# the same SHA is used for the same action in weekly.yml, daily.yml and ci.yml. The
+# workflow_dispatch input reaches the shell only through an env: variable and is validated.
 #
 # One-time setup: Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
-# See docs/dashboard.md.
+# See docs/dashboard.md and docs/deploy.md section 5.
 name: pages
 on:
   workflow_run:
@@ -14,7 +25,8 @@ on:
   workflow_dispatch:
     inputs:
       weeks:
-        description: "weeks of history to chart"
+        description: "weeks of history to chart (integer)"
+        type: string
         default: "52"
 permissions:
   contents: read
@@ -23,6 +35,9 @@ permissions:
 concurrency:
   group: pages
   cancel-in-progress: false
+env:
+  STATE_RELEASE: db-latest
+  STATE_ASSET: radar.sqlite.zst
 jobs:
   build:
     # on a workflow_run trigger, only publish when the digest itself succeeded
@@ -32,21 +47,43 @@ jobs:
     outputs:
       found: ${{ steps.db.outputs.found }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e .
-      - name: Restore the database from the state release (published by the weekly digest)
+      - run: python -m pip install -e .
+      - name: Restore the database from the state release (published by the weekly and daily workflows)
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           mkdir -p data
-          if gh release view db-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release download db-latest --repo "$GITHUB_REPOSITORY" --pattern 'radar.sqlite.zst' --dir data --clobber
-            zstd -d -f data/radar.sqlite.zst -o data/radar.sqlite && rm -f data/radar.sqlite.zst
-            python3 -c "import sqlite3; print(sqlite3.connect('data/radar.sqlite').execute('PRAGMA integrity_check').fetchone()[0])"
+          # never open a database next to a stale WAL/SHM pair: SQLite would replay it over the restored file
+          rm -f data/radar.sqlite data/radar.sqlite-wal data/radar.sqlite-shm
+          if out=$(gh release view "$STATE_RELEASE" --json assets --jq '.assets[].name' 2>&1); then
+            if ! printf '%s\n' "$out" | grep -qx "$STATE_ASSET"; then
+              echo "::notice::release $STATE_RELEASE exists but holds no $STATE_ASSET yet"
+              exit 0
+            fi
+            # from here on any failure (download, decompression, integrity) fails the job: never deploy a torn site
+            gh release download "$STATE_RELEASE" --pattern "$STATE_ASSET" --dir data --clobber
+            zstd -d -q -f "data/$STATE_ASSET" -o data/radar.sqlite
+            rm -f "data/$STATE_ASSET"
+            status=$(python3 -c "import sqlite3; c = sqlite3.connect('data/radar.sqlite'); print(c.execute('PRAGMA integrity_check').fetchone()[0]); c.close()")
+            if [ "$status" != "ok" ]; then
+              echo "::error::restored database failed integrity_check ($status); not deploying. Roll $STATE_RELEASE back from a db-YYYY-MM release (docs/deploy.md, rolling back)."
+              exit 1
+            fi
+            echo "restored $(stat -c %s data/radar.sqlite) bytes from release $STATE_RELEASE"
+          elif printf '%s' "$out" | grep -qi 'not found'; then
+            echo "::notice::no $STATE_RELEASE release yet"
+          else
+            echo "::error::could not query the $STATE_RELEASE release: $out"
+            exit 1
           fi
       - name: Is there a database to publish?
         id: db
@@ -56,20 +93,23 @@ jobs:
             ls -l data/radar.sqlite
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No database snapshot yet (release db-latest) - run the weekly-digest workflow once, then re-run this one."
+            echo "::notice::No database snapshot yet (release $STATE_RELEASE has no $STATE_ASSET) - run the weekly-digest or daily-update workflow once, then re-run this one."
           fi
       - name: Build the static site
         if: steps.db.outputs.found == 'true'
         # the dispatch input goes through an environment variable, never straight into the shell line
         env:
-          WEEKS: ${{ github.event.inputs.weeks || '52' }}
-        run: python -m litradar dashboard --db data/radar.sqlite --out site --weeks "$WEEKS"
+          WEEKS_INPUT: ${{ github.event.inputs.weeks || '52' }}
+        run: |
+          set -euo pipefail
+          case "$WEEKS_INPUT" in ''|*[!0-9]*) echo "::error::weeks must be an integer, got '$WEEKS_INPUT'"; exit 1;; esac
+          python -m litradar dashboard --db data/radar.sqlite --out site --weeks "$WEEKS_INPUT"
       - name: Configure Pages
         if: steps.db.outputs.found == 'true'
-        uses: actions/configure-pages@v6
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Upload the site as a Pages artifact
         if: steps.db.outputs.found == 'true'
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
@@ -77,9 +117,10 @@ jobs:
     needs: build
     if: needs.build.outputs.found == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

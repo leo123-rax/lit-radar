@@ -15,8 +15,13 @@
 # "Enable workflow"). GitHub also disables schedules after 60 days without repository activity and may
 # delay scheduled runs on busy mornings; workflow_dispatch runs it by hand any time.
 #
-# Every third-party action is pinned to a full commit SHA (the tag it came from is in the comment).
+# Every third-party action is pinned to a full commit SHA (the tag it came from is in the comment);
+# the same SHA is used for the same action in daily.yml, pages.yml and ci.yml.
 # workflow_dispatch inputs reach the shell ONLY through env: variables, never inline in run:.
+# The first step of the radar job prints which optional secrets are PRESENT (names only, never a
+# value) so a fork owner can see in the log what is missing.
+# Before compressing, the FTS5 index is merged ('optimize') and the file VACUUMed: re-upserting the
+# overlap window rewrites FTS segments that otherwise never merge and the snapshot grows with no new content.
 name: weekly-digest
 on:
   schedule:
@@ -78,6 +83,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Which optional secrets are configured (names only; values are never printed)
+        run: |
+          set -euo pipefail
+          { echo "### Secrets present in this run (names only)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          for name in LITRADAR_CONTACT_EMAIL OPENALEX_API_KEY NCBI_API_KEY OPENFDA_API_KEY SEMANTIC_SCHOLAR_API_KEY ANTHROPIC_API_KEY SMTP_HOST SLACK_WEBHOOK_URL; do
+            if [ -n "${!name:-}" ]; then state="present"; else state="MISSING"; fi
+            echo "$state: $name"
+            echo "- \`$name\`: $state" >> "$GITHUB_STEP_SUMMARY"
+          done
+          [ -n "${OPENALEX_API_KEY:-}" ] || echo "::warning::OPENALEX_API_KEY is not set: the OpenAlex source (topic feeds, tracked authors by id, company-typed affiliations) will contribute little or nothing on the anonymous budget. Add it under Settings -> Secrets and variables -> Actions (docs/deploy.md section 2)."
+          [ -n "${LITRADAR_CONTACT_EMAIL:-}" ] || echo "::warning::LITRADAR_CONTACT_EMAIL is not set: SEC EDGAR 8-K feeds are skipped and OpenAlex/Crossref requests run outside the polite pool (docs/deploy.md section 2)."
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -122,10 +138,23 @@ jobs:
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then FLAGS="$FLAGS --slack"; fi
           # SIGINT lets Python unwind and checkpoint SQLite; the runner's own job kill would not reach it
           timeout -s INT -k 60 100m python -m litradar run $FLAGS
-      - name: Checkpoint and compress the database
+      - name: Optimize, checkpoint and compress the database
         run: |
           set -euo pipefail
-          python3 -c "import sqlite3; c = sqlite3.connect('data/radar.sqlite'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()"
+          # merge the FTS5 segments the week's upserts rewrote and reclaim free pages, so the snapshot
+          # grows with content rather than with re-indexing (measured: +16 MB raw for 3 new papers without this)
+          python3 - <<'EOF'
+          import sqlite3
+          c = sqlite3.connect("data/radar.sqlite", isolation_level=None)
+          try:
+              c.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
+          except sqlite3.OperationalError as exc:  # first run: the table may not exist yet
+              print(f"FTS optimize skipped: {exc}")
+          c.execute("VACUUM")
+          c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+          print(c.execute("PRAGMA integrity_check").fetchone()[0])
+          c.close()
+          EOF
           zstd -T0 -15 -q -f data/radar.sqlite -o "$STATE_ASSET"
           ls -l data/radar.sqlite "$STATE_ASSET"
       - name: Prune the HTTP cache to 14 days
@@ -178,8 +207,9 @@ jobs:
           month="db-$(date -u +%Y-%m)"
           for tag in "$STATE_RELEASE" "$month"; do
             if ! gh release view "$tag" --json tagName >/dev/null 2>&1; then
-              gh release create "$tag" --title "$tag" --latest=false \
-                --notes "Automated state snapshot: the radar's SQLite database, zstd-compressed. db-latest is replaced on every successful weekly run; db-YYYY-MM holds the last run of that month so the series can be rolled back. Restore with: zstd -d $STATE_ASSET -o data/radar.sqlite. Contents: harvested public metadata, abstracts and open-licensed text from the sources listed in NOTICE; see docs/LEGAL.md."
+              # same flags, title and notes as daily.yml: a rolling snapshot is a pre-release and never "Latest release"
+              gh release create "$tag" --title "$tag" --prerelease --latest=false \
+                --notes "Automated state snapshot: the radar's SQLite database, zstd-compressed. db-latest is replaced on every successful weekly run and every daily update; db-YYYY-MM holds the last weekly run of that month so the series can be rolled back. Restore with: zstd -d $STATE_ASSET -o data/radar.sqlite. Contents: harvested public metadata, abstracts and open-licensed text from the sources listed in NOTICE; see docs/LEGAL.md."
             fi
             gh release upload "$tag" "incoming/$STATE_ASSET" --clobber
           done

@@ -4,6 +4,18 @@
 # uploaded back (--clobber) at the end. The job goes red when `litradar status` says the data is
 # stale or more than two sources failed, so a red run means the corpus needs attention.
 # Schedule: 06:20 UTC daily (off the hour; GitHub thins out :00 slots). See docs/live.md.
+#
+# Design trade-off, stated plainly: unlike weekly.yml this is ONE job that holds the API keys AND a
+# `contents: write` token. The token is needed to upload the snapshot, and the upload must also run
+# after a failed update (partial progress is worth keeping), which does not split cleanly across
+# jobs. Mitigations: no pull_request trigger (fork PRs never reach this file's secrets); every
+# workflow_dispatch input reaches the shell only through env: variables and is validated below;
+# `persist-credentials: false` on checkout (the job never pushes); the token is used for release
+# assets only. If the trade-off is unacceptable in your copy, run the daily update from cron
+# (docs/live.md) and let the split weekly job be the only writer.
+#
+# Every third-party action is pinned to a full commit SHA (the tag it came from is in the comment);
+# the same SHA is used for the same action in weekly.yml, pages.yml and ci.yml.
 name: daily-update
 on:
   schedule:
@@ -11,16 +23,20 @@ on:
   workflow_dispatch:
     inputs:
       overlap_days:
-        description: "re-fetch this many days before the last run's end"
+        description: "re-fetch this many days before the last run's end (integer)"
+        type: string
         default: "2"
       max_days:
-        description: "cap on the window length"
+        description: "cap on the window length in days (integer)"
+        type: string
         default: "14"
       since:
         description: "optional window start YYYY-MM-DD (repair/backfill; overrides the overlap)"
+        type: string
         default: ""
       sources:
         description: "optional comma-separated subset (biorxiv,europepmc,openalex,crossref,arxiv,rss,sra,ena)"
+        type: string
         default: ""
 permissions:
   contents: write        # upload the database asset to the db-latest release
@@ -32,6 +48,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
+      # dispatch inputs: env: only, validated in "Update the corpus" before use
+      OVERLAP_INPUT: ${{ inputs.overlap_days || '2' }}
+      MAXDAYS_INPUT: ${{ inputs.max_days || '14' }}
+      SINCE_INPUT: ${{ inputs.since }}
+      SOURCES_INPUT: ${{ inputs.sources }}
       LITRADAR_CONTACT_EMAIL: ${{ secrets.LITRADAR_CONTACT_EMAIL }}
       NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
       OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
@@ -47,15 +68,29 @@ jobs:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       LITRADAR_DB: data/radar.sqlite
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
       DB_RELEASE_TAG: db-latest
       DB_ASSET: radar.sqlite.zst
     steps:
-      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955   # v4.3.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Which optional secrets are configured (names only; values are never printed)
+        run: |
+          set -euo pipefail
+          { echo "### Secrets present in this run (names only)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          for name in LITRADAR_CONTACT_EMAIL OPENALEX_API_KEY NCBI_API_KEY SEMANTIC_SCHOLAR_API_KEY ANTHROPIC_API_KEY SMTP_HOST SLACK_WEBHOOK_URL; do
+            if [ -n "${!name:-}" ]; then state="present"; else state="MISSING"; fi
+            echo "$state: $name"
+            echo "- \`$name\`: $state" >> "$GITHUB_STEP_SUMMARY"
+          done
+          [ -n "${OPENALEX_API_KEY:-}" ] || echo "::warning::OPENALEX_API_KEY is not set: the OpenAlex source (topic feeds, tracked authors by id, company-typed affiliations) will contribute little or nothing on the anonymous budget. Add it under Settings -> Secrets and variables -> Actions (docs/deploy.md section 2)."
+          [ -n "${LITRADAR_CONTACT_EMAIL:-}" ] || echo "::warning::LITRADAR_CONTACT_EMAIL is not set: SEC EDGAR 8-K feeds are skipped and OpenAlex/Crossref requests run outside the polite pool (docs/deploy.md section 2)."
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[llm]"
+      - run: python -m pip install -e ".[llm]"
       - name: Ensure zstd is available
         run: command -v zstd >/dev/null || (sudo apt-get update -q && sudo apt-get install -y -q zstd)
       - name: Download the database snapshot (db-latest release asset)
@@ -63,19 +98,30 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p data
-          if ! gh release view "$DB_RELEASE_TAG" >/dev/null 2>&1; then
+          # never open a database next to a stale WAL/SHM pair: SQLite would replay it over the restored file
+          rm -f data/radar.sqlite data/radar.sqlite-wal data/radar.sqlite-shm
+          if ! out=$(gh release view "$DB_RELEASE_TAG" --json assets --jq '.assets[].name' 2>&1); then
+            if ! printf '%s' "$out" | grep -qi 'not found'; then
+              echo "::error::could not query the $DB_RELEASE_TAG release: $out"
+              exit 1
+            fi
             echo "no $DB_RELEASE_TAG release yet: creating it; this run starts from an empty database"
-            gh release create "$DB_RELEASE_TAG" --title "Database snapshot (rolling)" \
-              --notes "Rolling SQLite snapshot used by the daily and weekly workflows. Replaced on every run; not a software release." \
-              --prerelease
+            # same flags, title and notes as weekly.yml: a rolling snapshot is a pre-release and never "Latest release"
+            gh release create "$DB_RELEASE_TAG" --title "$DB_RELEASE_TAG" --prerelease --latest=false \
+              --notes "Automated state snapshot: the radar's SQLite database, zstd-compressed. db-latest is replaced on every successful weekly run and every daily update; db-YYYY-MM holds the last weekly run of that month so the series can be rolled back. Restore with: zstd -d $DB_ASSET -o data/radar.sqlite. Contents: harvested public metadata, abstracts and open-licensed text from the sources listed in NOTICE; see docs/LEGAL.md."
             echo "restored=empty" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if gh release view "$DB_RELEASE_TAG" --json assets --jq '.assets[].name' | grep -qx "$DB_ASSET"; then
+          if printf '%s\n' "$out" | grep -qx "$DB_ASSET"; then
             # the asset exists: a failed download must fail the job, or we would overwrite a good snapshot with a 7-day one
             gh release download "$DB_RELEASE_TAG" --pattern "$DB_ASSET" --dir data --clobber
-            zstd -d -f "data/$DB_ASSET" -o data/radar.sqlite
+            zstd -d -q -f "data/$DB_ASSET" -o data/radar.sqlite
             rm -f "data/$DB_ASSET"
+            status=$(python3 -c "import sqlite3; c = sqlite3.connect('data/radar.sqlite'); print(c.execute('PRAGMA integrity_check').fetchone()[0]); c.close()")
+            if [ "$status" != "ok" ]; then
+              echo "::error::restored database failed integrity_check ($status). Roll $DB_RELEASE_TAG back from a db-YYYY-MM release (docs/deploy.md) rather than starting over."
+              exit 1
+            fi
             ls -l data/radar.sqlite
             echo "restored=ok" >> "$GITHUB_OUTPUT"
           else
@@ -86,9 +132,20 @@ jobs:
         id: update
         run: |
           set -euo pipefail
-          FLAGS="--overlap-days ${{ github.event.inputs.overlap_days || '2' }} --max-days ${{ github.event.inputs.max_days || '14' }}"
-          if [ -n "${{ github.event.inputs.since }}" ]; then FLAGS="$FLAGS --since ${{ github.event.inputs.since }}"; fi
-          if [ -n "${{ github.event.inputs.sources }}" ]; then FLAGS="$FLAGS --sources ${{ github.event.inputs.sources }}"; fi
+          # validate every dispatch input before it is used (they arrive via env:, never inline in this script)
+          case "$OVERLAP_INPUT" in ''|*[!0-9]*) echo "::error::overlap_days must be an integer, got '$OVERLAP_INPUT'"; exit 1;; esac
+          case "$MAXDAYS_INPUT" in ''|*[!0-9]*) echo "::error::max_days must be an integer, got '$MAXDAYS_INPUT'"; exit 1;; esac
+          if [ -n "$SINCE_INPUT" ]; then
+            printf '%s' "$SINCE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || { echo "::error::since must be YYYY-MM-DD, got '$SINCE_INPUT'"; exit 1; }
+          fi
+          if [ -n "$SOURCES_INPUT" ]; then
+            printf '%s' "$SOURCES_INPUT" | grep -Eq '^[a-z0-9_]+(,[a-z0-9_]+)*$' || { echo "::error::sources must be a comma-separated list of source ids (lower-case letters, digits, underscore), got '$SOURCES_INPUT'"; exit 1; }
+          fi
+          # an undefined repository variable arrives as "", which the code would take literally as the model name
+          [ -n "${LITRADAR_LLM_MODEL:-}" ] || unset LITRADAR_LLM_MODEL
+          FLAGS="--overlap-days $OVERLAP_INPUT --max-days $MAXDAYS_INPUT"
+          if [ -n "$SINCE_INPUT" ]; then FLAGS="$FLAGS --since $SINCE_INPUT"; fi
+          if [ -n "$SOURCES_INPUT" ]; then FLAGS="$FLAGS --sources $SOURCES_INPUT"; fi
           python -m litradar update $FLAGS
       - name: Upload the database snapshot back to the release
         # also after a failed update: SQLite stays consistent and upserts are idempotent, so partial
@@ -97,19 +154,27 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f data/radar.sqlite ]; then echo "no database to upload"; exit 0; fi
+          # Merge the FTS5 segments that the day's upserts rewrote and reclaim free pages before
+          # compressing. Without this, an overlap re-pull that added 3 papers grew the snapshot by
+          # ~16 MB raw / ~6 MB zstd (the re-indexed papers_fts segments were never merged).
           python - <<'EOF'
           import sqlite3
-          c = sqlite3.connect("data/radar.sqlite")
+          c = sqlite3.connect("data/radar.sqlite", isolation_level=None)
+          try:
+              c.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
+          except sqlite3.OperationalError as exc:  # first run: the table may not exist yet
+              print(f"FTS optimize skipped: {exc}")
+          c.execute("VACUUM")
           c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           print(c.execute("PRAGMA integrity_check").fetchone()[0])
           c.close()
           EOF
           zstd -T0 -19 -f data/radar.sqlite -o "data/$DB_ASSET"
-          ls -l "data/$DB_ASSET"
+          ls -l data/radar.sqlite "data/$DB_ASSET"
           gh release upload "$DB_RELEASE_TAG" "data/$DB_ASSET" --clobber
       - name: Keep the run summary
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: last_update
           path: digests/_work/last_update.json

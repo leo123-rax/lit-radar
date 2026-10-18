@@ -20,20 +20,33 @@ publisher username or password (see `docs/LEGAL.md`).
 ## What the repository does to protect them
 
 * `ci.yml` references no secrets, so pull requests from forks run with a read-only token and nothing
-  to leak; `weekly.yml` has no `pull_request` trigger.
+  to leak; `weekly.yml`, `daily.yml` and `pages.yml` have no `pull_request` trigger.
 * `weekly.yml` splits into a job that holds the API keys but can only read the repository
   (`contents: read`, `persist-credentials: false`) and a job that can write (release assets, the
   digest commit) but holds no API key. `permissions: {}` is the workflow default; each job asks for
-  what it needs.
-* Every third-party action is pinned to a full commit SHA, with the release tag in a comment.
-* `workflow_dispatch` inputs reach the shell only through `env:` variables and are validated
-  (`days` must be an integer; the time-series vendor token is restricted to a safe character set).
+  what it needs. `pages.yml` holds no API key and has `contents: read`. `daily.yml` is the exception
+  (see *Known limitations*).
+* Every third-party action in all four workflows is pinned to a full commit SHA, with the release
+  tag in a comment, and the same action is pinned to the same SHA everywhere.
+* `workflow_dispatch` inputs reach the shell only through `env:` variables and are validated before
+  use in every workflow: `days`, `overlap_days`, `max_days` and `weeks` must be integers; `since`
+  must match `YYYY-MM-DD`; `sources` must be a comma-separated list of `[a-z0-9_]` ids; the
+  time-series vendor token is restricted to a safe character set.
+* The first step of the weekly and daily jobs prints which optional secrets are configured as
+  **names only** (`present: NAME` / `MISSING: NAME`); no value, length or prefix is ever printed,
+  and GitHub's secret masking stays in force for everything else in the log.
 * CI fails if a database, WAL/SHM file, compressed snapshot, cache directory or `.env*` file (other
   than `.env.example`) is ever tracked.
 * YAML configuration is loaded with `yaml.safe_load`.
 
 ## Known limitations
 
+* `daily.yml` is a single job that holds the API keys **and** a `contents: write` token (needed to
+  upload the snapshot to the `db-latest` release, also after a failed update). A compromise of that
+  job could therefore use both. The job never pushes (`persist-credentials: false`), is reachable
+  only by schedule or by a `workflow_dispatch` whose inputs are validated, and the token is used for
+  release assets only; the trade-off is written in the file's header. Operators who want the weekly
+  job's key/write split everywhere can run the daily update from cron instead (`docs/live.md`).
 * Keys that travel in a URL query string (the NCBI `api_key`, the openFDA `api_key`) can appear in
   the HTTP client's retry and failure log lines (`GET <url> -> 5xx; retrying`). Keep cron/launchd
   logs private, redact URLs before pasting a log into an issue, and rotate the key if a log was

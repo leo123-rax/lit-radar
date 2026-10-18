@@ -24,7 +24,7 @@ published limit.
 | Full text (Methods, funding, competing-interest sections, body) | only for open-licensed items: the PMC / Europe PMC open-access subset and preprints under CC0 or a CC BY licence (see section 6) | `data/radar.sqlite` (sections and a full-text search column); raw XML in `.cache/` |
 | Derived facts: gazetteer mentions with short snippets, scores, reasons | for every item whose text was read | `data/radar.sqlite`; entity names and counts in `digests/*.md` |
 | Archive and registry records (SRA/ENA experiments with the declared instrument model, GEO series, PRIDE projects, CELLxGENE datasets, 510(k)/PMA decisions, trials, grants) | always; these are public-domain or unrestricted metadata | `data/radar.sqlite`; counts in `digests/*.md` |
-| Headlines and links from RSS / SEC EDGAR | always; headline, link, date and the matched company only | `data/radar.sqlite`; grouped headlines in `digests/*.md` |
+| Headlines and links from GDELT, RSS / press wires, SEC EDGAR (and Google News RSS if opted in) | always; headline, link, date and the matched company only | `data/radar.sqlite`; grouped headlines in `digests/*.md` |
 | Credentials | never | `.env` or GitHub Actions secrets only (see `SECURITY.md`) |
 
 Three places hold content, with different exposure:
@@ -32,9 +32,9 @@ Three places hold content, with different exposure:
 * **`digests/*.md`** are committed to the repository and are as public as the repository. They
   contain titles, DOI links, detected entity names, counts and abstract excerpts (420 characters at
   most), never full text or snippets. Every digest ends with a footer stating this policy.
-* **`data/radar.sqlite`** is git-ignored. The weekly workflow publishes a zstd-compressed snapshot of
-  it as a GitHub release asset (`db-latest`, `db-YYYY-MM`), which is as public as the repository. It
-  holds abstracts and the full text of open-licensed items.
+* **`data/radar.sqlite`** is git-ignored. The weekly and daily workflows publish a zstd-compressed
+  snapshot of it as a GitHub release asset (`db-latest`, `db-YYYY-MM`), which is as public as the
+  repository. It holds abstracts and the full text of open-licensed items.
 * **`.cache/`** holds the raw HTTP bodies of full-text fetches. It is git-ignored, pruned to 14 days
   in CI, and lives only on your machine or the runner.
 
@@ -60,8 +60,9 @@ never sent to the LLM and never republished.
   forbid them.
 * **Google News RSS only as an opt-in.** `news.google.com/robots.txt` disallows the `/rss/` path to
   all agents and Google's terms forbid automated access that contravenes machine-readable
-  instructions. The project therefore treats the source as something the operator switches on
-  knowingly (see section 7 for the current switch).
+  instructions. The project therefore ships it **off** (`news.google_news: false` in
+  `config/radar.yaml`) and treats it as something the operator switches on knowingly (section 7).
+  Per-company news comes from the GDELT DOC 2.0 API instead, which is built for programmatic use.
 * **No re-serving.** Stored text is for the operator's own search. Nothing in the database is
   mirrored or served to others as text; preprint and PMC content is linked back to its host.
 
@@ -87,8 +88,9 @@ documented limit. Where a source publishes no number, the pacing is a courtesy d
 | NIH RePORTER | shared-instrumentation, SBIR/STTR and keyword awards | US Government work, public domain | one request per second | 1.0 s |
 | PRIDE Archive | projects by day with instrument names | EMBL-EBI Terms of Use | none published | shares `www.ebi.ac.uk` pacing |
 | CZ CELLxGENE Discover | public dataset index with assay terms (one request per run) | curation API; each collection carries its own licence | none published | 1.0 s |
+| GDELT DOC 2.0 API (`api.gdeltproject.org`) | one query per watched company: headlines, links, dates (no snippets) | GDELT terms: "unlimited and unrestricted use for any academic, commercial, or governmental use"; attribution requested | "please limit requests to one every 5 seconds" | 5.5 s; the host is skipped for the rest of the run after a persistent 429 and the skipped companies are listed in the digest's errors |
 | Journal / publisher / press RSS | headlines, DOIs, links | publisher terms; feeds that refuse scripts are dropped | none | sequential |
-| Google News RSS | headlines per watched company | Google Terms of Service; `robots.txt` disallows `/rss/`; **opt-in only** | none | sequential |
+| Google News RSS | headlines per watched company, **only when `news.google_news: true`** | Google Terms of Service; `robots.txt` disallows `/rss/`; **opt-in only, off by default** | none | sequential |
 
 Not used, by policy: Google Scholar (prohibited), publisher HTML pages (terms and `tdmrep`
 reservations), Altmetric without a commercial contract (its free tier is for non-commercial academic
@@ -162,7 +164,8 @@ full text are not rendered; the footer states the storage policy in every digest
 | Pacing, backoff, host blocking, honest User-Agent | implemented in `litradar/http.py` |
 | SEC EDGAR skipped without a contact | implemented in `litradar/pipeline.py` |
 | No logins, no publisher HTML, no Google Scholar | no code path exists; review rule in `CONTRIBUTING.md` |
-| Google News opt-in | the query is attached to every company with `watch_news: true` in `config/companies.yaml`; a dedicated switch is being added. To stay off it today, set `watch_news: false` or point `LITRADAR_CONFIG_DIR` at an overlay without it |
+| Google News opt-in | implemented: `news.google_news` in `config/radar.yaml` defaults to `false`; while it is off, the pipeline logs that the configured Google News feeds were skipped and `watch_news: true` companies get a GDELT query instead. Setting it to `true` is the operator's decision and risk |
+| GDELT as the per-company news source | implemented (`litradar/sources/gdelt.py`, `news.gdelt: true`); pacing 5.5 s per request, host skipped after a persistent 429 with the skipped companies reported in the digest's error list |
 | Title/abstract-only payload to the LLM | implemented in `litradar/rank/llm.py` |
 
 ## 7. Changing the policy for your copy
@@ -172,6 +175,9 @@ full text are not rendered; the footer states the storage policy in every digest
   for. You are then responsible for that agreement's storage, retention, snippet and deletion terms.
 * **Stricter operators:** remove the ND/NC variants from the permissive list, set
   `sources.<name>.fulltext: false` in `config/radar.yaml`, or run with `--no-fulltext`.
+* **Google News RSS:** off by default. Operators who accept the `robots.txt` / terms conflict
+  described in section 3 set `news.google_news: true` in `config/radar.yaml`; it then adds one query
+  per `watch_news` company plus the `gnews` entries in `config/feeds.yaml`, headlines and links only.
 * **Keeping the watchlist private:** keep the shipped `config/` generic, put personal lists in an
   overlay directory and point `LITRADAR_CONFIG_DIR` at it; in a public fork leave the repository
   variable `LITRADAR_COMMIT_DIGESTS` unset so digests are not committed (see `docs/deploy.md`).

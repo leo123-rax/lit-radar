@@ -14,7 +14,8 @@ diagnostics and biotech. Every week it:
    sequencers are producing data, independent of what gets written up.
 4. **Maps everything to companies**: vendor tickers behind each instrument, company-affiliated
    authors (e-mail domains, OpenAlex institution typing), companies named in funding and
-   competing-interest statements, plus company news (Google News, SEC 8-K filings, press wires).
+   competing-interest statements, plus company news (GDELT per-company queries, SEC 8-K filings,
+   press wires; Google News RSS only if you opt in).
 5. **Tracks researchers by subgroup** (single-cell, spatial, long-read, proteomics, liquid biopsy,
    perturbation screens, AI-bio, gene editing, structural biology, synthetic biology).
 6. **Ranks "most interesting"** with a transparent heuristic, optionally blended with a Claude
@@ -28,10 +29,16 @@ laptop or let the included GitHub Action run it every Monday.
 
 ## Quick start
 
+Python 3.9 or newer with a modern pip. The package is `pyproject.toml`-only, so an editable install
+needs pip >= 21.3; the pip that ships with macOS's command-line-tools Python (21.2.4) fails with
+"editable mode currently requires a setuptools-based build" until you upgrade it, which is why the
+upgrade line is in the snippet. (`python -m pip install .` without `-e` works on any pip.)
+
 ```bash
 git clone https://github.com/<you>/lit-radar && cd lit-radar
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
+python3 -m venv .venv && source .venv/bin/activate   # python3: stock macOS has no `python`
+python -m pip install --upgrade pip                   # pip >= 21.3 for a pyproject-only editable install
+python -m pip install -e .
 cp .env.example .env          # optional: add keys (all optional; see below)
 python -m litradar check-config
 python -m litradar run --days 7      # 10-30 minutes on first run; the digest lands in digests/
@@ -43,7 +50,9 @@ python -m litradar trends --print   # what changed vs last week and the 13-week 
 Trends (risers, fallers, new entities, preprint-to-journal conversions) are described in
 `docs/trends.md`; the section becomes informative from the second weekly run.
 
-Optional extras: `pip install -e ".[llm]"` for Claude scoring, `pip install markdown` for HTML e-mail.
+Optional extras: `python -m pip install -e ".[llm]"` for Claude scoring, `python -m pip install markdown`
+for HTML e-mail. The install also puts a `litradar` console script on the virtualenv's PATH, so
+`litradar search ...` and `python -m litradar search ...` are the same command; the docs use both.
 
 ## What you need (and what you don't)
 
@@ -86,9 +95,13 @@ how the code enforces them are in `docs/LEGAL.md`; the short version is `docs/AC
   institutes and pharma disclosures are not read as vendors; first-time appearances.
 * **Tracked researchers**: new papers and preprints by the people in `config/subgroups.yaml`,
   grouped by subgroup; name-only matches are marked provisional until an OpenAlex id is set.
-* **Trade press & company news**: grouped by company, from the feeds that allow scripted access,
-  SEC 8-K filings and press wires. Google News queries are still on by default in this version;
-  the research verdict is to make them opt-in (see `docs/ROADMAP.md`).
+* **Trade press & company news**: grouped by company, from the GDELT DOC 2.0 API (one query per
+  watched company, built for programmatic use; it allows one request every 5 seconds, so a run that
+  gets a 429 backs off and, if the 429 persists, skips the remaining companies and says so in the
+  digest's error list), SEC 8-K filings, press wires and the trade-press feeds that allow scripted
+  access. Google News RSS is **opt-in and off by default** (`news.google_news: false` in
+  `config/radar.yaml`): its `robots.txt` disallows the `/rss/` path, so turning it on is the
+  operator's decision (see `docs/LEGAL.md`).
 * **Coverage and method**: exactly what was pulled per source, how many items had full text, how
   many were scored by the model, what failed, and database totals.
 
@@ -103,7 +116,7 @@ Every command reads `config/` and `.env` from the repo root; `python -m litradar
 | `run --days 7 [--llm]` | full weekly pass: fetch, full text, extract, census, news, signals, rank, digest |
 | `update [--overlap-days 2]` | incremental daily pass from the last run's end (no digest); `status` reports freshness and exits non-zero when stale |
 | `digest --days 7` | re-render the digest from the database (all sections, no fetching) |
-| `search "query" [--since 90d] [--in methods,coi]` · `entity <id>` · `show <id|name>` · `watch add|run` | search and entity dossiers over the corpus |
+| `search "query" [--since 90d] [--in methods,coi]` · `entity <id>` · `show <id|name>` · `watch add|run` | search and entity dossiers over the corpus. A multi-word query is an AND of stemmed terms; put the phrase in inner quotes for an exact phrase (`search '"minimal residual disease"'`). Syntax: `docs/search.md` |
 | `serve [--datasette]` | read-only JSON API + search page on localhost; or launch Datasette with the bundled metadata |
 | `add <doi|pmid|pmcid|arxiv|url> [--tag x]` · `tags` | add papers to the corpus by identifier |
 | `track company|instrument|author|topic|term ...` · `untrack` · `prioritize <kind> <target> --weight W` | edit what is tracked and weighted without hand-editing YAML |
@@ -130,7 +143,8 @@ Everything lives in `config/` and is meant to be edited:
   the vendor and ticker, launch year, and context rules for ambiguous names
   (`Chromium` the element vs the 10x instrument, `G4` the quadruplex vs the sequencer).
 * `companies.yaml`: company names, subsidiaries, tickers, e-mail domains; `watch_news: true` adds a
-  Google News query and (for US tickers) an SEC 8-K feed.
+  GDELT news query (plus a Google News query only when `news.google_news` is on) and, for US
+  tickers, an SEC 8-K feed.
 * `subgroups.yaml`: research subgroups, their keywords, OpenAlex topic ids and tracked authors.
 * `journals.yaml`: journals by ISSN with tier and RSS; publisher subject feeds.
 * `feeds.yaml`: trade press and press-wire feeds.
@@ -145,7 +159,9 @@ Everything lives in `config/` and is meant to be edited:
   roll-back) and commits the digest to `digests/`. Forks do not commit digests unless the repository
   variable `LITRADAR_COMMIT_DIGESTS=true` is set, because a committed digest reveals your watchlist.
   *Run workflow* also takes a `timeseries_vendor` input to produce a vendor time series on demand.
-  Step by step, including Pages for the dashboard: `docs/deploy.md`.
+  Two more workflows: `daily.yml` extends the corpus every day at 06:20 UTC (`litradar update`, no
+  digest) and `pages.yml` rebuilds the dashboard from the `db-latest` snapshot after each weekly
+  run. Step by step, including Pages for the dashboard: `docs/deploy.md`; live mode: `docs/live.md`.
 * **Laptop or server**: `cron` or `launchd` calling `python -m litradar run --email`; examples in
   `docs/examples/`. Windows: Task Scheduler with the same command.
 
@@ -153,8 +169,10 @@ Everything lives in `config/` and is meant to be edited:
 
 * **Keys live in `.env` (git-ignored) or in GitHub Actions secrets, nowhere else**: never in
   `config/*.yaml`, never in a digest, never in an issue. CI fails if a database, WAL file, snapshot or
-  `.env` is ever tracked; workflow actions are pinned to commit SHAs and workflow inputs reach the
-  shell only through environment variables. Reporting and key rotation: `SECURITY.md`.
+  `.env` is ever tracked; every workflow action is pinned to a full commit SHA and every
+  `workflow_dispatch` input reaches the shell only through an environment variable and is validated.
+  The first step of each scheduled job prints which optional secrets are present (names only, never a
+  value) so a fork owner can see what is missing. Reporting and key rotation: `SECURITY.md`.
 * **What a public repository exposes:** the committed digests (`digests/*.md`), the database snapshot
   in the `db-*` releases and the Pages dashboard all show which companies, instruments and people you
   watch. Options: keep a private duplicate instead of a public fork, leave `LITRADAR_COMMIT_DIGESTS`
@@ -196,8 +214,9 @@ and `docs/DESIGN.md` section 8.
 | NCBI SRA (E-utilities) | weekly census of sequencing experiments with declared instrument model (~121k experiments a week) | free; key lifts 3 to 10 req/s | wired |
 | ENA portal API | ERX/DRX records with `instrument_model` and `first_public` (the ENA/DDBJ-native complement to SRA) | free | wired |
 | Journal / subject RSS | tables of contents as a backstop | free | wired |
-| SEC EDGAR Atom, PR Newswire, STAT, BioPharma Dive, MedTech Dive | company filings and trade-press headlines | free (EDGAR needs a contact address in the User-Agent) | wired; EDGAR User-Agent fix pending |
-| Google News RSS | headlines for outlets and companies with no scriptable feed | free | wired; robots.txt disallows it, so it is moving to opt-in |
+| SEC EDGAR Atom, PR Newswire, STAT, BioPharma Dive, MedTech Dive | company filings and trade-press headlines | free (EDGAR requires a `<tool> <contact e-mail>` User-Agent, sent from `LITRADAR_CONTACT_EMAIL`) | wired; the EDGAR feeds are skipped while no contact is configured |
+| GDELT DOC 2.0 API | per-company news headlines and links (`"<company>" + <type clause>`, `sourcelang:english`) | free, no key; one request every 5 s, so ~75 companies take ~7 minutes | wired, on by default (`news.gdelt`); a persistent 429 skips the remaining companies and is listed in the digest's errors |
+| Google News RSS | headlines for outlets and companies with no scriptable feed | free | wired but **opt-in, off by default** (`news.google_news: false`): `robots.txt` disallows `/rss/` |
 | NCBI GEO | newly released Series and the platforms they ran on (study-level census) | free; key lifts rate | wired |
 | PRIDE Archive | proteomics datasets per declared mass spectrometer | free | wired |
 | CZ CELLxGENE Discover | single-cell and spatial assays behind newly public datasets | free | wired |
