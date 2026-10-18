@@ -196,7 +196,7 @@ def cmd_search(args) -> int:
         print("no matches")
         return 0
     for r in rows:
-        print(f"- {r['pub_date'] or 'n.d.'}  {r['title']}\n    {r['journal'] or r['source']}  {r['url']}\n    …{r['snippet']}…")
+        print(f"- {r['pub_date'] or 'n.d.'}  {r['title']}\n    {r['journal'] or r['source']}  {r['url']}\n    [{r.get('section') or '-'}] …{r['snippet']}…")
     return 0
 
 
@@ -754,7 +754,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p.add_argument("query")
     p.add_argument("--since", type=Q.since_arg, help=since_help)
-    p.add_argument("--in", dest="in_sections", help="restrict to columns: title,abstract,methods,funding,coi,affiliations,body")
+    p.add_argument("--in", dest="in_sections", help="restrict to columns: title,abstract,methods,funding,coi,affiliations,body,mentions "
+                                                    "(mentions = the gazetteer's attributions: entity names, matched aliases and ids, not paper text)")
     p.add_argument("--limit", type=_positive_int, default=50, help="rows to print (default 50)")
     p.add_argument("--raw-fts", action="store_true", dest="raw_fts", help="pass the query to FTS5 exactly as typed (no automatic phrase quoting)")
     p.add_argument("--json", action="store_true", help="machine-readable output, with each paper's score")

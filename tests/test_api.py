@@ -110,6 +110,34 @@ def test_search_shape_and_chips(served):
     assert xen["name"] == "Xenium" and xen["ticker"] == "TXG" and sorted(xen["sections"]) == ["abstract", "title"]
     assert hit["companies"][0]["entity_id"] == "10x-genomics"
     assert "[" in hit["snippet"]  # FTS5 highlight markers
+    # the mentions text ("Xenium ; txg-xenium ; ...") packs two hits into one window; the snippet is still paper text
+    assert hit["section"] == "title" and hit["snippet"] == "Paper 1 about [Xenium] spatial profiling"
+
+
+def test_search_snippets_are_paper_text_and_name_their_column(tmp_path):
+    """SRCH-01 through the API: a paper whose mentions text repeats the query several times still gets a prose
+    snippet; a paper found only through the gazetteer's attribution shows the mentions column and says so."""
+    db = tmp_path / "snip.sqlite"
+    st = Store(db)
+    st.upsert_paper(_paper(9, title="Neonatal immune atlas", abstract="Libraries were built on a Chromium controller and sequenced.", sections={}))
+    st.replace_mentions("doi:10.1000/test9", [
+        Mention("doi:10.1000/test9", "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "abstract", 1, "..."),
+        Mention("doi:10.1000/test9", "instrument", "txg-chromium-flex", "Chromium Flex", "10x Genomics", "TXG", "single_cell", "abstract", 1, "..."),
+    ])
+    st.upsert_paper(_paper(10, title="Immune profiling of neonates", abstract="Made with the Next GEM 5' kit.", sections={}))
+    st.replace_mentions("doi:10.1000/test10", [Mention("doi:10.1000/test10", "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "abstract", 1, "...")])
+    st.commit()
+    st.close()
+    app = api.RadarAPI(db, today=lambda: TODAY)
+    resp = app.search({"q": "Chromium"})
+    assert resp.status == 200
+    hits = {r["id"]: r for r in resp.json()["results"]}
+    prose, attributed = hits["doi:10.1000/test9"], hits["doi:10.1000/test10"]
+    assert prose["section"] == "abstract" and prose["snippet"] == "Libraries were built on a [Chromium] controller and sequenced."
+    assert "txg-chromium" not in prose["snippet"] and " ; " not in prose["snippet"]
+    assert attributed["section"] == "mentions" and attributed["snippet"] == "[Chromium] ; txg-[chromium]"
+    only = app.search({"q": "Chromium", "in": "mentions"}).json()
+    assert only["sections"] == ["mentions"] and {r["section"] for r in only["results"]} == {"mentions"}
 
 
 def test_search_since_and_sections(served):

@@ -126,6 +126,19 @@ def test_search_unknown_section_is_a_message_not_a_traceback(seeded, capsys):
     assert "unknown section(s) foo; choose from title, abstract, methods" in err and "Traceback" not in err
     assert cli.main(["search", "Xenium", "--in", "methods", "--json"]) == 0
     assert [r["id"] for r in json.loads(capsys.readouterr().out)] == ["doi:10.1000/s3"]
+    assert cli.main(["search", "Xenium", "--in", "mentions", "--json"]) == 0  # the gazetteer's column is a valid --in target
+    assert {r["id"] for r in json.loads(capsys.readouterr().out)} == {"doi:10.1000/s3", "doi:10.1000/s4", "doi:10.1000/s5"}
+
+
+def test_search_prints_paper_text_snippets_with_their_column(seeded, capsys):
+    """SRCH-01: s3's mentions text ("Xenium ; txg-xenium") packs two hits into one window and used to be the snippet
+    FTS5 chose; the CLI now prints the paper's own text and names the column it came from."""
+    assert cli.main(["search", "Xenium", "--since", "2026-10-01"]) == 0
+    out = capsys.readouterr().out
+    assert "    [title] …[Xenium] atlas…" in out and "    [title] …[Xenium] validation…" in out
+    assert "txg-" not in out and " ; " not in out
+    assert cli.main(["search", "Xenium", "--since", "2026-10-01", "--in", "mentions"]) == 0
+    assert "    [mentions] …[Xenium] ; txg-[xenium]…" in capsys.readouterr().out
 
 
 # ---- entity: distinct papers, sections grouped, honest counts ----------------------------------------

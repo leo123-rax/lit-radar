@@ -350,6 +350,49 @@ def test_mentions_column_makes_attributed_entities_searchable_and_aliases_are_st
     assert st.search("Chromium") == [] and st.fts_mentions_updated == 2
 
 
+def test_search_snippets_prefer_paper_text_over_the_mentions_column(tmp_path):
+    """SRCH-01: `snippet(papers_fts, -1, ...)` let FTS5 pick the column, and the short ' ; '-joined mentions text
+    (name + alias + id, several instances in one window) beat any prose window with one hit, so results showed
+    gazetteer ids instead of paper text. The snippet now comes from the text columns whenever one matched, and
+    `section` names the column it was cut from."""
+    st = Store(tmp_path / "t.sqlite")
+    # four 'Chromium' instances in the mentions text versus one in the abstract
+    st.upsert_paper(_paper(80, title="Neonatal immune atlas", abstract="Libraries were built on a Chromium controller [12] and sequenced.",
+                           sections={"body": "Cited as in [3], [4] and [5]; no instrument is named here."}))
+    st.replace_mentions("doi:10.1000/test80", [
+        Mention("doi:10.1000/test80", "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "abstract", 1, "..."),
+        Mention("doi:10.1000/test80", "instrument", "txg-chromium-flex", "Chromium Flex", "10x Genomics", "TXG", "single_cell", "abstract", 1, "..."),
+    ])
+    # found through the gazetteer alone: the text never says Chromium
+    st.upsert_paper(_paper(81, title="Immune profiling of neonates", abstract="Made with the Next GEM 5' kit.", sections={}))
+    st.replace_mentions("doi:10.1000/test81", [Mention("doi:10.1000/test81", "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "abstract", 1, "...")])
+    # one hit in the title and none below: the title wins (earlier column), and the body's citation brackets are not matches
+    st.upsert_paper(_paper(82, title="Chromium throughput benchmark", abstract="A benchmark of droplet partitioning.", sections={"body": "See [1], [2] and [3]."}))
+    # two hits in the body against one in the title: the denser text window wins, as FTS5 itself would choose
+    st.upsert_paper(_paper(83, title="Chromium notes", abstract="Partitioning notes.", sections={"body": "Chromium X and Chromium Controller runs were compared."}))
+    st.commit()
+    rows = {r["id"]: r for r in st.search("Chromium")}
+    assert set(rows) == {f"doi:10.1000/test{i}" for i in (80, 81, 82, 83)}
+    assert all("fts_rowid" not in r and set(r) >= {"snippet", "section", "rank"} for r in rows.values())
+    a = rows["doi:10.1000/test80"]
+    assert a["section"] == "abstract" and a["snippet"] == "Libraries were built on a [Chromium] controller [12] and sequenced."
+    assert " ; " not in a["snippet"] and "txg" not in a["snippet"]
+    b = rows["doi:10.1000/test81"]
+    assert b["section"] == "mentions" and b["snippet"] == "[Chromium] ; txg-[chromium]"
+    c = rows["doi:10.1000/test82"]
+    assert c["section"] == "title" and c["snippet"] == "[Chromium] throughput benchmark"
+    d = rows["doi:10.1000/test83"]
+    assert d["section"] == "body" and d["snippet"].count("[Chromium]") == 2
+    # a column filter is honoured: only the mentions column is searched, so only it is shown
+    assert {r["section"] for r in st.search("Chromium", sections=["mentions"])} == {"mentions"}
+    assert {r["section"] for r in st.search("Chromium", sections=["title", "body"])} == {"title", "body"}
+    # the phrase fallback attaches snippets too (the phrase is one highlighted unit), computed with the query that ran
+    rows = st.search("Chromium controller(", limit=2)
+    assert st.last_search_fallback and {r["id"] for r in rows} == {"doi:10.1000/test80", "doi:10.1000/test83"}
+    assert {r["section"] for r in rows} == {"abstract", "body"} and all("[chromium controller]" in r["snippet"].lower() for r in rows)
+    assert st.snippets("Chromium", []) == {}
+
+
 def test_fts_row_is_rewritten_only_when_indexed_text_changes(tmp_path):
     st = Store(tmp_path / "t.sqlite")
     p = _paper(71)
