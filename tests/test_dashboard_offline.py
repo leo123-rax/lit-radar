@@ -4,7 +4,9 @@ Cases: a normal store, an empty one, malformed JSON in extra_json / news compani
 carries the optional `timeseries` table, a store with no week overlap (pagination-style stop,
 where every bucket is zero but the site must still build), the instrument card cap, the
 complete-weeks rule for movers, optional-versus-fatal database errors, archive platform-code
-merging and subgroup folding.
+merging and subgroup folding; and the coverage rules - weeks before the recorded ingestion start
+are n/a rather than zero, movers compare only windows ingested alike, and first-of-month dates
+from a padding source are kept out of the weekly series.
 """
 import json
 import sqlite3
@@ -12,7 +14,7 @@ from datetime import date
 
 import pytest
 
-from litradar import dashboard
+from litradar import backfill, dashboard
 from litradar.models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from litradar.store import Store
 
@@ -75,6 +77,8 @@ def _seed(tmp_path, name="radar.sqlite"):
     ])
     st.add_tracked_author_hit("doi:10.1000/dash1", "A. Researcher", "spatial", "name")
     st.save_score("doi:10.1000/dash1", 4.0, None, 4.0, "reasons")
+    # the run that built the store covered the whole charted axis, so an empty week is a measured zero
+    st.record_run("2026-10-17T00:00:00Z", "2026-09-21", "2026-10-17", {"papers": 4})
     # pin first_seen so the dateless paper buckets into a known week whatever day the suite runs
     st.conn.execute("UPDATE papers SET first_seen='2026-10-13T00:00:00Z'")
     st.commit()
@@ -149,8 +153,14 @@ def test_entity_pages_carry_series_roles_and_recent_papers(tmp_path):
     # TODAY is a Saturday, so the current ISO week (2026-10-12) is unfinished and left out of the
     # comparison: of the remaining three buckets one is "recent" (2026-10-05) and one "previous"
     movers = {m["id"]: m for m in data["movers"]["instrument_papers"]}
-    assert data["movers_window"] == {"span": 1, "offset": 1, "recent": [PRIOR_WEEK], "previous": ["2026-09-28"],
-                                     "excludes_current_week": True}
+    window = dict(data["movers_window"])
+    coverage = window.pop("coverage")
+    assert window == {"span": 1, "offset": 1, "recent": [PRIOR_WEEK], "previous": ["2026-09-28"],
+                      "excludes_current_week": True}
+    # the recorded run covers both compared weeks, so every table is comparable
+    assert coverage == {k: {"comparable": True, "reason": ""} for k in ("instrument_papers", "archive_experiments", "companies")}
+    assert data["coverage"] == {"runs_since": "2026-09-21", "backfill_from": None, "backfill_to": None,
+                                "archive_since": "2026-09-21", "papers_since": "2026-09-21"}
     assert movers["inst-a"]["recent"] == 1 and movers["inst-a"]["previous"] == 0
     assert movers["inst-a"]["pct"] is None          # no baseline: reported as n/a, never as infinity
     assert "inst-b" not in movers                   # its only paper is in the unfinished week
@@ -245,6 +255,9 @@ def test_fold_tail_keeps_top_series_and_sums_the_rest():
     assert folded["Other"] == [2, 1]
     unchanged = dashboard._fold_tail(series, 9)
     assert "Other" not in unchanged and list(unchanged) == ["a", "b", "c", "d"]
+    # a week no folded series covers stays n/a in 'Other'; one that any of them covers is summed
+    with_gaps = dashboard._fold_tail({"a": [None, 5], "b": [None, 4], "c": [None, 1], "d": [None, 0]}, 2)
+    assert with_gaps["Other"] == [None, 1]
 
 
 def test_build_does_not_modify_the_source_database(tmp_path):
@@ -423,3 +436,221 @@ def test_footer_wording_placeholder_tickers_and_layout_rules(tmp_path):
     assert ".table-scroll.fit table { width: 100%" in css and "td.wrap, th.wrap { white-space: normal" in css
     js = (out / "assets" / "app.js").read_text(encoding="utf-8")
     assert '{ label: "Title", wrap: true }' in js and "fit: true" in js and 'options.fit ? "table-scroll fit"' in js
+
+
+# ---------------------------------------------------------------------------- coverage rules
+def _run_since(db, since):
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE runs SET since=?", (since,))
+    conn.commit()
+    conn.close()
+
+
+def test_weeks_before_the_archive_census_are_not_zero(tmp_path):
+    """DASH-03: a store whose first run (and so first census) starts mid-axis must not draw the earlier weeks as
+    zero experiments - they were never fetched for. They are None, the payload says how many, the first covered
+    week reports how many days of records it holds, and the page says all of it in words."""
+    db = _seed(tmp_path, "census.sqlite")
+    _run_since(db, "2026-10-10")                     # a Saturday: the week of 2026-10-05 holds two days of census
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM archive_records WHERE first_public < '2026-10-10'")   # ERX1 (2026-10-07) goes
+    conn.commit()
+    conn.close()
+
+    data = _collect(db, today=SUNDAY)
+    assert data["coverage"]["archive_since"] == "2026-10-10"
+    arch = data["archive_by_vendor"]
+    assert arch["series"]["Vendor One"] == [None, None, 0, 6]
+    assert arch["coverage"] == {"since": "2026-10-10", "uncovered_weeks": 2, "first_week": "2026-10-05", "first_week_days": 2}
+    inst = {e["id"]: e for e in data["instruments"]}
+    assert inst["inst-a"]["experiments_per_week"] == [None, None, 0, 5]
+    assert inst["inst-a"]["experiments_total"] == 5              # None never counts
+    # papers: the run is the only paper layer, so the same lead is n/a; a week before it that holds a paper keeps it
+    assert data["papers_per_week"]["coverage"]["since"] == "2026-10-10"
+    assert data["papers_per_week"]["total"] == [None, None, 1, 3]
+    # the archive movers would compare a window the census never saw: suppressed, with the dates
+    assert data["movers"]["archive_experiments"] == []
+    reason = data["movers_window"]["coverage"]["archive_experiments"]["reason"]
+    assert "the archive census (records public from 2026-10-10)" in reason
+    assert "covers the recent window (2026-10-05 through 2026-10-18) only in part" in reason
+    assert "previous one (2026-09-21 through 2026-10-04) not at all" in reason
+
+    out = tmp_path / "site-census"
+    dashboard.build(db, out, weeks=4, today=SUNDAY)
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert ("The archive census in this store starts 2026-10-10: the 2 earlier weeks (shaded) were never fetched for, "
+            "and an empty one is shown as n/a, not as zero; the week of 2026-10-05 holds 2 days of records.") in index
+    assert "Instruments by archive experiments: suppressed, because the archive census" in index
+    overview = json.loads((out / "data" / "overview.json").read_text(encoding="utf-8"))
+    assert overview["archive_by_vendor"]["series"]["Vendor One"] == [None, None, 0, 6]     # null in JSON, never 0
+    instruments = json.loads((out / "data" / "instruments.json").read_text(encoding="utf-8"))
+    assert instruments["archive_coverage"]["uncovered_weeks"] == 2 and instruments["papers_coverage"]["since"] == "2026-10-10"
+    assert "the 2 earlier weeks (shaded)" in (out / "instruments.html").read_text(encoding="utf-8")
+
+
+def test_archive_records_before_the_first_run_extend_the_census_start(tmp_path):
+    """Records that reached the store before the earliest run (an import) are data, not a gap: the census start
+    moves back to the earliest record and those weeks are counted."""
+    db = _seed(tmp_path, "import.sqlite")
+    _run_since(db, "2026-10-10")                     # but ERX1 (2026-10-07) is still there
+    data = _collect(db, today=SUNDAY)
+    assert data["coverage"]["archive_since"] == "2026-10-07"
+    assert data["archive_by_vendor"]["series"]["Vendor Two"] == [None, None, 1, 0]
+    assert data["archive_by_vendor"]["coverage"]["uncovered_weeks"] == 2
+
+
+def test_movers_are_suppressed_when_the_windows_were_not_ingested_alike(tmp_path):
+    """DASH-01: the first weekly run falls inside the recent window, so the previous window holds only what
+    arrived by other routes. Ranking the difference would rank the ingestion change; the tables are suppressed,
+    the reason names the layer and the dates, and the page carries it without JavaScript."""
+    db = _seed(tmp_path, "mixed.sqlite")
+    _run_since(db, "2026-10-10")
+    data = _collect(db, today=SUNDAY)                # recent 2026-10-05..18, previous 2026-09-21..10-04
+    cov = data["movers_window"]["coverage"]
+    assert cov["instrument_papers"]["comparable"] is False and cov["companies"]["comparable"] is False
+    assert data["movers"]["instrument_papers"] == [] and data["movers"]["companies"] == []
+    assert cov["instrument_papers"]["reason"].startswith(
+        "the weekly runs (publication dates from 2026-10-10) cover the recent window (2026-10-05 through 2026-10-18) "
+        "only in part and the previous one (2026-09-21 through 2026-10-04) not at all")
+    out = tmp_path / "site-mixed"
+    dashboard.build(db, out, weeks=4, today=SUNDAY)
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "Instruments by papers: suppressed, because the weekly runs (publication dates from 2026-10-10)" in index
+    assert "Companies by mentions: suppressed, because" in index
+    assert "A table appears only when both windows were ingested alike." in index
+
+    # once the runs cover both windows the tables are back, with no suppression sentence
+    _run_since(db, "2026-09-21")
+    data = _collect(db, today=SUNDAY)
+    assert all(v["comparable"] for v in data["movers_window"]["coverage"].values())
+    assert {m["id"] for m in data["movers"]["instrument_papers"]} == {"inst-a", "inst-b"}
+    dashboard.build(db, out, weeks=4, today=SUNDAY)
+    assert "suppressed, because" not in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_movers_coverage_rules_layer_by_layer():
+    """The pure comparison: a layer must relate to both windows alike and fully or not at all."""
+    rel = dashboard._layer_relation
+    assert rel(None, None, "2026-09-21", "2026-10-04") == "unknown"
+    assert rel("2026-09-01", None, "2026-09-21", "2026-10-04") == "full"
+    assert rel("2026-09-25", None, "2026-09-21", "2026-10-04") == "partial"
+    assert rel("2026-10-05", None, "2026-09-21", "2026-10-04") == "none"
+    assert rel("2026-01-01", "2026-09-30", "2026-09-21", "2026-10-04") == "partial"
+    assert rel("2026-01-01", "2026-09-20", "2026-09-21", "2026-10-04") == "none"
+
+    window = {"span": 2, "offset": 0, "recent": ["2026-10-05", "2026-10-12"], "previous": ["2026-09-21", "2026-09-28"],
+              "excludes_current_week": False}
+    nothing = {"runs_since": None, "backfill_from": None, "backfill_to": None, "archive_since": None, "papers_since": None}
+    # no recorded layer: compared as before (a store built outside the pipeline)
+    assert all(v["comparable"] for v in dashboard._movers_coverage(window, nothing).values())
+    # the backfill ends between the windows while the runs cover both: suppressed, and the backfill is named
+    cov = dict(nothing, runs_since="2026-09-01", backfill_from="2026-01-01", backfill_to="2026-09-30", archive_since="2026-09-01")
+    out = dashboard._movers_coverage(window, cov)
+    assert out["instrument_papers"]["comparable"] is False
+    assert out["instrument_papers"]["reason"].startswith("the backfilled months (2026-01-01 to 2026-09-30) cover the recent window")
+    assert out["archive_experiments"]["comparable"] is True
+    # a backfill that covers both windows and runs that cover both: comparable
+    cov = dict(cov, backfill_to="2026-10-31")
+    assert all(v["comparable"] for v in dashboard._movers_coverage(window, cov).values())
+    # recorded layers that cover neither window: nothing to compare
+    cov = dict(nothing, runs_since="2026-11-01", archive_since="2026-11-01")
+    out = dashboard._movers_coverage(window, cov)
+    assert out["companies"]["reason"].startswith("no run, backfill or census recorded in this store covers the compared weeks (2026-09-21 through 2026-10-18)")
+    # too few complete weeks: nothing to compare and nothing to explain (the note already says so)
+    assert dashboard._movers_coverage({"span": 0}, cov) == {k: {"comparable": False, "reason": ""} for k in dashboard.MOVERS_LAYERS}
+
+
+def test_backfill_layer_is_read_and_marks_the_papers_boundary(tmp_path):
+    """A recorded backfill extends paper coverage back to its first month (those weeks are measured zeros, not
+    n/a), the papers chart marks the week the weekly runs begin, and a backfill that stops between the movers'
+    windows suppresses the paper tables while the archive table - fed by the runs alone - stays."""
+    db = _seed(tmp_path, "backfill.sqlite")
+    _run_since(db, "2026-08-24")
+    st = Store(db)
+    backfill.ensure_schema(st)
+    st.conn.executemany("INSERT INTO backfill_progress (subgroup, month, country, fetched, done_at, cap) VALUES (?,?,?,?,?,?)",
+                        [("spatial", m, "", 10, "2026-10-01T00:00:00Z", 0) for m in ("2026-07", "2026-08", "2026-09")])
+    st.commit()
+    st.close()
+    data = _collect(db, weeks=10, today=SUNDAY)      # axis 2026-08-10 .. 2026-10-12
+    assert data["coverage"] == {"runs_since": "2026-08-24", "backfill_from": "2026-07-01", "backfill_to": "2026-09-30",
+                                "archive_since": "2026-08-24", "papers_since": "2026-07-01"}
+    pcov = data["papers_per_week"]["coverage"]
+    assert pcov["uncovered_weeks"] == 0 and pcov["runs_week_index"] == 2       # two backfill-only weeks lead the axis
+    assert data["papers_per_week"]["total"] == [0, 0, 0, 0, 0, 0, 0, 0, 1, 3]  # backfilled weeks are measured zeros
+    assert data["archive_by_vendor"]["coverage"]["uncovered_weeks"] == 2       # the census is the runs' alone
+    window = data["movers_window"]                   # recent 2026-09-21..10-18, previous 2026-08-24..09-20
+    assert window["span"] == 4 and window["previous"][0] == "2026-08-24"
+    cov = window["coverage"]
+    assert cov["instrument_papers"]["comparable"] is False and cov["companies"]["comparable"] is False
+    assert cov["instrument_papers"]["reason"].startswith(
+        "the backfilled months (2026-07-01 to 2026-09-30) cover the recent window (2026-09-21 through 2026-10-18) only in part "
+        "and the previous one (2026-08-24 through 2026-09-20) fully")
+    assert cov["archive_experiments"]["comparable"] is True
+    assert data["movers"]["instrument_papers"] == [] and data["movers"]["archive_experiments"]
+    out = tmp_path / "site-backfill"
+    dashboard.build(db, out, weeks=10, today=SUNDAY)
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert ("The dashed line marks 2026-08-24, the first publication date the weekly multi-source runs cover; earlier "
+            "weeks hold backfilled publication metadata only, so a step there is a change of ingestion, not of "
+            "publishing.") in index
+    assert "Instruments by papers: suppressed, because the backfilled months (2026-07-01 to 2026-09-30)" in index
+
+
+def test_first_of_month_dates_from_a_padding_source_are_kept_out_of_weekly_series(tmp_path):
+    """DASH-02: OpenAlex pads month- and year-precision dates to the 1st. Such papers have no publication week:
+    they leave the headline chart, the vendor chart, the entity series and the movers, are counted apart per week,
+    and the page says how many. The same date from a source that does not pad is an ordinary paper."""
+    db = _seed(tmp_path, "padded.sqlite")
+    st = Store(db)
+    st.upsert_paper(_paper(10, pub_date="2026-10-01", source="openalex", kind="article"))    # week of 2026-09-28
+    st.upsert_paper(_paper(11, pub_date="2026-10-01", source="openalex", kind="article"))
+    st.upsert_paper(_paper(12, pub_date="2026-10-01", source="crossref", kind="article"))    # a real 1st: stays
+    st.upsert_paper(_paper(13, pub_date="2026-10-02", source="openalex", kind="article"))    # day precision: stays
+    st.replace_mentions("doi:10.1000/dash10", [
+        Mention("doi:10.1000/dash10", "instrument", "inst-a", "Instrument A", "Vendor One", "VONE", "sequencer", "abstract", 1, "…"),
+        Mention("doi:10.1000/dash10", "company", "vendor-one", "Vendor One", "", "VONE", "", "affiliations", 1, "…"),
+    ])
+    st.replace_mentions("doi:10.1000/dash13", [
+        Mention("doi:10.1000/dash13", "instrument", "inst-a", "Instrument A", "Vendor One", "VONE", "sequencer", "abstract", 1, "…"),
+    ])
+    st.conn.execute("UPDATE papers SET first_seen='2026-10-13T00:00:00Z'")
+    st.commit()
+    st.close()
+
+    data = _collect(db)
+    pw = data["papers_per_week"]
+    assert pw["total"] == [0, 2, 1, 3]                       # crossref 10-01 and openalex 10-02 count; the padded two do not
+    assert pw["first_of_month"] == [0, 2, 0, 0] and pw["first_of_month_total"] == 2
+    assert pw["padded_sources"] == ["openalex"]
+    assert data["instruments_by_vendor"]["series"]["Vendor One"] == [0, 1, 1, 1]     # dash13 yes, dash10 no
+    inst = {e["id"]: e for e in data["instruments"]}
+    assert inst["inst-a"]["papers_per_week"] == [0, 1, 1, 1] and inst["inst-a"]["papers_total"] == 3
+    comp = {c["id"]: c for c in data["companies"]}
+    assert comp["vendor-one"]["author"] == [0, 0, 0, 1]      # the padded paper's affiliation mention is not a weekly count
+    movers = {m["id"]: m for m in data["movers"]["instrument_papers"]}
+    assert movers["inst-a"]["recent"] == 1 and movers["inst-a"]["previous"] == 1
+    # the list surfaces keep every paper: the padded ones are still searchable
+    assert {p["id"] for p in data["papers"]} >= {"doi:10.1000/dash10", "doi:10.1000/dash11"}
+
+    out = tmp_path / "site-padded"
+    dashboard.build(db, out, weeks=4, today=TODAY)
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "with a day-precision publication date" in index
+    assert ("2 papers dated the 1st of a month by a source that pads month- and year-precision dates to it (openalex) "
+            "are left out of every weekly series on this site") in index
+    assert '"first_of_month": [0, 2, 0, 0]' in index                   # the payload carries the uncharted column
+    assert dashboard._week_known_sql("x") == "NOT (COALESCE(x.source,'') IN ('openalex') AND substr(x.pub_date, 9, 2) = '01')"
+
+
+def test_page_script_renders_coverage_marks_and_na_cells():
+    """The client renders a null week as n/a, shades uncovered weeks, marks the runs boundary and explains a
+    suppressed movers table instead of showing an empty one."""
+    js = dashboard.APP_JS
+    assert 'return v === null ? "n/a" : (v || 0);' in js
+    assert "function coveragePlugin(marks)" in js and 'id: "litradarCoverage"' in js
+    assert 'coverageMarks(pw.coverage, "before any run or backfill")' in js
+    assert 'coverageMarks((data.archive_by_vendor || {}).coverage, "before the archive census")' in js
+    assert '"Dated to the 1st (not charted)"' in js
+    assert "Suppressed for this window: the compared weeks were not ingested alike" in js
+    assert "cell(e.papers_per_week[i]), cell(e.experiments_per_week[i])" in js

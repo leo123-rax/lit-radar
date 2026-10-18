@@ -17,7 +17,18 @@ What it reads (every table is optional; a missing table degrades to an empty sec
   timeseries(source, entity_id, model, month, count)   -- optional, written by other adapters
 
 Week buckets are ISO weeks keyed by the Monday (UTC). A paper is dated by `pub_date`, falling
-back to the date part of `first_seen` for feeds that carry no publication date.
+back to the date part of `first_seen` for feeds that carry no publication date. A paper whose
+date a padding source (PADDED_DATE_SOURCES: OpenAlex) stored as the 1st of a month has no known
+week - month- and year-precision dates are padded to the 1st - so every weekly series leaves it
+out and the overview reports how many; lists and the search index keep it.
+
+Coverage. The store records what its ingestion covered: `runs.since` (the weekly multi-source
+runs, which also take the archive census) and `backfill_progress` (months of publication metadata
+only). Weekly series are None - "n/a", never 0 - for the weeks before the earliest relevant
+record, charts shade those weeks and mark where the weekly runs begin after backfilled weeks,
+and the movers compare two windows only when every recorded layer covers both alike (fully or
+not at all); otherwise the table is suppressed and the page says which layer starts or ends
+inside the compared weeks. A store that records nothing is zero-filled and compared as before.
 
 "Optional" means exactly a missing table or column (`no such table` / `no such column`): those
 queries are skipped, logged and counted in the report. Any other database error - locked file,
@@ -201,8 +212,25 @@ def week_of(value: str) -> str:
     return monday(day).isoformat()
 
 
-def _series(buckets: Dict[str, Any], weeks: Sequence[str]) -> List[int]:
-    return [int(buckets.get(w, 0)) for w in weeks]
+def _week_end(monday_iso: str) -> str:
+    """The Sunday that closes the ISO week keyed by `monday_iso`."""
+    return (date.fromisoformat(monday_iso) + timedelta(days=6)).isoformat()
+
+
+def _series(buckets: Dict[str, Any], weeks: Sequence[str], covered_from: Optional[str] = None) -> List[Optional[int]]:
+    """Zero-fill the axis. When `covered_from` - the first day a run, backfill or census fetched for - is known, a
+    week that ends before it and holds nothing is None: never fetched for, not zero. A week before it that does hold
+    rows keeps its count. Without a recorded start every week is zero-filled, as a store built outside the pipeline
+    gives nothing better to go on."""
+    out: List[Optional[int]] = []
+    for w in weeks:
+        n = int(buckets.get(w, 0))
+        out.append(None if covered_from and n == 0 and _week_end(w) < covered_from else n)
+    return out
+
+
+def _total(series: Sequence[Optional[int]]) -> int:
+    return sum(v or 0 for v in series)
 
 
 def _paper_date_sql(alias: str = "p") -> str:
@@ -210,52 +238,79 @@ def _paper_date_sql(alias: str = "p") -> str:
     return f"COALESCE(NULLIF({alias}.pub_date,''), substr({alias}.first_seen,1,10))"
 
 
+# Sources that store a month- or year-precision publication date padded to the first of the month: OpenAlex pads
+# "2026-01" and "2026" alike to 2026-01-01 and exposes no precision flag. Such a paper has no publication week, so
+# every weekly series leaves it out and the overview says how many; the few papers really published on the 1st
+# cannot be told apart and go with them. Lists (recent papers, the search index) keep every paper.
+PADDED_DATE_SOURCES: Tuple[str, ...] = ("openalex",)
+
+
+def _week_known_sql(alias: str = "p") -> str:
+    """SQL predicate: the paper's publication week is known (not a first-of-month date from a padding source)."""
+    sources = ", ".join(f"'{s}'" for s in PADDED_DATE_SOURCES)
+    return f"NOT (COALESCE({alias}.source,'') IN ({sources}) AND substr({alias}.pub_date, 9, 2) = '01')"
+
+
 # ---------------------------------------------------------------------------- collection
-def _papers_per_week(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> Dict[str, Any]:
-    expr = _paper_date_sql()
+def _papers_per_week(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
+                     covered_from: Optional[str] = None) -> Dict[str, Any]:
+    """Papers per week whose publication week is known. Papers dated the 1st of a month by a padding source
+    (PADDED_DATE_SOURCES) are counted apart in `first_of_month`, by the week their padded date falls in, and never
+    enter `total` or `by_kind`: charted as published they draw a sawtooth of month boundaries."""
+    expr, known = _paper_date_sql(), _week_known_sql()
     rows = _q(
         conn,
-        f"SELECT {expr} AS d, COALESCE(NULLIF(p.kind,''),'article') AS k, COUNT(*) "
-        f"FROM papers p WHERE {expr} >= ? AND {expr} <= ? GROUP BY d, k",
+        f"SELECT {expr} AS d, COALESCE(NULLIF(p.kind,''),'article') AS k, {known} AS known, COUNT(*) "
+        f"FROM papers p WHERE {expr} >= ? AND {expr} <= ? GROUP BY d, k, known",
         (start, end),
     )
     total: Dict[str, int] = defaultdict(int)
+    padded: Dict[str, int] = defaultdict(int)
     by_kind: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for d, kind, n in rows:
+    for d, kind, known_week, n in rows:
         w = week_of(d)
         if not w:
+            continue
+        if not known_week:
+            padded[w] += n
             continue
         total[w] += n
         by_kind[kind][w] += n
     return {
-        "total": _series(total, weeks),
-        "by_kind": {k: _series(v, weeks) for k, v in sorted(by_kind.items())},
+        "total": _series(total, weeks, covered_from),
+        "by_kind": {k: _series(v, weeks, covered_from) for k, v in sorted(by_kind.items())},
+        "first_of_month": _series(padded, weeks),
+        "first_of_month_total": sum(padded.values()),
+        "padded_sources": list(PADDED_DATE_SOURCES),
     }
 
 
-def _fold_tail(series: Dict[str, List[int]], keep: int) -> Dict[str, List[int]]:
-    """Keep the `keep` largest series by total; sum the rest into 'Other' (never invent a 9th hue)."""
+def _fold_tail(series: Dict[str, List[Optional[int]]], keep: int) -> Dict[str, List[Optional[int]]]:
+    """Keep the `keep` largest series by total; sum the rest into 'Other' (never invent a 9th hue). A week that is
+    None (not covered) in every folded series stays None in 'Other'."""
     if len(series) <= keep:
-        return dict(sorted(series.items(), key=lambda kv: -sum(kv[1])))
-    ordered = sorted(series.items(), key=lambda kv: -sum(kv[1]))
+        return dict(sorted(series.items(), key=lambda kv: -_total(kv[1])))
+    ordered = sorted(series.items(), key=lambda kv: -_total(kv[1]))
     head = dict(ordered[:keep])
     tail = ordered[keep:]
     width = len(next(iter(series.values()))) if series else 0
-    other = [0] * width
+    other: List[Optional[int]] = [None] * width
     for _, vals in tail:
         for i, v in enumerate(vals):
-            other[i] += v
+            if v is not None:
+                other[i] = (other[i] or 0) + v
     head["Other"] = other
     return head
 
 
-def _instrument_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> Dict[str, Any]:
+def _instrument_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
+                                covered_from: Optional[str] = None) -> Dict[str, Any]:
     expr = _paper_date_sql()
     rows = _q(
         conn,
         f"SELECT {expr} AS d, COALESCE(NULLIF(m.vendor,''),'unattributed') AS vendor, COUNT(DISTINCT m.paper_id) "
         f"FROM mentions m JOIN papers p ON p.id = m.paper_id "
-        f"WHERE m.kind='instrument' AND {expr} >= ? AND {expr} <= ? GROUP BY d, vendor",
+        f"WHERE m.kind='instrument' AND {expr} >= ? AND {expr} <= ? AND {_week_known_sql()} GROUP BY d, vendor",
         (start, end),
     )
     by_vendor: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -263,12 +318,13 @@ def _instrument_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], star
         w = week_of(d)
         if w:
             by_vendor[vendor][w] += n
-    series = {v: _series(b, weeks) for v, b in by_vendor.items()}
+    series = {v: _series(b, weeks, covered_from) for v, b in by_vendor.items()}
     return {"series": _fold_tail(series, MAX_STACK_SERIES)}
 
 
-def _archive_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> Dict[str, Any]:
-    """Experiments per week by vendor.
+def _archive_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
+                             covered_from: Optional[str] = None) -> Dict[str, Any]:
+    """Experiments per week by vendor. Weeks before `covered_from` (the start of the archive census) are None.
 
     Records whose declared model is not in the gazetteer carry no vendor, so the archive's own
     `instrument_platform` stands in, translated through PLATFORM_VENDORS when the code is a known
@@ -294,8 +350,167 @@ def _archive_weeks_by_vendor(conn: sqlite3.Connection, weeks: List[str], start: 
         if current is None or (current.isupper() and not str(vendor).isupper()):
             display[key] = str(vendor)
         by_vendor[key][w] += n
-    series = {display.get(k, k): _series(b, weeks) for k, b in by_vendor.items()}
+    series = {display.get(k, k): _series(b, weeks, covered_from) for k, b in by_vendor.items()}
     return {"series": _fold_tail(series, MAX_STACK_SERIES)}
+
+
+# ---------------------------------------------------------------------------- ingestion coverage
+def _iso_day(value: Any) -> Optional[str]:
+    """'YYYY-MM-DD' from a date or timestamp string, or None when it does not parse."""
+    try:
+        return date.fromisoformat(str(value or "")[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _month_bounds(month: Any) -> Tuple[Optional[str], Optional[str]]:
+    """(first day, last day) of a 'YYYY-MM' string, or (None, None) when it does not parse."""
+    first = _iso_day(f"{str(month or '')[:7]}-01")
+    if not first:
+        return None, None
+    d = date.fromisoformat(first)
+    last = (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return first, last.isoformat()
+
+
+def _earliest(*values: Optional[str]) -> Optional[str]:
+    known = [v for v in values if v]
+    return min(known) if known else None
+
+
+def _coverage(conn: sqlite3.Connection, tables: set) -> Dict[str, Optional[str]]:
+    """Where the ingestion that built this store starts and stops, from the records the pipeline keeps.
+
+    runs_since     the earliest `runs.since`: from that publication date on the weekly runs fetched every configured
+                   source (full text where available, hence Methods-level mentions) and took the archive census.
+    backfill_from  the first day of the earliest month in `backfill_progress`, backfill_to the last day of the
+                   latest: publication metadata only (title- and abstract-level mentions) for those months.
+    archive_since  the earlier of runs_since and the earliest archive record: the census had not run before it.
+    papers_since   the earlier of runs_since and backfill_from: no run fetched papers for the weeks before it.
+    A value is None when the store carries no such record; a missing table is not an error. The same two
+    records drive the coverage flags of the weekly trends report, so the two surfaces agree."""
+    runs_since = None
+    if "runs" in tables:
+        rows = _q(conn, "SELECT MIN(since) FROM runs WHERE since IS NOT NULL AND since != ''")
+        runs_since = _iso_day(rows[0][0]) if rows and rows[0] else None
+    backfill_from = backfill_to = None
+    if "backfill_progress" in tables:
+        rows = _q(conn, "SELECT MIN(month), MAX(month) FROM backfill_progress WHERE month IS NOT NULL AND month != ''")
+        if rows and rows[0] and rows[0][0]:
+            backfill_from, _ = _month_bounds(rows[0][0])
+            _, backfill_to = _month_bounds(rows[0][1])
+    archive_min = None
+    if "archive_records" in tables:
+        rows = _q(conn, "SELECT MIN(first_public) FROM archive_records WHERE first_public IS NOT NULL AND first_public != ''")
+        archive_min = _iso_day(rows[0][0]) if rows and rows[0] else None
+    return {
+        "runs_since": runs_since,
+        "backfill_from": backfill_from,
+        "backfill_to": backfill_to,
+        "archive_since": _earliest(runs_since, archive_min),
+        "papers_since": _earliest(runs_since, backfill_from),
+    }
+
+
+def _axis_coverage(weeks: Sequence[str], since: Optional[str]) -> Dict[str, Any]:
+    """How a week axis relates to an ingestion start: how many leading weeks end before `since` (never fetched for),
+    which week is the first covered one and how many of its days `since` leaves."""
+    if not since:
+        return {"since": None, "uncovered_weeks": 0, "first_week": None, "first_week_days": 0}
+    uncovered = sum(1 for w in weeks if _week_end(w) < since)
+    first = weeks[uncovered] if uncovered < len(weeks) else None
+    days = 0
+    if first:
+        begin = max(date.fromisoformat(since), date.fromisoformat(first))
+        days = (date.fromisoformat(_week_end(first)) - begin).days + 1
+    return {"since": since, "uncovered_weeks": uncovered, "first_week": first, "first_week_days": days}
+
+
+def _papers_axis_coverage(weeks: Sequence[str], cov: Dict[str, Optional[str]]) -> Dict[str, Any]:
+    """The papers axis against both paper layers: the uncovered lead (before any run or backfill), the layer dates,
+    and `runs_week_index` - the first axis week the weekly runs cover when backfilled weeks precede it, where the
+    chart draws its boundary (None when the runs cover the whole axis, none of it, or no backfill precedes them)."""
+    out = _axis_coverage(weeks, cov.get("papers_since"))
+    runs_since, backfill_from = cov.get("runs_since"), cov.get("backfill_from")
+    out.update({"runs_since": runs_since, "backfill_from": backfill_from, "backfill_to": cov.get("backfill_to")})
+    boundary = None
+    if runs_since and backfill_from and backfill_from < runs_since:
+        before = sum(1 for w in weeks if _week_end(w) < runs_since)
+        if 0 < before < len(weeks):
+            boundary = before
+    out["runs_week_index"] = boundary
+    return out
+
+
+def _layer_relation(start: Optional[str], end: Optional[str], span_start: str, span_end: str) -> str:
+    """How an ingestion layer covering the days `start`..`end` (`end` None = open-ended) relates to a span of days:
+    'full', 'partial', 'none', or 'unknown' when the layer is not recorded."""
+    if not start:
+        return "unknown"
+    if start > span_end or (end is not None and end < span_start):
+        return "none"
+    if start <= span_start and (end is None or end >= span_end):
+        return "full"
+    return "partial"
+
+
+_RELATION_WORDS = {"full": "fully", "partial": "only in part", "none": "not at all"}
+
+# Which ingestion layers feed each movers table: paper mentions come from the weekly runs and the backfill, archive
+# experiments from the census the weekly runs take.
+MOVERS_LAYERS: Dict[str, Tuple[str, ...]] = {
+    "instrument_papers": ("runs", "backfill"),
+    "archive_experiments": ("archive",),
+    "companies": ("runs", "backfill"),
+}
+MOVERS_LABELS = {
+    "instrument_papers": "Instruments by papers",
+    "archive_experiments": "Instruments by archive experiments",
+    "companies": "Companies by mentions",
+}
+
+
+def _movers_coverage(window: Dict[str, Any], cov: Dict[str, Optional[str]]) -> Dict[str, Dict[str, Any]]:
+    """Per movers table: may the two windows be compared?
+
+    They may when every recorded ingestion layer that feeds the table relates to both windows alike, and fully or
+    not at all. A layer that starts, stops or runs partly inside the compared weeks - a first weekly run
+    mid-window, a census that began last month, a backfill that ends between the windows - makes the difference
+    one of coverage rather than of the literature, so the table is suppressed and the reason is given. A store
+    that records no layer at all is compared as before; one whose recorded layers cover neither window is not."""
+    span = int(window.get("span") or 0)
+    if span < 1:
+        return {k: {"comparable": False, "reason": ""} for k in MOVERS_LAYERS}
+    recent = (window["recent"][0], _week_end(window["recent"][-1]))
+    previous = (window["previous"][0], _week_end(window["previous"][-1]))
+    # (start, end, subject, verb): the windows are day spans, written "first day through last day"
+    layers = {
+        "runs": (cov.get("runs_since"), None, f"the weekly runs (publication dates from {cov.get('runs_since')})", "cover"),
+        "backfill": (cov.get("backfill_from"), cov.get("backfill_to"),
+                     f"the backfilled months ({cov.get('backfill_from')} to {cov.get('backfill_to')})", "cover"),
+        "archive": (cov.get("archive_since"), None, f"the archive census (records public from {cov.get('archive_since')})", "covers"),
+    }
+    out: Dict[str, Dict[str, Any]] = {}
+    for table, names in MOVERS_LAYERS.items():
+        recorded = covered = False
+        reason = ""
+        for name in names:
+            start, end, label, verb = layers[name]
+            r, p = _layer_relation(start, end, *recent), _layer_relation(start, end, *previous)
+            if r == "unknown":
+                continue
+            recorded = True
+            if r != p or "partial" in (r, p):
+                reason = (f"{label} {verb} the recent window ({recent[0]} through {recent[1]}) {_RELATION_WORDS[r]} and "
+                          f"the previous one ({previous[0]} through {previous[1]}) {_RELATION_WORDS[p]}, so the two were "
+                          f"not ingested alike and a change between them would be one of coverage, not of the literature")
+                break
+            covered = covered or r == "full"
+        if not reason and recorded and not covered:
+            reason = (f"no run, backfill or census recorded in this store covers the compared weeks "
+                      f"({previous[0]} through {recent[1]})")
+        out[table] = {"comparable": not reason, "reason": reason}
+    return out
 
 
 def _movers_window(weeks: List[str], today: date, span: int = MOVERS_SPAN) -> Dict[str, Any]:
@@ -328,8 +543,8 @@ def _movers(labels: Dict[str, str], weekly: Dict[str, List[int]], window: Dict[s
     out = []
     for key, vals in weekly.items():
         stop = len(vals) - offset
-        recent = sum(vals[stop - span:stop])
-        previous = sum(vals[stop - 2 * span:stop - span])
+        recent = _total(vals[stop - span:stop])
+        previous = _total(vals[stop - 2 * span:stop - span])
         if recent == 0 and previous == 0:
             continue
         out.append({
@@ -344,18 +559,20 @@ def _movers(labels: Dict[str, str], weekly: Dict[str, List[int]], window: Dict[s
     return out[:MAX_MOVERS]
 
 
-def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> List[Dict[str, Any]]:
+def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
+                         papers_from: Optional[str] = None, archive_from: Optional[str] = None) -> List[Dict[str, Any]]:
     """Every instrument entity with any signal in the window: papers per week and experiments per week.
 
     Returns ALL of them - the caller decides which get a card. Movers must be computed over the
     full list, or an archive-heavy sequencer that few papers name would vanish from both.
+    `papers_from` / `archive_from` are the ingestion starts the two series are None before.
     """
     expr = _paper_date_sql()
     rows = _q(
         conn,
         f"SELECT m.entity_id, MAX(m.entity_name), MAX(m.vendor), MAX(m.ticker), {expr} AS d, COUNT(DISTINCT m.paper_id) "
         f"FROM mentions m JOIN papers p ON p.id = m.paper_id "
-        f"WHERE m.kind='instrument' AND {expr} >= ? AND {expr} <= ? GROUP BY m.entity_id, d",
+        f"WHERE m.kind='instrument' AND {expr} >= ? AND {expr} <= ? AND {_week_known_sql()} GROUP BY m.entity_id, d",
         (start, end),
     )
     meta: Dict[str, Dict[str, str]] = {}
@@ -389,8 +606,8 @@ def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str,
     entities = []
     for eid in set(list(papers) + list(experiments)):
         info = meta.get(eid, {"name": eid, "vendor": "", "ticker": ""})
-        pw = _series(papers.get(eid, {}), weeks)
-        aw = _series(experiments.get(eid, {}), weeks)
+        pw = _series(papers.get(eid, {}), weeks, papers_from)
+        aw = _series(experiments.get(eid, {}), weeks, archive_from)
         entities.append({
             "id": eid,
             "name": info["name"],
@@ -398,8 +615,8 @@ def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str,
             "ticker": _ticker(info["ticker"]),
             "papers_per_week": pw,
             "experiments_per_week": aw,
-            "papers_total": sum(pw),
-            "experiments_total": sum(aw),
+            "papers_total": _total(pw),
+            "experiments_total": _total(aw),
         })
     entities.sort(key=lambda e: (-e["papers_total"], -e["experiments_total"], e["name"]))
     return entities
@@ -433,13 +650,15 @@ def _recent_papers(conn: sqlite3.Connection, entity_id: str, start: str, end: st
     return [{"title": t or "(untitled)", "url": u or "", "journal": j or "", "date": d or ""} for t, u, j, d in rows]
 
 
-def _company_entities(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> List[Dict[str, Any]]:
+def _company_entities(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
+                      covered_from: Optional[str] = None) -> List[Dict[str, Any]]:
     expr = _paper_date_sql()
     rows = _q(
         conn,
         f"SELECT m.entity_id, MAX(m.entity_name), MAX(m.ticker), m.section, {expr} AS d, COUNT(DISTINCT m.paper_id) "
         f"FROM mentions m JOIN papers p ON p.id = m.paper_id "
-        f"WHERE m.kind='company' AND {expr} >= ? AND {expr} <= ? GROUP BY m.entity_id, m.section, d",
+        f"WHERE m.kind='company' AND {expr} >= ? AND {expr} <= ? AND {_week_known_sql()} "
+        f"GROUP BY m.entity_id, m.section, d",
         (start, end),
     )
     meta: Dict[str, Dict[str, str]] = {}
@@ -465,9 +684,9 @@ def _company_entities(conn: sqlite3.Connection, weeks: List[str], start: str, en
     entities = []
     for eid, buckets in roles.items():
         info = meta.get(eid, {"name": eid, "ticker": ""})
-        author = _series(buckets["author"], weeks)
-        funding = _series(buckets["funding_coi"], weeks)
-        subject = _series(buckets["subject"], weeks)
+        author = _series(buckets["author"], weeks, covered_from)
+        funding = _series(buckets["funding_coi"], weeks, covered_from)
+        subject = _series(buckets["subject"], weeks, covered_from)
         news = news_counts.get(eid) or news_counts.get(info["name"]) or [0] * len(weeks)
         entities.append({
             "id": eid,
@@ -477,8 +696,8 @@ def _company_entities(conn: sqlite3.Connection, weeks: List[str], start: str, en
             "funding_coi": funding,
             "subject": subject,
             "news": news,
-            "total": sum(author) + sum(funding) + sum(subject),
-            "news_total": sum(news),
+            "total": _total(author) + _total(funding) + _total(subject),
+            "news_total": _total(news),
             "unlisted": str(eid).startswith("unlisted:"),
         })
     entities.sort(key=lambda e: (-e["total"], e["name"]))
@@ -510,9 +729,10 @@ def _news_per_company(conn: sqlite3.Connection, weeks: List[str], start: str, en
     return {c: _series(b, weeks) for c, b in buckets.items()}
 
 
-def _subgroups(conn: sqlite3.Connection, weeks: List[str], start: str, end: str, tables: set) -> Dict[str, Any]:
+def _subgroups(conn: sqlite3.Connection, weeks: List[str], start: str, end: str, tables: set,
+               covered_from: Optional[str] = None) -> Dict[str, Any]:
     """Papers per week per subgroup: tracked-author hits, plus keyword assignment from extra_json when present."""
-    expr = _paper_date_sql()
+    expr, known = _paper_date_sql(), _week_known_sql()
     counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     sources = set()
     if "tracked_author_hits" in tables:
@@ -520,7 +740,7 @@ def _subgroups(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
             conn,
             f"SELECT t.subgroup, {expr} AS d, COUNT(DISTINCT t.paper_id) "
             f"FROM tracked_author_hits t JOIN papers p ON p.id = t.paper_id "
-            f"WHERE {expr} >= ? AND {expr} <= ? GROUP BY t.subgroup, d",
+            f"WHERE {expr} >= ? AND {expr} <= ? AND {known} GROUP BY t.subgroup, d",
             (start, end),
         )
         for group, d, n in rows:
@@ -532,7 +752,7 @@ def _subgroups(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
     keyword_rows = _q(
         conn,
         f"SELECT {expr} AS d, p.extra_json FROM papers p "
-        f"WHERE {expr} >= ? AND {expr} <= ? AND p.extra_json LIKE '%subgroup%'",
+        f"WHERE {expr} >= ? AND {expr} <= ? AND {known} AND p.extra_json LIKE '%subgroup%'",
         (start, end),
     )
     for d, extra_json in keyword_rows:
@@ -544,7 +764,7 @@ def _subgroups(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
             sources.add("keyword assignment (extra_json)")
 
     groups = [
-        {"id": g, "counts": _series(b, weeks), "total": sum(_series(b, weeks))}
+        {"id": g, "counts": _series(b, weeks, covered_from), "total": sum(b.values())}
         for g, b in counts.items()
     ]
     groups.sort(key=lambda g: (-g["total"], g["id"]))
@@ -575,9 +795,10 @@ def _extra_subgroups(extra_json: Optional[str]) -> List[str]:
     return []
 
 
-def _countries(conn: sqlite3.Connection, weeks: List[str], start: str, end: str) -> Dict[str, Any]:
+def _countries(conn: sqlite3.Connection, weeks: List[str], start: str, end: str,
+               covered_from: Optional[str] = None) -> Dict[str, Any]:
     """Papers per week by country of first affiliation, when the store carries one."""
-    expr = _paper_date_sql()
+    expr, known = _paper_date_sql(), _week_known_sql()
     columns = _columns(conn, "papers")
     buckets: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     source = None
@@ -585,7 +806,8 @@ def _countries(conn: sqlite3.Connection, weeks: List[str], start: str, end: str)
         rows = _q(
             conn,
             f"SELECT {expr} AS d, p.country, COUNT(*) FROM papers p "
-            f"WHERE {expr} >= ? AND {expr} <= ? AND p.country IS NOT NULL AND p.country != '' GROUP BY d, p.country",
+            f"WHERE {expr} >= ? AND {expr} <= ? AND {known} AND p.country IS NOT NULL AND p.country != '' "
+            f"GROUP BY d, p.country",
             (start, end),
         )
         for d, country, n in rows:
@@ -597,7 +819,7 @@ def _countries(conn: sqlite3.Connection, weeks: List[str], start: str, end: str)
         rows = _q(
             conn,
             f"SELECT {expr} AS d, p.extra_json FROM papers p "
-            f"WHERE {expr} >= ? AND {expr} <= ? AND p.extra_json LIKE '%countr%'",
+            f"WHERE {expr} >= ? AND {expr} <= ? AND {known} AND p.extra_json LIKE '%countr%'",
             (start, end),
         )
         hits = 0
@@ -609,7 +831,7 @@ def _countries(conn: sqlite3.Connection, weeks: List[str], start: str, end: str)
                 hits += 1
         if hits:
             source = "extra_json.country"
-    countries = [{"code": c, "counts": _series(b, weeks), "total": sum(_series(b, weeks))} for c, b in buckets.items()]
+    countries = [{"code": c, "counts": _series(b, weeks, covered_from), "total": sum(b.values())} for c, b in buckets.items()]
     countries.sort(key=lambda c: (-c["total"], c["code"]))
     folded = _fold_tail({c["code"]: c["counts"] for c in countries}, MAX_STACK_SERIES)
     return {
@@ -818,26 +1040,42 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
     have_archive = "archive_records" in tables
     have_news = "news_items" in tables
 
-    papers_week = _papers_per_week(conn, axis, start, end) if have_papers else {"total": [0] * weeks, "by_kind": {}}
-    instruments_vendor = _instrument_weeks_by_vendor(conn, axis, start, end) if have_mentions else {"series": {}}
-    archive_vendor = _archive_weeks_by_vendor(conn, axis, start, end) if have_archive else {"series": {}}
-    all_instruments = _instrument_entities(conn, axis, start, end) if (have_mentions or have_archive) else []
-    company_entities = _company_entities(conn, axis, start, end) if have_mentions else []
+    # what the store's ingestion covered: weekly series are None before it, movers compare only alike-covered windows
+    cov = _coverage(conn, tables)
+    papers_since, archive_since = cov["papers_since"], cov["archive_since"]
+
+    papers_week = _papers_per_week(conn, axis, start, end, papers_since) if have_papers else {
+        "total": [0] * weeks, "by_kind": {}, "first_of_month": [0] * weeks, "first_of_month_total": 0,
+        "padded_sources": list(PADDED_DATE_SOURCES),
+    }
+    papers_week["coverage"] = _papers_axis_coverage(axis, cov)
+    instruments_vendor = _instrument_weeks_by_vendor(conn, axis, start, end, papers_since) if have_mentions else {"series": {}}
+    archive_vendor = _archive_weeks_by_vendor(conn, axis, start, end, archive_since) if have_archive else {"series": {}}
+    archive_vendor["coverage"] = _axis_coverage(axis, archive_since)
+    all_instruments = (_instrument_entities(conn, axis, start, end, papers_since, archive_since)
+                       if (have_mentions or have_archive) else [])
+    company_entities = _company_entities(conn, axis, start, end, papers_since) if have_mentions else []
     if not have_news:
         for c in company_entities:
             c["news"], c["news_total"] = [0] * weeks, 0
 
-    # movers over EVERY entity; cards for the union of the two top-N lists
+    # movers over EVERY entity; cards for the union of the two top-N lists. A table whose two windows were not
+    # ingested alike (a run, census or backfill starting or ending inside them) is suppressed, with the reason.
     window = _movers_window(axis, today)
+    window["coverage"] = _movers_coverage(window, cov)
+    comparable = {k: bool(v.get("comparable")) for k, v in window["coverage"].items()}
     labels = {e["id"]: e["name"] for e in all_instruments}
-    movers_papers = _movers(labels, {e["id"]: e["papers_per_week"] for e in all_instruments}, window)
-    movers_archive = _movers(labels, {e["id"]: e["experiments_per_week"] for e in all_instruments}, window)
+    movers_papers = (_movers(labels, {e["id"]: e["papers_per_week"] for e in all_instruments}, window)
+                     if comparable.get("instrument_papers") else [])
+    movers_archive = (_movers(labels, {e["id"]: e["experiments_per_week"] for e in all_instruments}, window)
+                      if comparable.get("archive_experiments") else [])
     company_labels = {c["id"]: c["name"] for c in company_entities}
     movers_companies = _movers(
         company_labels,
-        {c["id"]: [a + f + s for a, f, s in zip(c["author"], c["funding_coi"], c["subject"])] for c in company_entities},
+        {c["id"]: [(a or 0) + (f or 0) + (s or 0) for a, f, s in zip(c["author"], c["funding_coi"], c["subject"])]
+         for c in company_entities},
         window,
-    )
+    ) if comparable.get("companies") else []
     instrument_cards = _select_instrument_cards(all_instruments, limit=MAX_INSTRUMENT_CARDS)
     for e in instrument_cards:
         e["recent_papers"] = _recent_papers(conn, e["id"], start, end) if have_mentions else []
@@ -853,6 +1091,7 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
         "weeks": axis,
         "window": {"start": start, "end": end, "weeks": weeks},
         "totals": totals,
+        "coverage": cov,
         "papers_per_week": papers_week,
         "instruments_by_vendor": instruments_vendor,
         "archive_by_vendor": archive_vendor,
@@ -862,9 +1101,9 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
         "instruments": instrument_cards,
         "instruments_total": len(all_instruments),
         "companies": company_entities,
-        "subgroups": _subgroups(conn, axis, start, end, tables) if have_papers else
+        "subgroups": _subgroups(conn, axis, start, end, tables, papers_since) if have_papers else
                      {"available": False, "sources": [], "groups": [], "series": {}, "folded": False},
-        "countries": _countries(conn, axis, start, end) if have_papers else
+        "countries": _countries(conn, axis, start, end, papers_since) if have_papers else
                      {"available": False, "source": None, "series": {}, "table": []},
         "timeseries": _timeseries(conn, tables),
         "timeseries_page": _timeseries_page(conn, tables, config_dir),
@@ -997,22 +1236,70 @@ def _movers_note(window: Dict[str, Any]) -> str:
     return text
 
 
+def _uncovered_sentence(cov: Dict[str, Any], what: str) -> str:
+    """The sentence a chart carries when its axis begins before the ingestion that feeds it: how many leading weeks
+    were never fetched for (shaded, n/a when empty) and how much of the first covered week the start leaves."""
+    n = int(cov.get("uncovered_weeks") or 0)
+    if not n or not cov.get("since"):
+        return ""
+    plural = n != 1
+    text = (f" {what} in this store starts {cov['since']}: the {n} earlier week{'s' if plural else ''} (shaded) "
+            f"{'were' if plural else 'was'} never fetched for, and an empty one is shown as n/a, not as zero")
+    days = int(cov.get("first_week_days") or 0)
+    if cov.get("first_week") and 0 < days < 7:
+        text += f"; the week of {cov['first_week']} holds {days} day{'s' if days != 1 else ''} of records"
+    return text + "."
+
+
+def _papers_note(data: Dict[str, Any]) -> str:
+    pw = data["papers_per_week"]
+    text = ("Every paper and preprint in the corpus with a day-precision publication date, bucketed by publication "
+            "week (ISO weeks, Monday-keyed). One series: the trend is the point.")
+    padded = int(pw.get("first_of_month_total") or 0)
+    if padded:
+        sources = ", ".join(pw.get("padded_sources") or [])
+        text += (f" {padded:,} papers dated the 1st of a month by a source that pads month- and year-precision dates "
+                 f"to it ({sources}) are left out of every weekly series on this site and listed in the table's "
+                 "second column: their publication week is unknown, and the few really published on the 1st cannot "
+                 "be told apart.")
+    cov = pw.get("coverage") or {}
+    text += _uncovered_sentence(cov, "Paper ingestion (the earliest run or backfill)")
+    if cov.get("runs_week_index") is not None:
+        text += (f" The dashed line marks {cov['runs_since']}, the first publication date the weekly multi-source runs "
+                 "cover; earlier weeks hold backfilled publication metadata only, so a step there is a change of "
+                 "ingestion, not of publishing.")
+    return text
+
+
+def _archive_note(data: Dict[str, Any]) -> str:
+    text = ("Sequencing experiments made public in public archives in that week, by the vendor behind the "
+            "declared instrument model. This is a census of machines producing data, not of papers.")
+    return text + _uncovered_sentence(data["archive_by_vendor"].get("coverage") or {}, "The archive census")
+
+
+def _movers_suppressed(window: Dict[str, Any]) -> str:
+    """One sentence per movers table whose windows were not ingested alike, naming the layer and the dates."""
+    parts = []
+    for key, info in (window.get("coverage") or {}).items():
+        if not info.get("comparable") and info.get("reason"):
+            parts.append(f" {MOVERS_LABELS.get(key, key)}: suppressed, because {info['reason']}.")
+    return "".join(parts)
+
+
 def _index_html(data: Dict[str, Any]) -> str:
     body = (
-        _card("Papers per week", "Every paper and preprint in the corpus, bucketed by publication week "
-              "(ISO weeks, Monday-keyed). One series: the trend is the point.", "papers-week")
+        _card("Papers per week", _papers_note(data), "papers-week")
         + _card("Instruments named per week, by vendor",
                 "Distinct papers whose title, abstract or Methods name an instrument from the gazetteer, "
-                "stacked by the instrument's vendor. A paper naming two vendors counts once per vendor.",
+                "stacked by the instrument's vendor. A paper naming two vendors counts once per vendor. "
+                "Papers without a day-precision date are left out, as on the chart above.",
                 "instruments-week")
-        + _card("Archive experiments per week, by vendor",
-                "Sequencing experiments made public in public archives in that week, by the vendor behind the "
-                "declared instrument model. This is a census of machines producing data, not of papers.",
-                "archive-week")
+        + _card("Archive experiments per week, by vendor", _archive_note(data), "archive-week")
         + '  <section class="card">\n    <h2>Top movers</h2>\n'
           f'    <p class="note">{_movers_note(data["movers_window"])} Every instrument and company in the store '
           'is ranked here, not only those with a card. Counts, not rates; a short corpus makes these noisy, '
-          'which is why the raw numbers are shown beside the change.</p>\n'
+          'which is why the raw numbers are shown beside the change. A table appears only when both windows were '
+          f'ingested alike.{_movers_suppressed(data["movers_window"])}</p>\n'
           '    <div id="movers"></div>\n  </section>\n'
     )
     if data["timeseries"]["available"]:
@@ -1045,7 +1332,9 @@ def _instruments_html(data: Dict[str, Any]) -> str:
         '  </section>\n'
         '  <div id="instrument-cards"></div>\n'
     )
-    payload = {"weeks": data["weeks"], "entities": data["instruments"], "timeseries": data["timeseries"]}
+    payload = {"weeks": data["weeks"], "entities": data["instruments"], "timeseries": data["timeseries"],
+               "papers_coverage": data["papers_per_week"].get("coverage"),
+               "archive_coverage": data["archive_by_vendor"].get("coverage")}
     script = "litradar.renderInstruments(litradar.pageData());"
     shown, total = len(data["instruments"]), int(data.get("instruments_total") or len(data["instruments"]))
     coverage = (
@@ -1058,6 +1347,8 @@ def _instruments_html(data: Dict[str, Any]) -> str:
         "declared model maps to it. The two measures sit in separate charts on purpose - they differ by orders of "
         f"magnitude, and a shared second axis would invent a correlation. {coverage}"
         "The movers on the overview rank every instrument, carded or not."
+        + _uncovered_sentence(data["archive_by_vendor"].get("coverage") or {}, "The archive census")
+        + _uncovered_sentence(data["papers_per_week"].get("coverage") or {}, "Paper ingestion (the earliest run or backfill)")
     )
     return _page("Instruments", "instruments.html", lede, body, payload, script, data["generated"])
 
@@ -1077,7 +1368,7 @@ def _companies_html(data: Dict[str, Any]) -> str:
     body += _company_links_html(data)
     pages = (data.get("company_pages") or {}).get("pages") or {}
     entities = [dict(e, page=pages.get(e["id"], "")) for e in data["companies"]]
-    payload = {"weeks": data["weeks"], "entities": entities}
+    payload = {"weeks": data["weeks"], "entities": entities, "papers_coverage": data["papers_per_week"].get("coverage")}
     script = "litradar.renderCompanies(litradar.pageData());"
     lede = (
         "Mentions per week split by the role the company plays in the paper: author affiliation, funding or "
@@ -1262,7 +1553,8 @@ def _subgroups_html(data: Dict[str, Any]) -> str:
         note += (f" The chart keeps the {MAX_STACK_SERIES} largest subgroups and folds the rest into 'Other'; "
                  "the table below lists every subgroup separately.")
     body = _card("Papers per week per subgroup", note, "subgroups-week")
-    payload = {"weeks": data["weeks"], "subgroups": data["subgroups"]}
+    payload = {"weeks": data["weeks"], "subgroups": data["subgroups"],
+               "papers_coverage": data["papers_per_week"].get("coverage")}
     script = "litradar.renderSubgroups(litradar.pageData());"
     sources = ", ".join(data["subgroups"]["sources"]) or "no subgroup signal in this store yet"
     lede = f"Sources in this build: {sources}."
@@ -1292,7 +1584,8 @@ def _countries_html(data: Dict[str, Any]) -> str:
             "in automatically - no configuration.</p>\n"
             "  </section>\n"
         )
-    payload = {"weeks": data["weeks"], "countries": data["countries"]}
+    payload = {"weeks": data["weeks"], "countries": data["countries"],
+               "papers_coverage": data["papers_per_week"].get("coverage")}
     script = "litradar.renderCountries(litradar.pageData());"
     lede = (
         f'Source: {data["countries"]["source"]}.' if data["countries"]["available"]
@@ -1702,6 +1995,84 @@ var litradar = (function () {
     return (values || []).reduce(function (a, b) { return a + (b || 0); }, 0);
   }
 
+  /* a null in a weekly series means "not covered: no run, census or backfill fetched for this week", and the
+     tables say so instead of printing a 0 that would read as a measured nothing */
+  function cell(v) {
+    return v === null ? "n/a" : (v || 0);
+  }
+
+  /* Coverage marks. `shades` greys the leading weeks an ingestion start leaves uncovered (the table shows n/a
+     there); `boundaries` draw a dashed line where the ingestion changed. The tooltip title carries the same
+     words, so the caveat travels with the number. */
+  function coveragePlugin(marks) {
+    return {
+      id: "litradarCoverage",
+      beforeDatasetsDraw: function (chart) {
+        var x = chart.scales.x, area = chart.chartArea;
+        if (!x || !area) { return; }
+        var n = (chart.data.labels || []).length;
+        function edge(i) {
+          if (i <= 0) { return area.left; }
+          if (i >= n) { return area.right; }
+          return (x.getPixelForValue(i - 1) + x.getPixelForValue(i)) / 2;
+        }
+        var ctx = chart.ctx;
+        ctx.save();
+        (marks.shades || []).forEach(function (sh) {
+          var right = Math.min(Math.max(edge(sh.to), area.left), area.right);
+          if (right > area.left) {
+            ctx.fillStyle = cssVar("--shade") || "rgba(0,0,0,0.07)";
+            ctx.fillRect(area.left, area.top, right - area.left, area.bottom - area.top);
+          }
+        });
+        (marks.boundaries || []).forEach(function (b) {
+          var px = edge(b.at);
+          ctx.strokeStyle = cssVar("--text-muted") || "#888888";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(px, area.top);
+          ctx.lineTo(px, area.bottom);
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
+    };
+  }
+
+  function coverageTitle(marks) {
+    return function (items) {
+      if (!items.length) { return ""; }
+      var i = items[0].dataIndex, label = items[0].label;
+      var title = /^\d{4}-\d{2}-\d{2}$/.test(label) ? "Week of " + label : label;
+      (marks.shades || []).forEach(function (sh) { if (i < sh.to && sh.label) { title += " (" + sh.label + ")"; } });
+      (marks.boundaries || []).forEach(function (b) {
+        var word = i < b.at ? b.before : b.after;
+        if (word) { title += " (" + word + ")"; }
+      });
+      return title;
+    };
+  }
+
+  function withCoverage(options, marks) {
+    if (!marks) { return { options: options, plugins: [] }; }
+    options.plugins.tooltip.callbacks.title = coverageTitle(marks);
+    return { options: options, plugins: [coveragePlugin(marks)] };
+  }
+
+  /* marks from the coverage block the build writes beside a series: the leading weeks nothing fetched for,
+     and where the weekly runs begin when backfilled weeks precede them */
+  function coverageMarks(cov, uncoveredLabel) {
+    if (!cov) { return null; }
+    var marks = { shades: [], boundaries: [] };
+    if (cov.uncovered_weeks > 0) { marks.shades.push({ to: cov.uncovered_weeks, label: uncoveredLabel }); }
+    if (cov.runs_week_index !== null && cov.runs_week_index !== undefined) {
+      marks.boundaries.push({ at: cov.runs_week_index, before: "backfilled metadata only",
+                              after: "weekly runs from " + cov.runs_since });
+    }
+    return marks.shades.length || marks.boundaries.length ? marks : null;
+  }
+
   /* Only http(s) URLs become links. Record URLs come from feeds and archives the site does not
      control, and the published page is public, so anything else is rendered as plain text. */
   function isWebUrl(href) {
@@ -1772,14 +2143,17 @@ var litradar = (function () {
         fill: false
       };
     });
+    var cfg = withCoverage(baseOptions({ legend: series.length > 1, pointStyle: "line" }), opts.coverage);
     return new Chart(canvas, {
       type: "line",
       data: { labels: labels, datasets: datasets },
-      options: baseOptions({ legend: series.length > 1, pointStyle: "line" })
+      options: cfg.options,
+      plugins: cfg.plugins
     });
   }
 
-  function stackedBar(canvas, labels, series) {
+  function stackedBar(canvas, labels, series, opts) {
+    opts = opts || {};
     var surface = cssVar("--surface");
     var datasets = series.map(function (s, i) {
       var color = s.other ? otherColor() : colorFor(i);
@@ -1794,10 +2168,12 @@ var litradar = (function () {
         maxBarThickness: 24
       };
     });
+    var cfg = withCoverage(baseOptions({ legend: series.length > 1, stacked: true }), opts.coverage);
     return new Chart(canvas, {
       type: "bar",
       data: { labels: labels, datasets: datasets },
-      options: baseOptions({ legend: series.length > 1, stacked: true })
+      options: cfg.options,
+      plugins: cfg.plugins
     });
   }
 
@@ -1858,7 +2234,7 @@ var litradar = (function () {
     if (!slot) { return; }
     var headers = [{ label: "Week" }].concat(series.map(function (s) { return { label: s.label, num: true }; }));
     var rows = weeks.map(function (w, i) {
-      return [w].concat(series.map(function (s) { return s.data[i] || 0; }));
+      return [w].concat(series.map(function (s) { return cell(s.data[i]); }));
     });
     table(slot, headers, rows);
   }
@@ -1872,16 +2248,22 @@ var litradar = (function () {
   /* ---------------------------------------------------------------- pages */
   function renderOverview(data) {
     var weeks = data.weeks || [];
-    var papers = [{ label: "Papers", data: (data.papers_per_week || {}).total || [] }];
-    register("papers-week", function (c) { return lineChart(c, weeks, papers); });
-    seriesTable("papers-week-table", weeks, papers);
+    var pw = data.papers_per_week || {};
+    var papers = [{ label: "Papers", data: pw.total || [] }];
+    var paperMarks = coverageMarks(pw.coverage, "before any run or backfill");
+    register("papers-week", function (c) { return lineChart(c, weeks, papers, { coverage: paperMarks }); });
+    /* the papers whose week is unknown are not charted, but the table still accounts for them */
+    var paperColumns = papers.slice();
+    if (sum(pw.first_of_month) > 0) { paperColumns.push({ label: "Dated to the 1st (not charted)", data: pw.first_of_month }); }
+    seriesTable("papers-week-table", weeks, paperColumns);
 
     var inst = asSeries((data.instruments_by_vendor || {}).series);
-    register("instruments-week", function (c) { return stackedBar(c, weeks, inst); });
+    register("instruments-week", function (c) { return stackedBar(c, weeks, inst, { coverage: paperMarks }); });
     seriesTable("instruments-week-table", weeks, inst);
 
     var arch = asSeries((data.archive_by_vendor || {}).series);
-    register("archive-week", function (c) { return stackedBar(c, weeks, arch); });
+    var archiveMarks = coverageMarks((data.archive_by_vendor || {}).coverage, "before the archive census");
+    register("archive-week", function (c) { return stackedBar(c, weeks, arch, { coverage: archiveMarks }); });
     seriesTable("archive-week-table", weeks, arch);
 
     if (data.timeseries && data.timeseries.available) {
@@ -1896,15 +2278,21 @@ var litradar = (function () {
       holder.textContent = "";
       var win = data.movers_window || {};
       var span = win.span || 0;
+      var coverage = win.coverage || {};
       var recentLabel = span ? "Last " + span + (span === 1 ? " wk" : " wks") : "Recent";
       var priorLabel = span ? "Prior " + span + (span === 1 ? " wk" : " wks") : "Previous";
-      [["Instruments, papers", (data.movers || {}).instrument_papers],
-       ["Instruments, archive experiments", (data.movers || {}).archive_experiments],
-       ["Companies, mentions", (data.movers || {}).companies]].forEach(function (pair) {
+      [["Instruments, papers", "instrument_papers"],
+       ["Instruments, archive experiments", "archive_experiments"],
+       ["Companies, mentions", "companies"]].forEach(function (pair) {
         holder.appendChild(el("h3", pair[0]));
         var slot = el("div");
         holder.appendChild(slot);
-        var rows = (pair[1] || []).map(function (m) {
+        var info = coverage[pair[1]] || {};
+        /* a suppressed table says so: the two windows were not ingested alike, and the note names the layer */
+        var empty = info.comparable === false && info.reason
+          ? "Suppressed for this window: the compared weeks were not ingested alike (the note above says which run, census or backfill starts or ends inside them)."
+          : "Not enough history in this window.";
+        var rows = ((data.movers || {})[pair[1]] || []).map(function (m) {
           var cls = m.delta > 0 ? "up" : (m.delta < 0 ? "down" : "");
           return [m.name, m.recent, m.previous,
                   { text: (m.delta > 0 ? "+" : "") + m.delta, cls: cls },
@@ -1912,7 +2300,7 @@ var litradar = (function () {
         });
         table(slot, [{ label: "Entity" }, { label: recentLabel, num: true }, { label: priorLabel, num: true },
                      { label: "Change", num: true }, { label: "Change %", num: true }], rows,
-              { collapsible: false, empty: "Not enough history in this window." });
+              { collapsible: false, empty: empty });
       });
     }
     afterRender();
@@ -1927,6 +2315,8 @@ var litradar = (function () {
       host.appendChild(el("p", "No instrument mentions or archive records in this window.", { "class": "empty" }));
       return;
     }
+    var paperMarks = coverageMarks(data.papers_coverage, "before any run or backfill");
+    var archiveMarks = coverageMarks(data.archive_coverage, "before the archive census");
     entities.forEach(function (e, idx) {
       var card = el("section", null, { "class": "card", "data-name": (e.name + " " + (e.vendor || "")).toLowerCase() });
       var head = el("div", null, { "class": "entity-head" });
@@ -1955,7 +2345,7 @@ var litradar = (function () {
           var canvasId = "inst-" + idx + "-" + which;
           chartBox.appendChild(el("canvas", null, { id: canvasId }));
           box.appendChild(chartBox);
-          pending.push([canvasId, values, label]);
+          pending.push([canvasId, values, label, which === "papers" ? paperMarks : archiveMarks]);
         }
         grid.appendChild(box);
       });
@@ -1964,7 +2354,7 @@ var litradar = (function () {
       var tableSlot = el("div");
       card.appendChild(tableSlot);
       var rows = weeks.map(function (w, i) {
-        return [w, e.papers_per_week[i] || 0, e.experiments_per_week[i] || 0];
+        return [w, cell(e.papers_per_week[i]), cell(e.experiments_per_week[i])];
       });
       table(tableSlot, [{ label: "Week" }, { label: "Papers", num: true }, { label: "Experiments", num: true }], rows);
 
@@ -1979,7 +2369,7 @@ var litradar = (function () {
       /* charts are registered only once the canvas is in the document: Chart.js sizes to the
          laid-out element, and a detached canvas would render nothing at all */
       pending.forEach(function (job) {
-        register(job[0], function (c) { return lineChart(c, weeks, [{ label: job[2], data: job[1] }]); });
+        register(job[0], function (c) { return lineChart(c, weeks, [{ label: job[2], data: job[1] }], { coverage: job[3] }); });
       });
     });
 
@@ -2005,6 +2395,7 @@ var litradar = (function () {
       host.appendChild(el("p", "No company mentions in this window.", { "class": "empty" }));
       return;
     }
+    var paperMarks = coverageMarks(data.papers_coverage, "before any run or backfill");
     entities.forEach(function (e, idx) {
       var card = el("section", null, {
         "class": "card",
@@ -2033,13 +2424,13 @@ var litradar = (function () {
       var slot = el("div");
       card.appendChild(slot);
       var rows = weeks.map(function (w, i) {
-        return [w, e.author[i] || 0, e.funding_coi[i] || 0, e.subject[i] || 0, (e.news || [])[i] || 0];
+        return [w, cell(e.author[i]), cell(e.funding_coi[i]), cell(e.subject[i]), (e.news || [])[i] || 0];
       });
       table(slot, [{ label: "Week" }, { label: "Author", num: true }, { label: "Funding / COI", num: true },
                    { label: "Subject", num: true }, { label: "News", num: true }], rows);
       host.appendChild(card);
       /* same rule as the instruments page: attach first, then build the chart */
-      register(canvasId, function (c) { return stackedBar(c, weeks, series); });
+      register(canvasId, function (c) { return stackedBar(c, weeks, series, { coverage: paperMarks }); });
     });
 
     function applyFilter() {
@@ -2080,7 +2471,8 @@ var litradar = (function () {
       afterRender();
       return;
     }
-    register("subgroups-week", function (c) { return lineChart(c, weeks, chartSeries); });
+    var marks = coverageMarks(data.papers_coverage, "before any run or backfill");
+    register("subgroups-week", function (c) { return lineChart(c, weeks, chartSeries, { coverage: marks }); });
     seriesTable("subgroups-week-table", weeks, series);
     afterRender();
   }
@@ -2090,7 +2482,8 @@ var litradar = (function () {
     var countries = data.countries || {};
     if (!countries.available) { afterRender(); return; }
     var series = asSeries(countries.series);
-    register("countries-week", function (c) { return stackedBar(c, weeks, series); });
+    var marks = coverageMarks(data.papers_coverage, "before any run or backfill");
+    register("countries-week", function (c) { return stackedBar(c, weeks, series, { coverage: marks }); });
     seriesTable("countries-week-table", weeks, series);
     afterRender();
   }
@@ -2563,18 +2956,22 @@ def write_site(data: Dict[str, Any], out_dir: Path, timeseries_dir: Optional[Pat
     put("assets/styles.css", STYLES)
     put("assets/app.js", APP_JS)
 
+    # the JSON files carry the same coverage blocks as the pages, so a consumer sees the same caveats a reader does
+    papers_coverage = data["papers_per_week"].get("coverage")
+    archive_coverage = data["archive_by_vendor"].get("coverage")
     data_files = {
         "data/overview.json": {
             "generated": data["generated"], "weeks": data["weeks"], "window": data["window"],
-            "totals": data["totals"], "papers_per_week": data["papers_per_week"],
+            "totals": data["totals"], "coverage": data.get("coverage"), "papers_per_week": data["papers_per_week"],
             "instruments_by_vendor": data["instruments_by_vendor"],
             "archive_by_vendor": data["archive_by_vendor"], "movers": data["movers"],
-            "timeseries": data["timeseries"],
+            "movers_window": data["movers_window"], "timeseries": data["timeseries"],
         },
-        "data/instruments.json": {"weeks": data["weeks"], "entities": data["instruments"]},
-        "data/companies.json": {"weeks": data["weeks"], "entities": data["companies"]},
-        "data/subgroups.json": {"weeks": data["weeks"], "subgroups": data["subgroups"]},
-        "data/countries.json": {"weeks": data["weeks"], "countries": data["countries"]},
+        "data/instruments.json": {"weeks": data["weeks"], "entities": data["instruments"],
+                                  "papers_coverage": papers_coverage, "archive_coverage": archive_coverage},
+        "data/companies.json": {"weeks": data["weeks"], "entities": data["companies"], "papers_coverage": papers_coverage},
+        "data/subgroups.json": {"weeks": data["weeks"], "subgroups": data["subgroups"], "papers_coverage": papers_coverage},
+        "data/countries.json": {"weeks": data["weeks"], "countries": data["countries"], "papers_coverage": papers_coverage},
         "data/papers.json": {"window": data["window"], "papers": data["papers"]},
         "data/timeseries.json": dict(ts_page, generated=data["generated"]),
     }
