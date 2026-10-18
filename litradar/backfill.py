@@ -27,6 +27,9 @@ topics, country codes) and both resumable through the additive ``backfill_progre
    "dailyRemainingUsd":0, "creditsRequired":10, "creditsRemaining":0}``.
    ``litradar.sources.openalex.works`` raises ``OpenAlexBudgetExhausted`` on that answer; this module saves the
    progress made so far and returns a report with ``stopped="budget"`` (CLI exit code 3) instead of a traceback.
+   A rejected request (HTTP 400/404: invalid select field, malformed filter) raises ``OpenAlexRequestError`` with
+   the API's message; the run stops the same way with ``stopped="request"`` because every later unit would fail
+   identically.
 
    Because the metered API could not be paged, the request shape follows the official documentation (re-read
    2026-10-17):
@@ -99,7 +102,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
 from .http import Http
 from .models import Paper
 from .sources import openalex
-from .sources.openalex import OpenAlexBudgetExhausted
+from .sources.openalex import OpenAlexBudgetExhausted, OpenAlexRequestError
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -498,6 +501,20 @@ def run_api(
                     new += 1
                 if fetched % 200 == 0:
                     store.commit()
+        except OpenAlexRequestError as exc:
+            # the request shape is wrong (select/filter/parameter): every later unit would fail the same way
+            store.commit()
+            report["papers_fetched"] += fetched
+            report["papers_new"] += new
+            report["papers_updated"] += fetched - new
+            report["stopped"] = "request"
+            report["message"] = (
+                f"OpenAlex rejected the request ({exc}). Nothing to retry until the query is fixed; "
+                f"{report['done']} unit(s) finished this run, {label} left incomplete."
+            )
+            report["errors"].append(f"{label}: {exc}")
+            log.warning(report["message"])
+            return report
         except OpenAlexBudgetExhausted as exc:
             store.commit()
             report["papers_fetched"] += fetched
