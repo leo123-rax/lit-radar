@@ -3,6 +3,10 @@
 Everything below assumes you want the radar to run itself every Monday on GitHub Actions, keep its
 history, and publish a digest. The same package also runs on a laptop; that is section 6.
 
+Short on time? `docs/FORKING.md` is the same material as a numbered checklist with time estimates,
+the exact secret and variable names, and a table of what a copy with zero keys produces. This page
+is the reference behind it.
+
 ## 1. Make the repository yours
 
 **Fork** when you want to pull upstream gazetteer updates with a button. Two consequences of a fork:
@@ -70,6 +74,14 @@ empty. Expect 15 to 40 minutes. What a good first run looks like:
    digest is in the run's `radar-state` artifact.
 3. Workflow **pages** starts by itself when the weekly run succeeds (section 5).
 
+Nothing has to be created by hand before this run: the `db-latest` and `db-YYYY-MM` releases (and
+their tags) are created by the publish job when they do not exist yet, and the daily job creates
+`db-latest` the same way. **Branch protection:** the digest commit is a direct `git push` to your
+default branch by `github-actions[bot]`. A protection rule or ruleset that requires pull requests
+or blocks direct pushes makes that step fail (the database upload before it still succeeds). Either
+leave the branch unprotected, allow the GitHub Actions app to bypass the rule, or keep
+`LITRADAR_COMMIT_DIGESTS` unset and read the digest from the `radar-state` artifact instead.
+
 **The daily update** (`.github/workflows/daily.yml`, 06:20 UTC, one job named `update`) does
 not render a digest. It restores `radar.sqlite.zst` from `db-latest` (creating the release on a
 first run), runs `python -m litradar update --overlap-days 2 --max-days 14` (re-fetch from two
@@ -130,7 +142,11 @@ A separate dashboard workflow (`.github/workflows/pages.yml`) builds a static si
 publishes it with GitHub Pages. *Settings -> Pages -> Build and deployment -> Source: GitHub
 Actions*. The site goes live on that workflow's next run at `https://<owner>.github.io/<repository>/`.
 Pages sites are public, including on private repositories unless your plan offers access control,
-so treat the dashboard like the digest: it shows your watchlist.
+so treat the dashboard like the digest: it shows your watchlist. Do this *before* the first weekly
+run finishes if you can: **pages** is triggered by that run, and its *Configure Pages* step fails
+when the repository's Pages source is not yet set to GitHub Actions (the workflow does not enable
+Pages for you). Nothing is lost, and no site is deployed; set the source and re-run **pages** from
+the Actions tab.
 
 What the workflow does: it runs after every successful **weekly-digest** run (and on *Run
 workflow*, with an integer `weeks` input, default 52), downloads `radar.sqlite.zst` from the

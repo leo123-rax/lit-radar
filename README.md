@@ -23,9 +23,10 @@ diagnostics and biotech. Every week it:
 7. **Stores it all in SQLite with full-text search**, so you can ask
    `litradar search "Xenium" --since 90d` or `litradar entity pacb-revio --since 180d`.
 
-Everything is a plain Python package with three dependencies (`requests`, `PyYAML`, `lxml`).
-No servers, no accounts required to start. Fork it, add your own keys in `.env`, and run it on a
-laptop or let the included GitHub Action run it every Monday.
+Everything is a plain Python package with four small dependencies (`requests`, `PyYAML`, `lxml`,
+`cssselect`). No servers, no accounts required to start. Fork it, add your own keys in `.env`, and
+run it on a laptop or let the included GitHub Action run it every Monday (the fork checklist, with
+time estimates and what a zero-key copy produces, is `docs/FORKING.md`).
 
 ## Quick start
 
@@ -130,9 +131,10 @@ Every command reads `config/` and `.env` from the repo root; `python -m litradar
 | `tag [--translate]` · `export --parquet DIR` · `rematch` · `check-config` · `stats` | language/country tags, exports, re-annotation after gazetteer edits, validation |
 | `fetch <source> ...` · `fetch --list` · `browser-check` | raw access to all 16 source clients as JSON lines; the optional real-browser fetcher |
 
-Full docs: `docs/DESIGN.md` (architecture and cost model), `docs/SOURCES.md` (every source, verified), `docs/COOKBOOK.md`
+Full docs: `docs/FORKING.md` (fork checklist), `docs/deploy.md` (GitHub Actions, Pages, laptop scheduling),
+`docs/DESIGN.md` (architecture and cost model), `docs/SOURCES.md` (every source, verified), `docs/COOKBOOK.md`
 (copy-paste recipes), `docs/search.md`, `docs/live.md`, `docs/track.md`, `docs/concepts.md`, `docs/discovery.md`,
-`docs/dashboard.md`, `docs/gazetteer.md`, `docs/LEGAL.md`, `docs/deploy.md`, `docs/SCALE.md`, `docs/ROADMAP.md`.
+`docs/dashboard.md`, `docs/gazetteer.md`, `docs/LEGAL.md`, `docs/SCALE.md`, `docs/ROADMAP.md`.
 
 ## Configuration
 
@@ -161,7 +163,9 @@ Everything lives in `config/` and is meant to be edited:
   *Run workflow* also takes a `timeseries_vendor` input to produce a vendor time series on demand.
   Two more workflows: `daily.yml` extends the corpus every day at 06:20 UTC (`litradar update`, no
   digest) and `pages.yml` rebuilds the dashboard from the `db-latest` snapshot after each weekly
-  run. Step by step, including Pages for the dashboard: `docs/deploy.md`; live mode: `docs/live.md`.
+  run. The numbered fork checklist (what to click on GitHub, which secret names, how long each step
+  takes): `docs/FORKING.md`. The full reference, including Pages for the dashboard: `docs/deploy.md`;
+  live mode: `docs/live.md`.
 * **Laptop or server**: `cron` or `launchd` calling `python -m litradar run --email`; examples in
   `docs/examples/`. Windows: Task Scheduler with the same command.
 

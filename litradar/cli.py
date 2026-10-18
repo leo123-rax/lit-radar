@@ -627,8 +627,24 @@ def cmd_tag(args) -> int:
     return 0
 
 
+HELP_EPILOG = """\
+start here (from the repository root; every command reads config/ and .env from there):
+  litradar check-config          validate the YAML in config/ (exit 0 = good to go)
+  litradar run --days 7          first pull: 10-30 minutes with keys, longer without; the digest lands in digests/
+  litradar status                freshness, per-source counts and which keys are set; exits 1 until the first run
+  litradar serve                 read-only JSON API and search page on http://127.0.0.1:8787 (/api lists routes)
+keys:  cp .env.example .env and fill in what you have; every key is optional and the pipeline runs with none
+docs:  README.md, docs/FORKING.md (fork checklist), docs/deploy.md (GitHub Actions, Pages), docs/COOKBOOK.md
+"""
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="litradar", description="Weekly science-literature radar")
+    ap = argparse.ArgumentParser(
+        prog="litradar",
+        description="Weekly science-literature radar",
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("--config-dir", default=None, help="directory with radar.yaml etc. (default: ./config)")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--version", action="version", version=f"litradar {__version__}")
