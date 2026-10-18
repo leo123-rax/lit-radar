@@ -334,6 +334,47 @@ def test_rss_parse_errors_name_the_feed_once_and_links_lose_tracking_params(capl
     assert rss.parse_feed(atom)[0]["link"] == "https://example.org/p"
 
 
+# ---- RSS: the outcome dict tells a caller the body was not a feed; SEC helpers -----------------------------------
+def test_rss_outcome_reports_non_feed_bodies_and_sec_helpers_resolve_tickers_to_ciks():
+    """The WARNING alone never reaches a run report, so parse_feed/fetch_items record why a body yielded nothing:
+    not XML (EDGAR's "No matching Ticker Symbol." page), or well-formed XHTML with an <html> root."""
+    from litradar.sources import sec
+
+    rss._BAD_FEEDS.clear()
+    out = {}
+    assert rss.parse_feed("<!doctype html><html><body>No matching Ticker Symbol.</body></html>", "SEC 8-K TEM", "https://www.sec.gov/x", outcome=out) == []
+    assert out["parsed"] is False and out["error"].startswith("not XML (syntax error: line 1, column 0; body starts ") and "No matching Ticker Symbol." in out["body"]
+    out = {}
+    assert rss.parse_feed('<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Sign in</p></body></html>', "Journal", outcome=out) == []
+    assert out == {"parsed": False, "error": "HTML document, not a feed", "body": '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Sign in</p></body></html>'}
+    out = {}
+    atom = '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>T</title><link href="https://example.org/p"/></entry></feed>'
+    assert len(rss.parse_feed(atom, outcome=out)) == 1 and out["parsed"] is True and out["error"] == ""
+    assert {e["name"] for e in rss.bad_feeds()} == {"SEC 8-K TEM", "Journal"}
+    rss._BAD_FEEDS.clear()
+
+    class _Http:
+        def __init__(self, body):
+            self.body = body
+
+        def get_text(self, url, params=None, cache=False, retries=None):
+            return self.body
+
+    out = {}
+    assert rss.fetch_items(_Http(None), "https://example.org/feed", outcome=out) == [] and out == {"fetched": False}
+    out = {}
+    assert rss.fetch_items(_Http("<html/>"), "https://example.org/feed", "F", outcome=out) == [] and out["fetched"] is True and out["parsed"] is False
+    rss._BAD_FEEDS.clear()
+    # SEC helpers: 10-digit CIK URLs, both company_tickers.json shapes, unresolved tickers listed, EDGAR messages recognised
+    rows = [{"cik": "1717115", "ticker": "TEM", "title": "Tempus AI, Inc."}, {"cik_str": 31791, "ticker": "rvty", "title": "REVVITY, INC."}, {"ticker": "BAD", "cik": "n/a"}]
+    assert sec.resolve(["TEM", "RVTY", "GRAL", "BAD"], rows) == ({"TEM": "0001717115", "RVTY": "0000031791"}, ["BAD", "GRAL"])
+    assert sec.feed_url("0001717115") == "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001717115&type=8-K&dateb=&owner=include&count=20&output=atom"
+    assert sec.pad_cik(320193) == "0000320193" and sec.pad_cik("TEM") == "TEM"
+    assert sec.is_plain_ticker("ILMN") and sec.is_plain_ticker("P") and not sec.is_plain_ticker("ROG.SW") and not sec.is_plain_ticker("private") and not sec.is_plain_ticker("")
+    assert sec.error_message("<p>Previous Page --> No matching Ticker Symbol.</p>") == "No matching Ticker Symbol."
+    assert sec.error_message("<p>No matching CIK.</p>") == "No matching CIK." and sec.error_message("<feed/>") == "" and sec.error_message(None) == ""
+
+
 # ---- metadata hygiene shared by the adapters -------------------------------------------------------------
 def test_clean_text_and_crossref_titles_and_funders():
     from litradar.sources import clean_text

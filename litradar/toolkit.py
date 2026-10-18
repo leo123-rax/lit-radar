@@ -59,6 +59,7 @@ from .sources import (
     pride,
     rss,
     scielo,
+    sec,
     semantic_scholar,
     sra,
 )
@@ -472,7 +473,7 @@ class SourceSpec:
     hosts: Tuple[str, ...]
     example: str
     requires: str = ""  # which of the options is mandatory, in words
-    doc: str = ""  # overrides the module docstring as the `--list` summary (for a source that shares a module, e.g. sec -> rss)
+    doc: str = ""  # overrides the module docstring as the `--list` summary (when that docstring is not the one-line tool summary, e.g. sec)
 
     @property
     def summary(self) -> str:
@@ -586,13 +587,13 @@ REGISTRY: Tuple[SourceSpec, ...] = (
         requires="--url",
     ),
     SourceSpec(
-        "sec", rss, "NewsItem", _sec, WINDOW + ("--ticker",),
+        "sec", sec, "NewsItem", _sec, WINDOW + ("--ticker",),
         access="free; LITRADAR_CONTACT_EMAIL is required (EDGAR wants '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise)",
         hosts=("www.sec.gov",),
         example="litradar fetch sec --ticker ILMN,TXG --days 7",
         requires="--ticker, and LITRADAR_CONTACT_EMAIL in the environment",
         doc="SEC EDGAR 8-K filings as news items: the per-ticker Atom feed the pipeline reads for every watched company with a "
-            "plain US ticker (parsed by litradar/sources/rss.py).",
+            "plain US ticker (URLs and ticker -> CIK resolution in litradar/sources/sec.py, parsed by litradar/sources/rss.py).",
     ),
     SourceSpec(
         "gdelt", gdelt, "NewsItem", _gdelt, WINDOW + ("--query", "--terms", "--limit"),

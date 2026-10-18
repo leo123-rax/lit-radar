@@ -108,23 +108,44 @@ def bad_feeds() -> List[Dict[str, str]]:
     return [dict(url=url, **info) for url, info in _BAD_FEEDS.items()]
 
 
-def parse_feed(text: str, feed_name: str = "", url: str = "") -> List[Dict[str, Any]]:
+def _report_bad_feed(feed_name: str, url: str, error: str, detail: str) -> None:
+    """One WARNING per feed URL per process (then DEBUG), naming the feed; remembered for ``bad_feeds()``."""
+    label = feed_name or url or "unnamed feed"
+    where = f" ({url})" if url and feed_name else ""
+    key = url or feed_name or "?"
+    if key not in _BAD_FEEDS:
+        _BAD_FEEDS[key] = {"name": feed_name, "error": error}
+        log.warning("feed parse error in %s%s: %s", label, where, detail)
+    else:
+        log.debug("feed parse error in %s%s: %s", label, where, detail)
+
+
+def parse_feed(text: str, feed_name: str = "", url: str = "", outcome: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Items from an RSS 2.0 / RSS 1.0 / Atom body. A body that is not XML (an HTML error page, a Cloudflare
-    challenge, a truncated download) is reported once per feed URL at WARNING, naming the feed, then at DEBUG."""
+    challenge, a truncated download) or that is an (X)HTML document is reported once per feed URL at WARNING,
+    naming the feed, then at DEBUG.
+
+    ``outcome``, when a dict is passed, receives ``parsed`` (True when the body was a feed), ``error`` (why it was
+    not; '' otherwise) and ``body`` (the text): the log line alone never reaches a run report, so a caller that
+    must account for a feed answering something other than a feed reads it from here."""
+    if outcome is None:
+        outcome = {}
+    outcome.update(parsed=False, error="", body=text if isinstance(text, str) else "")
+    head = " ".join((text or "")[:80].split()) if isinstance(text, str) else ""
     try:
         root = ET.fromstring(text.encode("utf-8") if isinstance(text, str) else text)
     except ET.ParseError as exc:
-        label = feed_name or url or "unnamed feed"
-        where = f" ({url})" if url and feed_name else ""
-        head = " ".join((text or "")[:80].split()) if isinstance(text, str) else ""
         detail = f"{exc}" + (f"; body starts {head!r}" if head else "")
-        key = url or feed_name or "?"
-        if key not in _BAD_FEEDS:
-            _BAD_FEEDS[key] = {"name": feed_name, "error": str(exc)}
-            log.warning("feed parse error in %s%s: %s", label, where, detail)
-        else:
-            log.debug("feed parse error in %s%s: %s", label, where, detail)
+        _report_bad_feed(feed_name, url, str(exc), detail)
+        outcome["error"] = f"not XML ({detail})"
         return []
+    if _local(root.tag).lower() == "html":
+        # a well-formed XHTML page (an error or sign-in page served as XML) is not a feed either
+        error = "HTML document, not a feed"
+        _report_bad_feed(feed_name, url, error, error + (f"; body starts {head!r}" if head else ""))
+        outcome["error"] = error
+        return []
+    outcome["parsed"] = True
     items: List[Dict[str, Any]] = []
     # Atom
     if _local(root.tag) == "feed":
@@ -179,15 +200,20 @@ def parse_feed(text: str, feed_name: str = "", url: str = "") -> List[Dict[str, 
     return items
 
 
-def fetch_items(http: Http, url: str, feed_name: str = "") -> List[Dict[str, Any]]:
+def fetch_items(http: Http, url: str, feed_name: str = "", outcome: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Fetch and parse one feed. ``outcome`` (optional dict) gets ``fetched`` (False when the HTTP layer returned
+    nothing; that failure is already counted there) plus what ``parse_feed`` records."""
     text = http.get_text(url)
+    if outcome is not None:
+        outcome["fetched"] = bool(text)
     if not text:
         return []
-    return parse_feed(text, feed_name=feed_name, url=url)
+    return parse_feed(text, feed_name=feed_name, url=url, outcome=outcome)
 
 
-def journal_papers(http: Http, feed_name: str, url: str, journal: str, since: Optional[str] = None) -> Iterator[Paper]:
-    for it in fetch_items(http, url, feed_name=feed_name):
+def journal_papers(http: Http, feed_name: str, url: str, journal: str, since: Optional[str] = None,
+                   outcome: Optional[Dict[str, Any]] = None) -> Iterator[Paper]:
+    for it in fetch_items(http, url, feed_name=feed_name, outcome=outcome):
         if since and it["date"] and it["date"] < since:
             continue
         doi = it.get("doi")
@@ -206,8 +232,9 @@ def journal_papers(http: Http, feed_name: str, url: str, journal: str, since: Op
         )
 
 
-def news_items(http: Http, feed_name: str, url: str, since: Optional[str] = None) -> Iterator[NewsItem]:
-    for it in fetch_items(http, url, feed_name=feed_name):
+def news_items(http: Http, feed_name: str, url: str, since: Optional[str] = None,
+               outcome: Optional[Dict[str, Any]] = None) -> Iterator[NewsItem]:
+    for it in fetch_items(http, url, feed_name=feed_name, outcome=outcome):
         if since and it["date"] and it["date"] < since:
             continue
         key = it.get("link") or it.get("title") or ""
