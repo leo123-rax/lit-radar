@@ -1777,6 +1777,10 @@ def build(db_path: Path, out_dir: Path, weeks: int = 52, max_papers: int = DEFAU
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     files = write_site(data, Path(out_dir))
+    # client-side search (search.html, search-index.json, search-entities.json): built by dashboard_search
+    from .dashboard_search import write_search_site
+
+    files.update(write_search_site(Path(db_path), Path(out_dir), data=data, today=today))
     return {
         "out": str(Path(out_dir)),
         "generated": data["generated"],

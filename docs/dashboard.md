@@ -3,7 +3,8 @@
 The weekly digest answers *what happened last week*. Once the store has been running for a while it
 can answer a different question — *what is happening over time* — and that one wants charts, not
 prose. `litradar dashboard` reads the SQLite store and writes a **self-contained static site**: six
-HTML pages, a stylesheet, one script, and the data as JSON. No server, no build step, no framework.
+HTML pages, a stylesheet, one script, the data as JSON, and a client-side search engine (its index
+and vocabulary as two more JSON files). No server, no build step, no framework.
 
 ```bash
 litradar dashboard --out site/            # 52 weeks by default
@@ -16,8 +17,13 @@ python3 -m http.server -d site 8000       # look at it locally
 | `--out` | `site` | output directory (created if missing) |
 | `--weeks` | `52` | weeks of history to chart; the window ends with the current ISO week |
 | `--db` | the configured store | database to read; **always opened read-only** |
-| `--max-papers` | `4000` | cap on the client-side search index (most recent papers in the window) |
+| `--max-papers` | `4000` | cap on `data/papers.json` (most recent papers in the charted window; the search page has its own index, see below) |
 | `--json` | off | print the full file manifest, with byte sizes, as JSON |
+
+The search page's index is built by the same command with its own defaults (180 days, 20,000
+records, a 4,000,000-byte budget, best rank score first). To change them, or to rebuild only the
+search files, run `litradar search-index --out site/ [--days N] [--max N] [--max-bytes N]`
+afterwards; it writes `search.html`, `search-index.json` and `search-entities.json` and nothing else.
 
 The store is never written to. The module opens it with `file:…?mode=ro`; if the file is in WAL mode
 and a read-only open is refused (a read-only connection cannot create the `-shm` companion), it
@@ -32,7 +38,7 @@ copies the database and its sidecars to a temporary directory, reads the copy, a
 | `companies.html` | one card per company: mentions per week split by role — author affiliation, funding / competing-interest statement, subject of the work — with the stored news count |
 | `subgroups.html` | papers per week per research subgroup; every subgroup is in the table, the chart keeps the six largest and folds the rest into `Other` |
 | `countries.html` | papers per week by country of first affiliation, or an explanation of how to enable it |
-| `search.html` | client-side search over the window: title, venue, date, instruments, companies, link |
+| `search.html` | client-side search over the last 180 days: instant word-prefix matching on title, abstract excerpt, venue and attributed entities; facets (instrument, company, subgroup, tier, kind, source, country, date range); sort by relevance, score, date or citations; shareable URL state. Reads `search-index.json` and `search-entities.json`, written by the same build; `litradar search-index` rebuilds just those. Details in `docs/search.md` section 7 |
 
 Every chart ships a **data table** below it (`<details>` on the overview and entity pages, open on
 the movers tables), so no value is reachable only by hovering, and the pages stay useful with
@@ -48,9 +54,9 @@ is written, so a broken store can never publish an all-zero site as if it were n
 
 | Table | Used for |
 |---|---|
-| `papers` | papers per week, the search index, subgroup and country assignment from `extra_json` |
-| `mentions` | instruments and companies per week, by vendor and by role |
-| `scores` | the `final` score shown in the search index |
+| `papers` | papers per week, the search index (title, abstract excerpt, venue, DOI, URL, licence for the data-policy level), subgroup and country assignment from `extra_json` |
+| `mentions` | instruments and companies per week, by vendor and by role; the entity ids and names on each search record |
+| `scores` | the `final` score shown in the search index and its ranking; the journal tier the ranker recorded in `reasons` |
 | `archive_records` | experiments per week, by vendor and per instrument entity |
 | `news_items` | per-company news counts (matched on the stored company id, else the display name) |
 | `tracked_author_hits` | subgroup counts |
@@ -144,10 +150,14 @@ archive records, a 52-week build came to **2.9 MiB in 15 files**: `index.html` 1
 `countries.html` 3 KB, `search.html` 1.28 MB, `assets/app.js` 23 KB, `assets/styles.css` 5 KB, and
 the same payloads again as `data/*.json`. The build itself takes well under a second.
 
-`search.html` dominates, because the search index is embedded in the page (which keeps the site
-working from a `file://` path, where `fetch()` of a sibling JSON file is blocked by the browser).
-The same index is written to `data/papers.json` for anything else that wants it. Lower
-`--max-papers` for a smaller page; the cap takes the most recent papers in the window.
+That figure predates the search engine. With it, the same corpus built to **3.5 MiB in 17 files**:
+`search.html` is now a 28 KB page that fetches `search-index.json` (1.79 MB for 3,562 records,
+about 500 bytes per record, 74% carrying an abstract excerpt) and `search-entities.json` (43 KB:
+251 instruments, 127 companies, 9 subgroups). `data/papers.json` (1.3 MB at `--max-papers 4000`)
+is still written for anything else that wants a plain list. Because the search files are fetched
+rather than embedded, a local copy of the site must be served over HTTP (`python3 -m http.server
+-d site 8000`); from a `file://` path the search page explains why it is empty while the chart
+pages still work.
 
 ## Publishing to GitHub Pages
 
@@ -196,4 +206,8 @@ instrument with no paper mentions keeps its card and its place in the movers), t
 rule for movers (Saturday versus Sunday builds), optional-versus-fatal database errors (a missing
 column is skipped and counted; a syntax error or a corrupt file raises and writes nothing),
 archive platform-code merging, subgroup folding, and a check that the source database is
-byte-identical after a build.
+byte-identical after a build. `tests/test_dashboard_search.py` covers the search index the same way:
+record fields and ordering, the data-policy gate on abstract excerpts (never full text, nothing at
+level `none`), markup stripping and escaping, the window, the record cap and byte budget, the
+vocabulary with card-aware links, JSON validity, the page shell, the build hook and the
+`search-index` command.
