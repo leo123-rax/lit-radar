@@ -379,7 +379,7 @@ def cmd_show(args) -> int:
             for c in res.candidates:
                 print(f"  did you mean: {c['id']:32} {c['kind']:10} {c['name']}")
         return 1
-    d = entities.dossier(store, res, since, until, limit=args.limit, instruments=instruments, subgroups=subgroups)
+    d = entities.dossier(store, res, since, until, limit=args.limit, instruments=instruments, companies=companies, subgroups=subgroups)
     print(json.dumps(d, indent=1, default=str, ensure_ascii=False) if args.json else entities.render_dossier(d))
     return 0
 
@@ -658,7 +658,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--until", type=Q.until_arg, help=until_help)
     p.add_argument("--llm", action="store_true", help="score the shortlist with Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--no-fulltext", action="store_true", help="skip open-access full-text retrieval (metadata and abstracts only)")
-    p.add_argument("--sources", help="comma-separated subset: biorxiv,europepmc,openalex,crossref,arxiv,rss,ena,sra,geo,pride,cellxgene,nih_reporter,clinicaltrials,openfda,semantic_scholar")
+    p.add_argument("--sources", help="comma-separated subset: biorxiv,medrxiv,europepmc,openalex,crossref,arxiv,rss,chinaxiv,scielo,kci,jstage,ena,sra,geo,pride,cellxgene,gsa,gsa_human,nih_reporter,clinicaltrials,openfda,semantic_scholar,news (see docs/SOURCES.md)")
     p.add_argument("--out", help="digest directory (default: out_dir in radar.yaml / LITRADAR_OUT_DIR, else digests/)")
     p.add_argument("--email", action="store_true", help="e-mail the digest (SMTP_* and DIGEST_* in .env)")
     p.add_argument("--slack", action="store_true", help="post the top 10 to Slack (SLACK_WEBHOOK_URL in .env)")

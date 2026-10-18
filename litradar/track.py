@@ -38,7 +38,7 @@ from .extract.gazetteer import Gazetteer
 COMPANY_TYPES = ("tools", "diagnostics", "synthesis", "ai_bio", "pharma", "cro", "institute", "software")
 INSTRUMENT_CATEGORIES = (
     "sequencer", "single_cell", "spatial", "proteomics", "library_prep", "synthesis", "pcr", "array", "cytometry",
-    "cryo_em", "imaging", "automation", "cell_engineering", "bioprocess", "qc", "software", "reagent",
+    "cryo_em", "imaging", "automation", "cell_engineering", "bioprocess", "qc", "software", "reagent", "method",
 )
 PRIORITY_KINDS = ("subgroup", "company", "instrument_category", "journal", "source")
 PRIORITY_MIN, PRIORITY_MAX = 0.05, 20.0

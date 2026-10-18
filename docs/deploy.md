@@ -45,6 +45,7 @@ Add as **variables** (non-secret):
 |---|---|
 | `LITRADAR_COMMIT_DIGESTS` | set to `true` in a fork to commit `digests/*.md` to the branch; unset or anything else = do not commit (the digest is still attached to the run as an artifact) |
 | `LITRADAR_LLM_MODEL` | overrides the default model name; leave unset to use the code default |
+| `LITRADAR_PAGES_URL` | public URL of the Pages site, used in the digest issue and the Atom feed links; leave unset to derive `https://<owner>.github.io/<repo>/` |
 
 Never put any of these in `config/*.yaml` or in the workflow file.
 
