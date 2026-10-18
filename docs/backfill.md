@@ -43,6 +43,10 @@ Authorization: Bearer <OPENALEX_API_KEY>        (when configured)
   how it ended (`state`): `complete` (last page received), `capped` (`--max-per-month` reached with a cursor
   still open) or `error` (transport failure, non-JSON body, HTTP error, persistent rate limit). Only
   `complete` and `capped` units are recorded as done.
+* OpenAlex returns filter-only queries in **`cited_by_count` descending** order (verified live 2026-10-18: a
+  one-month topic filter came back 286, 112, 102, 92, 79, 66 citations), so a unit that hits the cap keeps the
+  month's most-cited works and drops the long tail. A first pass with a small cap (for example 300) is therefore a
+  usable "top of the month" corpus; a later run with a larger cap reopens the capped units and adds the tail.
 * `--max-per-month` (default 2000, must be >= 1) is checked between pages, so a unit may overshoot by up to
   one page. The cap is stored with the progress row; a capped unit is listed under `capped_units` in the
   report and **re-opened automatically by any later run with a larger `--max-per-month`**. Splitting by
