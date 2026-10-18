@@ -493,3 +493,43 @@ def test_backfill_fills_the_baseline_by_pub_date_and_extends_coverage(tmp_path):
     assert trends._backfill_start(st.conn) is None  # an unusable month is ignored, not fatal
     json.dumps(tr2)
     st.close()
+
+
+def test_mixed_history_ranks_z_scored_rows_above_rows_without_a_baseline(tmp_path):
+    """Paper families with a baseline, archive family without one: the movers tables are z-ranked and the archive
+    rows (z n/a, week-over-week deltas in the thousands) only fill the places left below the z-scored rows. Before
+    this rule a store with 13 weeks of paper history and one week of archive history showed twenty archive rows,
+    ordered by a delta the table does not print, and none of the notable paper movers it had just announced."""
+    st = Store(tmp_path / "mixed.sqlite")
+    for wk, n in zip([4, 3, 2, 1], [8, 12, 8, 12]):
+        _add_instrument_papers(st, "riser", "Riser 3000", wk, n)
+    _add_instrument_papers(st, "riser", "Riser 3000", 0, 20)  # z = +4.33, notable
+    for wk in [4, 3, 2, 1]:
+        _add_instrument_papers(st, "faller", "Faller 1000", wk, 10)  # 10 x4 then 0 -> z = -10, notable
+    # archive records in last week and this week only: one week of archive history (< 3) -> z suppressed for the family
+    big = [ArchiveRecord("sra", f"SRX1-{i}", "SRP1", "Big Box", "ILLUMINA", "WGS", _day(1, i % 7), "c", "t", "Homo sapiens", "big-box", "Vendor", "VND") for i in range(1000)]
+    big += [ArchiveRecord("sra", f"SRX0-{i}", "SRP0", "Big Box", "ILLUMINA", "WGS", _day(0, i % 7), "c", "t", "Homo sapiens", "big-box", "Vendor", "VND") for i in range(5000)]
+    old = [ArchiveRecord("sra", f"SRY1-{i}", "SRP2", "Old Box", "ILLUMINA", "WGS", _day(1, i % 7), "c", "t", "Homo sapiens", "old-box", "Vendor", "VND") for i in range(2000)]
+    st.upsert_archive_records(big + old)
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    hist = tr["history"]
+    assert hist["z_available_papers"] is True and hist["z_available_archive"] is False
+    rows = {r["id"]: r for r in tr["instruments"]["experiments"]}
+    assert rows["Big Box"]["z"] is None and rows["Big Box"]["delta"] == 4000  # the raw delta that used to outrank every z-score
+    assert rows["Old Box"]["z"] is None and rows["Old Box"]["delta"] == -2000
+    risers, fallers = trends.top_movers(tr, n=10)
+    assert [r["id"] for r in risers] == ["riser", "Big Box"] and [r["id"] for r in fallers] == ["faller", "Old Box"]
+    assert risers[0]["z"] == pytest.approx(4.33, abs=0.01) and fallers[0]["z"] == -10.0
+    # no place left below the z-scored rows: the family without a baseline does not appear at all
+    risers1, fallers1 = trends.top_movers(tr, n=1)
+    assert [r["id"] for r in risers1] == ["riser"] and [r["id"] for r in fallers1] == ["faller"]
+    md = trends.render_trends_markdown(tr, top_n=10)
+    assert ("_Fewer than 3 weeks of archive history: z-scores for that family are suppressed. Its rows (z n/a) are listed "
+            "after every z-scored row in the tables below, ordered by week-over-week change among themselves, so they appear "
+            "only when fewer than 10 z-scored risers or fallers qualify._") in md
+    assert md.index("| **Riser 3000** |") < md.index("| Big Box |") and md.index("| **Faller 1000** |") < md.index("| Old Box |")
+    md1 = trends.render_trends_markdown(tr, top_n=1)
+    assert "| **Riser 3000** |" in md1 and "| Big Box |" not in md1 and "| Old Box |" not in md1
+    json.dumps(tr)
+    st.close()

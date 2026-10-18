@@ -636,6 +636,12 @@ def top_movers(trends: Dict[str, Any], n: int = 10, min_count: Optional[int] = N
 
     Only entities with at least `min_count` counts this week, last week or on average are eligible,
     so one-paper blips do not crowd out real movement.
+
+    Rows that have a z-score always rank above rows that have none. The two scales are not comparable
+    (z-scores move by units, archive experiment counts by thousands a week), so when one family has
+    enough history for z-scores and another does not, the tables are z-ranked and the family without
+    a baseline only fills the places left below the z-scored movers. With no z-score anywhere (a cold
+    start) every row ranks by week-over-week change.
     """
     mc = trends["thresholds"]["min_count"] if min_count is None else min_count
     rows = [r for r in _all_rows(trends) if max(r["current"], r["previous"], r["mean"] or 0) >= mc]
@@ -643,8 +649,11 @@ def top_movers(trends: Dict[str, Any], n: int = 10, min_count: Optional[int] = N
     def score(r: Dict[str, Any]) -> float:
         return r["z"] if r["z"] is not None else float(r["delta"])
 
-    risers = sorted([r for r in rows if score(r) > 0], key=lambda r: (-score(r), -r["delta"], -r["current"], str(r["id"])))
-    fallers = sorted([r for r in rows if score(r) < 0], key=lambda r: (score(r), r["delta"], -r["previous"], str(r["id"])))
+    def tier(r: Dict[str, Any]) -> int:
+        return 0 if r["z"] is not None else 1  # z-scored rows before week-over-week rows, never interleaved
+
+    risers = sorted([r for r in rows if score(r) > 0], key=lambda r: (tier(r), -score(r), -r["delta"], -r["current"], str(r["id"])))
+    fallers = sorted([r for r in rows if score(r) < 0], key=lambda r: (tier(r), score(r), r["delta"], -r["previous"], str(r["id"])))
     return risers[:n], fallers[:n]
 
 
@@ -764,7 +773,11 @@ def render_trends_markdown(
         md.append(f"_Fewer than {base['min_weeks_for_z']} weeks of history: z-scores are suppressed and movers are ranked by week-over-week change._\n")
     elif not hist["z_available_papers"] or not hist["z_available_archive"]:
         missing = "paper" if not hist["z_available_papers"] else "archive"
-        md.append(f"_Fewer than {base['min_weeks_for_z']} weeks of {missing} history: z-scores for that family are suppressed._\n")
+        md.append(
+            f"_Fewer than {base['min_weeks_for_z']} weeks of {missing} history: z-scores for that family are suppressed. Its rows "
+            f"(z n/a) are listed after every z-scored row in the tables below, ordered by week-over-week change among themselves, "
+            f"so they appear only when fewer than {top_n} z-scored risers or fallers qualify._\n"
+        )
     tot = trends["totals"]
     md.append(f"**Corpus:** {_fmt_total(tot['papers'])} papers · {_fmt_total(tot['archive_experiments'])} archive experiments.\n")
     notable = trends["notable"]

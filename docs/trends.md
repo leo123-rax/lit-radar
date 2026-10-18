@@ -76,9 +76,16 @@ to it (a plain median of the pair would be their average and let it through).
 ### Ranking of risers and fallers
 
 `top_movers(trends, n)` takes every entity with at least `min_count` counts this week, last week or
-on baseline average, and ranks by `z` when it exists, otherwise by the week-over-week change. The
-renderer bolds notable rows. On a cold start the tables therefore show the largest counts, and the
-header states that z-scores are suppressed.
+on baseline average, and ranks by `z` when it exists, otherwise by the week-over-week change. Rows
+with a z-score always rank above rows without one; the two are never interleaved. The scales are not
+comparable (z-scores move by units, archive experiment counts by thousands a week), so when the paper
+families have a baseline and the archive family does not (or the other way round), the tables are
+z-ranked and the family without a baseline only fills the places left below the z-scored movers; the
+header says so and names `n`. Without this rule a store with 13 weeks of paper history and one week
+of archive history showed twenty archive rows with `z n/a`, ordered by a delta the table does not
+print, and none of the hundreds of notable paper movers it had just announced. The renderer bolds
+notable rows. On a cold start (no z-score anywhere) the tables show the largest week-over-week
+changes, and the header states that z-scores are suppressed.
 
 ## Backfills: publication-date weeks, not ingestion
 

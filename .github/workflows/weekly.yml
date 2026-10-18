@@ -153,22 +153,33 @@ jobs:
         run: |
           set -euo pipefail
           timeout -s INT -k 60 15m python -m litradar timeseries --all --refresh-months 2 --no-chart
-      - name: Optimize, checkpoint and compress the database
+      - name: Optimize, checkpoint, verify and compress the database
         run: |
           set -euo pipefail
           # merge the FTS5 segments the week's upserts rewrote and reclaim free pages, so the snapshot
           # grows with content rather than with re-indexing (measured: +16 MB raw for 3 new papers without this)
+          # A database that fails integrity_check afterwards is never compressed, so it never reaches the
+          # publish job: db-latest and db-YYYY-MM keep the previous snapshot (docs/deploy.md, safety rails).
           python3 - <<'EOF'
           import sqlite3
-          c = sqlite3.connect("data/radar.sqlite", isolation_level=None)
+          import sys
           try:
-              c.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
-          except sqlite3.OperationalError as exc:  # first run: the table may not exist yet
-              print(f"FTS optimize skipped: {exc}")
-          c.execute("VACUUM")
-          c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-          print(c.execute("PRAGMA integrity_check").fetchone()[0])
-          c.close()
+              c = sqlite3.connect("data/radar.sqlite", isolation_level=None)
+              try:
+                  c.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
+              except sqlite3.OperationalError as exc:  # first run: the table may not exist yet
+                  print(f"FTS optimize skipped: {exc}")
+              c.execute("VACUUM")
+              c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+              status = c.execute("PRAGMA integrity_check").fetchone()[0]
+              c.close()
+          except sqlite3.DatabaseError as exc:  # VACUUM or the check itself failed on a malformed file
+              status = f"unreadable: {exc}"
+          if status != "ok":
+              print(f"::error::database failed integrity_check after the run ({status}). Not publishing it: the state "
+                    "releases keep the previous snapshot. See docs/deploy.md (safety rails).")
+              sys.exit(1)
+          print("integrity_check: ok")
           EOF
           zstd -T0 -15 -q -f data/radar.sqlite -o "$STATE_ASSET"
           ls -l data/radar.sqlite "$STATE_ASSET"
@@ -219,6 +230,17 @@ jobs:
           old_size=$(gh release view "$STATE_RELEASE" --json assets --jq ".assets[] | select(.name == \"$STATE_ASSET\") | .size" 2>/dev/null || true)
           if [ -n "$old_size" ] && [ $((new_size * 2)) -lt "$old_size" ]; then
             echo "::error::new snapshot is $new_size bytes, the published one is $old_size bytes. Refusing to overwrite $STATE_RELEASE; the file is attached to this run as the radar-state artifact. See docs/deploy.md (rolling back)."
+            exit 1
+          fi
+          # the file that replaces db-latest and the month's roll-back point must itself pass integrity_check:
+          # the radar job checked it before compressing, this is the last gate before --clobber (a same-size
+          # corrupt file passes the size guard above)
+          command -v zstd >/dev/null || (sudo apt-get update -q && sudo apt-get install -y -q zstd)
+          zstd -d -q -f "incoming/$STATE_ASSET" -o incoming/radar.sqlite
+          status=$(python3 -c "import sqlite3; c = sqlite3.connect('incoming/radar.sqlite'); print(c.execute('PRAGMA integrity_check').fetchone()[0]); c.close()" 2>&1 || true)
+          rm -f incoming/radar.sqlite
+          if [ "$status" != "ok" ]; then
+            echo "::error::incoming snapshot failed integrity_check ($status). Refusing to overwrite $STATE_RELEASE and the monthly release; the file is attached to this run as the radar-state artifact. See docs/deploy.md (safety rails)."
             exit 1
           fi
           month="db-$(date -u +%Y-%m)"

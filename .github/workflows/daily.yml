@@ -157,17 +157,28 @@ jobs:
           # Merge the FTS5 segments that the day's upserts rewrote and reclaim free pages before
           # compressing. Without this, an overlap re-pull that added 3 papers grew the snapshot by
           # ~16 MB raw / ~6 MB zstd (the re-indexed papers_fts segments were never merged).
+          # A database that fails integrity_check afterwards is never compressed or uploaded: the step
+          # fails and db-latest keeps the previous snapshot (docs/deploy.md, safety rails).
           python - <<'EOF'
           import sqlite3
-          c = sqlite3.connect("data/radar.sqlite", isolation_level=None)
+          import sys
           try:
-              c.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
-          except sqlite3.OperationalError as exc:  # first run: the table may not exist yet
-              print(f"FTS optimize skipped: {exc}")
-          c.execute("VACUUM")
-          c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-          print(c.execute("PRAGMA integrity_check").fetchone()[0])
-          c.close()
+              c = sqlite3.connect("data/radar.sqlite", isolation_level=None)
+              try:
+                  c.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
+              except sqlite3.OperationalError as exc:  # first run: the table may not exist yet
+                  print(f"FTS optimize skipped: {exc}")
+              c.execute("VACUUM")
+              c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+              status = c.execute("PRAGMA integrity_check").fetchone()[0]
+              c.close()
+          except sqlite3.DatabaseError as exc:  # VACUUM or the check itself failed on a malformed file
+              status = f"unreadable: {exc}"
+          if status != "ok":
+              print(f"::error::database failed integrity_check after the update ({status}). Not uploading it: the db-latest "
+                    "release keeps the previous snapshot. See docs/deploy.md (safety rails).")
+              sys.exit(1)
+          print("integrity_check: ok")
           EOF
           zstd -T0 -19 -f data/radar.sqlite -o "data/$DB_ASSET"
           ls -l data/radar.sqlite "data/$DB_ASSET"
