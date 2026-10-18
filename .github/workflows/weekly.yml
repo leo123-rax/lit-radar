@@ -141,6 +141,18 @@ jobs:
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then FLAGS="$FLAGS --slack"; fi
           # SIGINT lets Python unwind and checkpoint SQLite; the runner's own job kill would not reach it
           timeout -s INT -k 60 100m python -m litradar run $FLAGS
+      - name: Refresh the archive time series (SRA, ENA, Europe PMC counts per instrument model; docs/sources/timeseries.md)
+        # After the radar run and BEFORE the database is compressed, so the refreshed `timeseries` table travels in
+        # the snapshot the publish job stores and pages.yml charts on timeseries.html. Request budget: one request
+        # per entity per source for the current month and the two before it = 74 series x 3 months = 222 requests
+        # a week with a warm cache (SRA 72 at 0.4 s, ENA 72 and Europe PMC 78 at 0.2 s: about a minute). A cold
+        # cache fetches the last 36 months instead (about 2,600 requests, 12-15 minutes); every count is committed
+        # on its own, so a run the 15-minute timeout cuts short resumes where it stopped next week. A failure here
+        # (a source down, the timeout) must never fail the digest, hence continue-on-error.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          timeout -s INT -k 60 15m python -m litradar timeseries --all --refresh-months 2 --no-chart
       - name: Optimize, checkpoint and compress the database
         run: |
           set -euo pipefail

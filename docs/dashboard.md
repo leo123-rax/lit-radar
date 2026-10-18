@@ -2,7 +2,7 @@
 
 The weekly digest answers *what happened last week*. Once the store has been running for a while it
 can answer a different question — *what is happening over time* — and that one wants charts, not
-prose. `litradar dashboard` reads the SQLite store and writes a **self-contained static site**: six
+prose. `litradar dashboard` reads the SQLite store and writes a **self-contained static site**: seven
 HTML pages, a stylesheet, one script, the data as JSON, and a client-side search engine (its index
 and vocabulary as two more JSON files). No server, no build step, no framework.
 
@@ -35,6 +35,7 @@ copies the database and its sidecars to a temporary directory, reads the copy, a
 |---|---|
 | `index.html` | papers per week; instruments named per week by vendor; archive experiments per week by vendor; top movers (instruments by papers, instruments by experiments, companies by mentions — ranked over **every** entity in the store, not only the carded ones); monthly series when the optional `timeseries` table exists |
 | `instruments.html` | one card per instrument: papers naming it per week **and** archive experiments per week, in two separate charts, plus its most recent papers. Cards are the union of the 48 most-named instruments and the 48 with the most archive experiments, so a sequencer that archives see constantly but papers rarely name by model keeps its card; the lede states how many of the instruments with signal are shown |
+| `timeseries.html` | the archive time series (`litradar timeseries --all`): one chart per vendor with its instrument models as monthly series — SRA experiments by default, switchable to ENA runs or Europe PMC papers, linear or log axis — the last two months shaded as incomplete, a dashed vendor total, a 12-month table per vendor, and links to the committed CSV and to `data/timeseries.json`. Details below |
 | `companies.html` | one card per company: mentions per week split by role — author affiliation, funding / competing-interest statement, subject of the work — with the stored news count |
 | `subgroups.html` | papers per week per research subgroup; every subgroup is in the table, the chart keeps the six largest and folds the rest into `Other` |
 | `countries.html` | papers per week by country of first affiliation, or an explanation of how to enable it |
@@ -60,7 +61,7 @@ is written, so a broken store can never publish an all-zero site as if it were n
 | `archive_records` | experiments per week, by vendor and per instrument entity |
 | `news_items` | per-company news counts (matched on the stored company id, else the display name) |
 | `tracked_author_hits` | subgroup counts |
-| `timeseries` *(optional)* | monthly pre-aggregated counts: `source, entity_id, model, month, count` |
+| `timeseries` *(optional)* | monthly pre-aggregated counts: `source, entity_id, model, month, count` (`fetched_at` when present); the overview's monthly card and the whole of `timeseries.html` |
 
 **Week buckets** are ISO weeks keyed by the Monday, in UTC. A paper is bucketed by `pub_date`,
 falling back to the date part of `first_seen` for feeds that carry no publication date — the same
@@ -106,6 +107,45 @@ of a chart.
 Counts come from `tracked_author_hits` (configure authors in `config/subgroups.yaml`) and, when a
 paper's `extra_json` carries `subgroups: ["single_cell", …]` or `subgroup: "single_cell"`, from that
 keyword assignment. Either source alone is enough.
+
+## The time-series page
+
+`timeseries.html` answers *which sequencers are being used over time*, from the `timeseries` table that
+`litradar timeseries --all` fills (monthly counts per instrument model from NCBI SRA, ENA and Europe PMC;
+method and caveats in `docs/sources/timeseries.md`). The weekly workflow refreshes that table before the
+database snapshot is stored, so the published page follows the archives with a one-week cadence.
+
+* **One card per vendor, its models as series.** Vendors appear in the order of `config/archive_models.yaml`,
+  models in configuration order; names and vendors come from `config/instruments.yaml`, then
+  `archive_models.yaml`, then the store's `mentions` table, then the raw id. An entity's rows are summed per
+  month, which is exact whether the cache holds one row per entity (the current layout) or one per
+  vocabulary string (the layout before 2026-10-18). A dashed grey line gives the vendor total when a vendor
+  has more than one model.
+* **Measure and axis are page-wide switches**: SRA experiments (default), ENA runs, Europe PMC papers;
+  linear or logarithmic. Every chart and table re-renders on a change; a logarithmic axis has no zero, so a
+  zero month is drawn as a gap and the page says so.
+* **The last two months are shaded "incomplete (deposit lag)"** on every chart, marked `*` in the tables and
+  named in the tooltip. Archives index deposits and papers for weeks after a month ends, and the weekly
+  refresh re-fetches the current month and the two before it (`--refresh-months 2`), so those values will
+  still grow. The count comes from `TIMESERIES_INCOMPLETE_MONTHS` in `litradar/dashboard.py`.
+* **A 12-month table under each chart** (model × month for the selected measure, plus the total row),
+  `null` months blank, numbers with thousands separators. The table scrolls inside its card at phone width;
+  the page never scrolls sideways.
+* **Downloads.** The page links the committed CSV by its repository path
+  (`digests/timeseries/timeseries_<from>_<to>_all.csv`) and the page's own data as `data/timeseries.json`.
+  The build copies that CSV into the site under the **same relative path**, so the link resolves both in a
+  checkout and on the published site. `litradar dashboard` looks for it in `<out_dir>/timeseries`
+  (`digests/timeseries` by default; the `_all` selection first, then the latest `--to`, then the widest
+  range); the Python API takes `build(..., config_dir=..., timeseries_dir=...)`, and both are optional.
+* **Nothing cached yet?** The page says so and tells you what to run — *run `litradar timeseries --all`
+  first* — instead of rendering empty charts; a database from before the table existed behaves the same way.
+* **Everything is escaped.** Model and vendor names are written through `html.escape` into the page and
+  through the `<`/`>`/`&`-free JSON blob into the script; the script creates text nodes only.
+
+`data/timeseries.json` is `{available, months, incomplete, sources[{id,label,unit,note}], vendors[{name,
+slug, entities[{id, name, series{source: [count|null per month]}}]}], entities, series, rows, fetched_at,
+csv, json, generated}`. For 27 models over 46 months (74 series) the page is 28 KB and the JSON 21 KB; the
+copied CSV (3,404 rows) is 232 KB.
 
 ## Charting
 

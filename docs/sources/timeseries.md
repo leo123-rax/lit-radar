@@ -19,12 +19,24 @@ python -m litradar timeseries --vendor pacb --from 2019-01            # every Pa
 python -m litradar timeseries --vendor nanopore --vendor ilmn --dry-run  # how many requests would this take?
 ```
 
-Options: `--entity` (repeatable; ids from `config/archive_models.yaml`), `--vendor` (repeatable; vendor
-name, ticker or id prefix such as `pacb`, `ont`, `ilmn`, `mgi`), `--from/--to YYYY-MM` (default: the
-last 36 months), `--sources` (default all three), `--out` (default `<out_dir>/timeseries`),
-`--refresh-months N` (re-fetch the current month and the N months before it even when cached; default 2,
-so on 2026-10-17 months >= 2026-08 are always re-fetched), `--force` (re-fetch and overwrite everything),
-`--no-chart`, `--dry-run`.
+Options: `--all` (every entity in `config/archive_models.yaml`; what the weekly workflow runs), `--entity`
+(repeatable; ids from `config/archive_models.yaml`), `--vendor` (repeatable; vendor name, ticker or id prefix
+such as `pacb`, `ont`, `ilmn`, `mgi`), `--from/--to YYYY-MM` (default: the last 36 months), `--sources`
+(default all three), `--out` (default `<out_dir>/timeseries`), `--refresh-months N` (re-fetch the current
+month and the N months before it even when cached; default 2, so on 2026-10-17 months >= 2026-08 are always
+re-fetched), `--force` (re-fetch and overwrite everything), `--no-chart`, `--dry-run`, `--json` (the whole
+report as JSON; without it the command prints a few summary lines: selection, request arithmetic per source,
+what the cache folding did, the output paths, then every warning and error verbatim).
+
+```
+$ litradar timeseries --all --from 2023-01 --to 2026-10 --refresh-months 2 --no-chart
+timeseries: 27 entities, 74 series, 46 months (2023-01..2026-10), sources sra,ena,epmc
+backfill: made 222 requests; 3182 cached, 0 pre-launch zeros, 0 failed, 0 kept; refresh cutoff 2026-08 (sra 72 requests / 1032 cached, ena 72 requests / 1032 cached, epmc 78 requests / 1118 cached)
+cache layout: folded 3036 per-string rows into 736 entity rows (16 entity/source pairs; 0 months left to the backfill)
+outputs: digests/timeseries/timeseries_2023-01_2026-10_all.csv (3404 rows), digests/timeseries/timeseries_2023-01_2026-10_all.md
+```
+(the run of 2026-10-18 against a cache that the earlier per-string version had filled; see *One series per
+entity* below for what "folded" means).
 
 `--from` / `--to` are checked against the current month: a `--to` in the future is clamped to the current
 month with a warning, a `--from` in the future is an error before any request is spent (future months
@@ -35,7 +47,8 @@ Outputs in `--out`, named `timeseries_<from>_<to>_<selection>.*` where `<selecti
 its first token plus a hash of the resolved ids), so runs for different vendors into one directory keep
 their files; a run that re-creates its own files says so in `warnings`:
 
-* `.csv`: long format `source,entity_id,model,month,count,unit` (`unit` = `experiments`, `runs` or `papers`);
+* `.csv`: long format `source,entity_id,model,month,count,unit` (`unit` = `experiments`, `runs` or `papers`;
+  `model` = the entity's archive strings or Europe PMC terms pipe-joined, one series per entity and source);
 * `.md`: one table per source in the `--sources` order, rows = months, columns = the planned series in
   config order labelled with the gazetteer name and the archive string or term set
   (`Revio (revio)`, `Sequel II (Sequel II, Sequel IIe)`), numbers right-aligned with thousands separators,
@@ -101,13 +114,51 @@ Rows whose series is no longer configured (a renamed model string or a changed `
 the table but are excluded from the CSV, Markdown and chart, which only ever contain the series planned
 for the current run. Prune the `timeseries` table by hand if you want them gone.
 
-Request budget: one request per model string per month per source. For all PacBio models (8 archive
-strings + 6 Europe PMC term sets) over 2019-01..2026-10 (94 months) that is 8 x 94 x 2 + 6 x 94 = 2,068
-requests: about 4 minutes of SRA at 3 requests/s (NCBI's limit without a key; 10/s with `NCBI_API_KEY`),
-plus about 3 minutes of ENA and Europe PMC at the 0.2 s pacing already configured for `www.ebi.ac.uk`.
-`--dry-run` prints the exact number before you spend it. Both hosts already have `DEFAULT_MIN_INTERVAL`
-entries in `litradar/http.py`; no new host was added. Never run two NCBI loops at the same time: during
-testing, a second concurrent process was enough to get HTTP 429 from E-utilities.
+Request budget: **one request per entity per source per month**, whatever the vocabulary looks like (see the
+next section). The 27 configured entities make 74 series (24 with SRA strings, 24 with ENA values, 26 with
+Europe PMC terms), so:
+
+| run | months requested | requests |
+|---|---|---|
+| warm cache, `--refresh-months 2` (the weekly step) | the current month and the two before it | 74 x 3 = **222** (SRA 72, ENA 72, Europe PMC 78); about a minute: SRA at 0.4 s per request without `NCBI_API_KEY`, the EBI hosts at 0.2 s |
+| cold cache, default `--from` (36 months) | every month | **2,611** (SRA 850, ENA 850, Europe PMC 911; 53 months stored as 0 under launch floors, no request) - 12 to 15 minutes |
+| cold cache, `--from 2023-01` (46 months on 2026-10-18) | every month | 3,404 - 123 pre-launch = 3,281 |
+
+The warm-cache figure is inside the (entities x sources x 3) = 243 envelope by construction, because a
+multi-string entity costs one request, not one per string. `--dry-run` prints the exact number before you
+spend it (the numbers above are its output). Both hosts already have `DEFAULT_MIN_INTERVAL` entries in
+`litradar/http.py`; no new host was added. Never run two NCBI loops at the same time: during testing, a
+second concurrent process was enough to get HTTP 429 from E-utilities.
+
+## One series per entity (layout since 2026-10-18)
+
+An entity's archive strings are OR-ed into **one** count request per month, exactly as its Europe PMC terms
+always were: SRA `2025/06/01:2025/06/30[PDAT] AND ("instrument sequel ii"[Properties] OR "instrument sequel
+iie"[Properties])`, ENA `... AND (instrument_model="Sequel II" OR instrument_model="Sequel IIe")`. The series
+key (the `model` column of the cache and the CSV) is the pipe-joined string list, `sequel ii|sequel iie`;
+for a single string it is the string itself, so `revio` rows written before this change are the same rows.
+Verified live on 2026-10-18 for 2025-06: the SRA OR gave 5,139 = 3,474 + 1,665 (the two single-string
+counts, which the cache also held), the ENA OR gave 5,190 = 3,493 + 1,697, and when one phrase inside the OR
+has no records (`vega|onso`) esearch drops it from the querytranslation, lists it under
+`warninglist.quotedphrasesnotfound` and still evaluates the others under `[Properties]`, so the acceptance rule
+of the SRA section holds. Whole-string matching makes the strings disjoint, which is why the union equals the
+sum - and why the per-string history was not lost:
+
+* **Folding.** Every run first calls `consolidate_cache`: for each selected entity with two or more strings
+  for a source, a month whose strings are *all* cached becomes one entity row holding their sum (no request),
+  the per-string rows are deleted in the same transaction, and the report says so (`consolidated`:
+  `derived`, `pruned`, `partial` = months with some strings missing, left to the backfill). Entity rows that
+  already exist are kept. A `--dry-run` folds nothing; it plans *as if* it had, so the number it prints is
+  the number the real run makes. On 2026-10-18 the 5,704-row per-string cache (124 series) became a 3,404-row
+  entity cache (74 series) with 0 partial months.
+* **What you lose and where it still is.** The split of one gazetteer entity into its vocabulary variants
+  (NovaSeq X vs NovaSeq X Plus, the nine HiSeq models, the eight Ion Torrent models) is no longer refreshed.
+  The last per-string export, `digests/timeseries/timeseries_2023-01_2026-10_pacific-biosciences+27ids-e4dcee.csv`
+  (2023-01..2026-10 as fetched on 2026-10-18), keeps that resolution as a file. Give a variant its own
+  gazetteer entity if you want it as a series of its own.
+* **Outputs.** The Markdown columns are labelled with the gazetteer name and the string set
+  (`Sequel II (sequel ii, sequel iie)`); the dashboard page sums an entity's rows per month, which is exact
+  under either layout.
 
 ## Endpoints, verified live on 2026-10-17
 
@@ -342,9 +393,26 @@ grow (caveat 2). The 2026-08 spike is a handful of large releases, not a step ch
 (caveat 1): a 1,000-record `esummary` sample of the 4,418 experiments spans 61 studies, and the three largest
 make up 73% of the sample.
 
-## Wiring into the weekly pipeline (optional)
+## Wiring into the weekly pipeline and the dashboard
 
-The command is standalone and needs no changes to `litradar/pipeline.py`. To refresh a standing series
-every week, add a step after `python -m litradar run` in the scheduler, for example
-`python -m litradar timeseries --vendor pacb --vendor nanopore --from 2019-01 --out digests/timeseries/`:
-the cache makes the weekly cost a few dozen requests.
+The command is standalone and needs no changes to `litradar/pipeline.py`. `.github/workflows/weekly.yml`
+runs it in the `radar` job right after `python -m litradar run` and before the database is compressed:
+
+```
+timeout -s INT -k 60 15m python -m litradar timeseries --all --refresh-months 2 --no-chart
+```
+
+with `continue-on-error: true`, so a source outage or the timeout never fails the digest. Because the step
+precedes compression, the refreshed `timeseries` table travels in the `radar.sqlite.zst` snapshot the publish
+job stores, and `pages.yml` (which runs after the weekly digest) charts it on `timeseries.html`. Weekly
+budget: **222 requests** with a warm cache (the table above). A fork whose snapshot has no cache yet fetches
+36 months on its first run (2,611 requests, 12-15 minutes); if the 15-minute `timeout` cuts that short the
+run exits non-zero, keeps every count it committed, and finishes the rest the following week. The CSV and
+Markdown the step writes under `digests/timeseries/` stay in the runner (the publish job commits
+`digests/*.md` only); refresh the committed `timeseries_<from>_<to>_all.*` pair by hand when you want the
+file to catch up with the cache.
+
+The dashboard page (`litradar dashboard`, `timeseries.html`; docs/dashboard.md, *The time-series page*)
+draws one chart per vendor with the vendor's models as series, a measure switch (SRA experiments, ENA runs,
+Europe PMC papers), a linear/log switch, the last two months shaded as incomplete, a vendor total, a
+12-month table per vendor, and links to the committed CSV and to `data/timeseries.json`.

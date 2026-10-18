@@ -10,7 +10,7 @@
   litradar stats    [--json]                                  database totals and last runs
   litradar dashboard --out site/ [--weeks 52]                 build the static trends site from the database
   litradar check-config                                       validate YAML files and report duplicates
-  litradar timeseries [--entity id ...] [--vendor name ...] [--from YYYY-MM --to YYYY-MM] [--sources sra,ena,epmc] [--out DIR]
+  litradar timeseries [--all | --entity id ... | --vendor name ...] [--from YYYY-MM --to YYYY-MM] [--sources sra,ena,epmc] [--out DIR] [--json]
                                                               monthly experiment / paper counts per instrument model
   litradar fetch    <source> [--since --until | --days] [...] [--raw] [--out file.jsonl|-]
   litradar fetch    --list                                    raw access to one source adapter, JSON lines out
@@ -246,7 +246,10 @@ def cmd_dashboard(args) -> int:
     db_path = Path(args.db) if args.db else settings.db_path
     out_dir = Path(args.out or "site")
     try:
-        report = dashboard.build(db_path, out_dir, weeks=args.weeks, max_papers=args.max_papers)
+        # config_dir names the archive models and vendors on timeseries.html; the committed CSV under
+        # <out_dir>/timeseries is copied into the site so the page's download link resolves there too
+        report = dashboard.build(db_path, out_dir, weeks=args.weeks, max_papers=args.max_papers,
+                                 config_dir=Path(settings.config_dir), timeseries_dir=Path(settings.out_dir) / "timeseries")
     except (sqlite3.Error, FileNotFoundError) as exc:
         # a locked, corrupt or missing store must not publish an all-zero site
         print(f"dashboard: cannot read {db_path}: {exc}", file=sys.stderr)
@@ -342,6 +345,7 @@ def cmd_timeseries(args) -> int:
         out_dir=Path(args.out or (Path(settings.out_dir) / "timeseries")),
         entities=args.entity or [],
         vendors=args.vendor or [],
+        all_entities=bool(args.all),
         start=args.start,
         end=args.end,
         sources=sources,
@@ -352,8 +356,51 @@ def cmd_timeseries(args) -> int:
         contact_email=settings.contact_email,
         ncbi_api_key=settings.ncbi_api_key,
     )
-    print(json.dumps(report, indent=1, default=str))
+    if args.json:
+        print(json.dumps(report, indent=1, default=str))
+    else:
+        print(timeseries_summary(report))
     return 1 if report.get("errors") else 0
+
+
+def timeseries_summary(report: dict) -> str:
+    """The human-readable account of a `timeseries` run (`--json` prints the whole report instead): the
+    selection, the request arithmetic per source, what the cache folding did, the outputs, then every
+    warning and error verbatim. Numbers are exact; nothing is rounded."""
+    lines = []
+    if report.get("entities"):
+        lines.append(
+            f"timeseries: {len(report['entities'])} entities, {report.get('series', 0)} series, {report.get('months', 0)} months "
+            f"({report.get('from')}..{report.get('to')}), sources {','.join(report.get('sources') or [])}"
+        )
+    bf = report.get("backfill") or {}
+    if bf:
+        per_source = ", ".join(
+            f"{src} {v.get('requests', 0)} requests / {v.get('cached', 0)} cached" for src, v in (bf.get("by_source") or {}).items()
+        )
+        verb = "would make" if report.get("dry_run") else "made"
+        lines.append(
+            f"{'dry run: ' if report.get('dry_run') else 'backfill: '}{verb} {bf.get('requests', 0)} requests; {bf.get('cached', 0)} cached, "
+            f"{bf.get('pre_launch', 0)} pre-launch zeros, {len(bf.get('failed') or [])} failed, {len(bf.get('kept') or [])} kept; "
+            f"refresh cutoff {bf.get('cutoff')}" + (f" ({per_source})" if per_source else "")
+        )
+    cons = report.get("consolidated") or {}
+    if cons.get("derived") or cons.get("pruned") or cons.get("partial"):
+        verb = "would fold" if report.get("dry_run") else "folded"
+        lines.append(
+            f"cache layout: {verb} {cons.get('pruned', 0)} per-string rows into {cons.get('derived', 0)} entity rows "
+            f"({len(cons.get('entities') or [])} entity/source pairs; {cons.get('partial', 0)} months left to the backfill)"
+        )
+    outputs = report.get("outputs") or {}
+    if outputs:
+        png = outputs.get("png")
+        png_text = "" if "png" not in outputs else (f", png {png}" if png else ", png skipped (matplotlib not installed)")
+        lines.append(f"outputs: {outputs.get('csv')} ({outputs.get('rows', 0)} rows), {outputs.get('markdown')}{png_text}")
+    for w in report.get("warnings") or []:
+        lines.append(f"warning: {w}")
+    for e in report.get("errors") or []:
+        lines.append(f"error: {e}")
+    return "\n".join(lines) if lines else "timeseries: nothing to report"
 def _entity_context(settings: Settings) -> tuple:
     instruments = Gazetteer.from_yaml(settings.yaml("instruments"), "instrument")
     companies = Gazetteer.from_yaml(settings.yaml("companies"), "company")
@@ -715,6 +762,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.set_defaults(func=cmd_check_config)
 
     p = sub.add_parser("timeseries", help="monthly counts of SRA/ENA experiments and Europe PMC papers per instrument model")
+    p.add_argument("--all", action="store_true", help="every entity in config/archive_models.yaml (what the weekly workflow runs)")
     p.add_argument("--entity", action="append", help="gazetteer id from config/archive_models.yaml (repeatable), e.g. pacb-revio")
     p.add_argument("--vendor", action="append", help="all entities of a vendor: name, ticker or id prefix (repeatable), e.g. pacb")
     p.add_argument("--from", dest="start", help="first month YYYY-MM (default: 36 months back)")
@@ -725,6 +773,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--force", action="store_true", help="re-fetch every month, ignoring the cache")
     p.add_argument("--no-chart", action="store_true", help="skip the PNG even when matplotlib is installed")
     p.add_argument("--dry-run", action="store_true", help="plan only: report how many requests a run would make")
+    p.add_argument("--json", action="store_true", help="print the full report as JSON instead of the summary lines")
     p.set_defaults(func=cmd_timeseries)
 
     # raw access to every source adapter without the pipeline (litradar/toolkit.py)
