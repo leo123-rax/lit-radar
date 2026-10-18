@@ -73,15 +73,26 @@ Tokenizer facts that change how you write queries:
 | phrase with a dot or slash | `"R10.4.1"`, `"HiSeq X/Ten"` | same rule |
 | a literal quote inside a phrase | `"said ""hi"""` | double the quote character |
 
-Ranking: results are ordered by `bm25(papers_fts)` (lower is better); the API returns it as `rank`.
+**Ordering.** Research papers come first; records that are not papers follow, each with a `record_type`
+saying why (`letter`, `editorial`, `dataset`, `software`, `deposit` for a general repository such as Zenodo or
+figshare, `protocol`, `supplement`, `dissertation`, `peer_review`, `paratext`; `null` for a paper). The rule is
+`litradar/worktype.py` (OpenAlex `work_type`, repository DOI prefixes and venues, NEJM DOI codes, "To the
+Editor:" / "Reply to" / "Supplementary ... from" cues), applied as one SQL expression. Within each group the
+`sort` decides: `relevance` (default) is `bm25(papers_fts, ...)` with the title weighted 4, abstract and entity
+mentions 2, Methods / funding / COI / affiliations 1 and body 0.5 (lower `rank` is better); `score` is the stored
+rank score (`score`; unscored rows last); `date` is newest first. bm25 normalises by document length, so a
+title-only deposit record would otherwise outrank a full-text paper that names the same platform in its title:
+that is why the papers-first rule exists rather than a weight. Rows that share a title (a dataset deposited in
+24 versions) fold into the best-placed one, whose `duplicates` counts the rows folded; `--keep-duplicates`
+(CLI) or `collapse=0` (API) keeps them apart.
 
-Snippets are 18-token excerpts with the matched tokens in `[` and `]`, cut from the paper's own text: among
-`title`, `abstract`, `methods`, `funding`, `coi`, `affiliations` and `body`, the column whose best window holds
-the most matches wins, the earlier column on a tie, and `section` names it (the CLI prints it as `[methods]`
-before the excerpt, the search page as "matched in methods"). Only a paper that matched through the
-`mentions` column alone - nothing in its text matched, the gazetteer attributed the entity through an alias -
-shows that column's `;`-joined entries, with `section: mentions`. Snippets are computed for the returned rows
-after ranking, so a broad query costs no more than a narrow one.
+**Snippets.** Each hit's `snippet` is an 18-token excerpt with the matched tokens in `[` and `]`, cut from the
+paper's own text: among `title`, `abstract`, `methods`, `funding`, `coi`, `affiliations` and `body`, the column
+whose best window holds the most matches wins, the earlier column on a tie, and `section` names it (the CLI
+prints it as `[methods]` before the excerpt, the search page as "matched in methods"). Only a paper that
+matched through the `mentions` column alone - nothing in its text matched, the gazetteer attributed the entity
+through an alias - shows that column's `;`-joined entries, with `section: mentions`. Snippets are computed for
+the returned rows only, after ranking and title folding, so a broad query costs no more than a narrow one.
 
 **Section filter versus column filter.** `--in methods,coi` (CLI) or `in=methods,coi` (API) wraps your
 whole query as `{methods coi}: (query)`; writing `methods:` inside the query does the same for one
@@ -144,6 +155,10 @@ Properties:
   affiliations and the stored sections are returned as stored.
 - **Windows.** `since`/`until` default to the last 7 days ending today (UTC) on the count endpoints.
   `/search` and `/entities` take `since` only (no upper bound), like the CLI.
+- **Search ordering.** `/search` takes `sort=relevance|score|date` (default `relevance`; anything else is a
+  `400`) and `collapse=1|0` (default `1`: rows sharing a title fold into one, `duplicates` counting the rest).
+  Research papers always precede letters, editorials and dataset / software deposits; `record_type` says why a
+  row is in the second group (`null` for a paper). The response echoes `sort` and `collapse`.
 - **Database checks at startup.** A missing file, a file that is not SQLite, or a database without the
   radar schema stops `litradar serve` with one line and exit 2; a busy port is one line and exit 1. A
   database error during a request is a `503` (`database error`), never a traceback to the client.
@@ -159,7 +174,7 @@ Properties:
 
 | Endpoint | Parameters | Returns |
 |---|---|---|
-| `/search` | `q` (required, FTS5 as written), `since`, `in` (comma list of columns, `mentions` included), `limit` (default 50, max 200), `mentions=0` (also `false`/`no`) to skip chips | `{query, since, sections, limit, count, results[]}`; each hit: `id, doi, title, journal, pub_date, url, kind, source, snippet, section, rank, instruments[], companies[]` (`section` = the column the snippet was cut from, section 2); an FTS5 syntax error is a `400` with SQLite's message |
+| `/search` | `q` (required, FTS5 as written), `since`, `in` (comma list of columns, `mentions` included), `limit` (default 50, max 200), `sort` (`relevance` default, `score`, `date`), `collapse` (`1` default; `0` keeps rows that share a title), `mentions=0` (also `false`/`no`) to skip chips | `{query, since, sections, limit, sort, collapse, count, results[]}`; each hit: `id, doi, title, journal, pub_date, url, kind, source, snippet, section, rank, score, record_type, duplicates, instruments[], companies[]` (`section` = the column the snippet was cut from, section 2; `record_type` = why the row is not a research paper, `null` for a paper; `duplicates` = rows with the same title folded into this one); an FTS5 syntax error is a `400` with SQLite's message |
 | `/papers/{id}` or `/papers?id=` | id may be URL-encoded (`doi%3A10.1000%2Fabc`) or raw | the paper with `authors[]` (no e-mail field), `affiliations[]`, `sections{}`, `topics[]`, `extra{}` (no `emails`), plus `mentions[]`, `score{heuristic, llm, final, reasons}`, `tracked_authors[]`; unknown id: `404` |
 | `/entities/{kind}/{id}/papers` | `kind` = `instrument` or `company` (anything else: `400`); `since`; `limit` (max 200) | `{kind, entity_id, entity{name, vendor, ticker, category}, since, limit, count, results[]}`; one row per paper with `sections[]`, `mentions`, `snippet`. An id with no stored mention is `404 unknown instrument id '...'` (the message says when the id exists under the other kind); the API has no gazetteer, so a valid entry nothing has cited yet is also a 404 |
 | `/instruments` | `since`, `until`, `limit` (default 60, max 500) | instrument counts: `entity_id, entity_name, vendor, ticker, category, papers, mentions, sections[], example_title, example_url` |
@@ -313,6 +328,8 @@ Vercel, Fly.io or Datasette Lite, and the settings to add before making a copy p
 
 ```bash
 litradar search "methods:Xenium" --since 90d --limit 20 [--json]
+litradar search "Xenium" --sort score                    # by stored rank score; --sort date = newest first; default = relevance
+litradar search "Visium" --keep-duplicates               # keep every dataset version instead of folding repeated titles
 litradar search "liquid biopsy" --since 30d              # plain text = phrase (see above); --json adds each paper's score
 litradar search "liquid biopsy" --raw-fts                # verbatim FTS5: AND of the stemmed words
 litradar search "Illumina" --in coi,funding --since 30d

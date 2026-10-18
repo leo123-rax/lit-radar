@@ -17,7 +17,8 @@ SQLite's own message (``query not understood by FTS5: ...``); the API never sile
 
 Endpoints (all GET; see ``/api`` for the machine-readable index and docs/search.md):
 
-    /search?q=&since=&in=methods,coi&limit=     full-text search (FTS5 syntax allowed)
+    /search?q=&since=&in=methods,coi&limit=&sort=relevance|score|date&collapse=1
+                                                 full-text search (FTS5 syntax allowed); papers before letters / deposits
     /papers/{id}                                 one paper with mentions, score, tracked authors
     /entities/{kind}/{id}/papers?since=&limit=   papers mentioning one gazetteer entry
     /instruments?since=&until=&limit=            instrument counts in a window
@@ -51,8 +52,9 @@ from urllib.request import Request, pathname2url, urlopen
 
 from . import __version__
 from . import query as Q
-from .store import FTS_COLUMNS, Store  # the FTS columns `in=` accepts, the gazetteer's `mentions` included
+from .store import FTS_COLUMNS, SEARCH_SORTS, Store
 
+# FTS_COLUMNS is what `in=` accepts (the gazetteer's `mentions` column included); SEARCH_SORTS is what `sort=` accepts
 ENTITY_KINDS: Tuple[str, ...] = ("instrument", "company")
 MAX_LIMIT = 200  # per-paper endpoints (/search, /top, /entities)
 MAX_COUNT_LIMIT = 500  # aggregate endpoints (/instruments, /companies, /archive, /news)
@@ -66,7 +68,9 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
 _ENTITY_PATH_RE = re.compile(r"^/entities/([a-z]+)/(.+)/papers$")
 
 ENDPOINTS: List[Dict[str, str]] = [
-    {"path": "/search", "params": "q (required), since, in, limit", "returns": "full-text hits with snippet (paper text; `section` names its column), instrument and company chips"},
+    {"path": "/search", "params": "q (required), since, in, limit, sort (relevance|score|date), collapse (1|0)",
+     "returns": "full-text hits with snippet (paper text; `section` names its column), instrument and company chips; "
+                "research papers first, then letters / deposits (record_type); rows sharing a title fold (duplicates)"},
     {"path": "/papers/{id}", "params": "", "returns": "paper, mentions, score, tracked_authors"},
     {"path": "/entities/{kind}/{id}/papers", "params": "since, limit", "returns": "papers mentioning one instrument or company id"},
     {"path": "/instruments", "params": "since, until, limit", "returns": "instrument counts in the window"},
@@ -405,6 +409,10 @@ class RadarAPI:
         sections = parse_sections(q.get("in"))
         limit = parse_limit(q.get("limit"), 50, MAX_LIMIT)
         with_chips = parse_flag(q.get("mentions"), True)
+        sort = (q.get("sort") or "relevance").strip().lower()
+        if sort not in SEARCH_SORTS:
+            raise ApiError(400, f"sort must be one of {', '.join(SEARCH_SORTS)}, got {q.get('sort')!r}")
+        collapse = parse_flag(q.get("collapse"), True)
         st = self.open()
         try:
             # Store.search would retry an unparsable query as a phrase and return 200 with nothing; the API says
@@ -413,7 +421,7 @@ class RadarAPI:
             if fts_error:
                 raise ApiError(400, f"query not understood by FTS5: {fts_error}")
             try:
-                rows = st.search(query, since=since, limit=limit, sections=sections)
+                rows = st.search(query, since=since, limit=limit, sections=sections, sort=sort, collapse=collapse)
             except sqlite3.OperationalError as exc:
                 raise ApiError(400, f"query not understood by FTS5: {exc}") from None
             if with_chips:
@@ -422,7 +430,8 @@ class RadarAPI:
         finally:
             st.close()
         return json_response(
-            {"query": query, "since": since, "sections": list(sections), "limit": limit, "count": len(rows), "results": rows}
+            {"query": query, "since": since, "sections": list(sections), "limit": limit, "sort": sort, "collapse": collapse,
+             "count": len(rows), "results": rows}
         )
 
     def paper(self, paper_id: str) -> Response:

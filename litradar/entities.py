@@ -19,7 +19,11 @@ What a dossier contains
   instrument; ticker / parent / e-mail domains for a company) or, for a person, the subgroups that
   track them in config/subgroups.yaml;
 * papers per month over the window, zero-filled, with an ASCII sparkline and a 30-day-vs-prior-30-day
-  trend;
+  trend. For an instrument or company the trend is only reported as a percentage when the two periods
+  are comparable: when the share of papers matched only outside the title/abstract (Methods, funding,
+  affiliations, which exist only where full text or rich metadata was harvested) differs by 25 points or
+  more, or the store holds 1.5x as many papers in one period as in the other, `change_pct` is null, a
+  `note` says why and `like_for_like` gives the title/abstract-only counts, which every source fills;
 * which sections the entity was found in (title / abstract / methods / funding / coi / ack /
   affiliations) with paper counts;
 * the most recent papers, each with venue, the sections it was found in and a snippet;
@@ -549,10 +553,63 @@ def _iso_date(s: str) -> Optional[date]:
         return None
 
 
-def _trend(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, Any]:
+_MIN_COVERAGE_PAPERS = 5   # both periods need this many papers before their section mix is compared
+_COVERAGE_GAP = 0.25       # difference in the share of papers matched only outside title/abstract that voids the headline change
+_MIN_CORPUS_PAPERS = 100   # both periods need this many stored papers (of any kind) before their sizes are compared
+_CORPUS_RATIO = 1.5        # ratio of corpus sizes (papers stored per period) that voids the headline change
+
+
+def _pct(recent: int, prior: int) -> Optional[float]:
+    return round(100.0 * (recent - prior) / prior, 1) if prior else None
+
+
+def _period_profile(conn: sqlite3.Connection, kind: str, entity_id: str, lo: str, hi: str) -> Dict[str, int]:
+    """For one period: the scratch-set papers dated in it, how many of them name the entity in the title or
+    abstract (the sections every source populates), and how many papers of any kind the store holds for it."""
+    row = conn.execute(
+        f"SELECT COUNT(*), COALESCE(SUM(subject), 0) FROM ("
+        f"SELECT e.paper_id, MAX(CASE WHEN m.section IN ('title', 'abstract') THEN 1 ELSE 0 END) AS subject "
+        f"FROM {_SCRATCH} e JOIN papers p ON p.id = e.paper_id JOIN mentions m ON m.paper_id = e.paper_id AND m.kind = ? AND m.entity_id = ? "
+        f"WHERE ({_EFFECTIVE_DATE}) BETWEEN ? AND ? GROUP BY e.paper_id)",
+        (kind, entity_id, lo, hi),
+    ).fetchone()
+    corpus = conn.execute(f"SELECT COUNT(*) FROM papers p WHERE ({_EFFECTIVE_DATE}) BETWEEN ? AND ?", (lo, hi)).fetchone()[0]
+    return {"papers": int(row[0] or 0), "title_abstract": int(row[1] or 0), "corpus": int(corpus or 0)}
+
+
+def _coverage_check(conn: sqlite3.Connection, res: Resolution, out: Dict[str, Any], r0: date, r1: date, p0: date, p1: date) -> None:
+    """Void `change_pct` and say why when the two periods are not comparable: a different section mix (Methods /
+    funding / affiliation mentions exist only where full text or rich metadata was harvested, so a week with
+    seven sources against an abstract-only backfill month looks like a surge) or a corpus that changed size. The
+    title/abstract-only counts are always reported as `like_for_like`, since every source fills those sections."""
+    rp = _period_profile(conn, res.kind, res.entity_id, r0.isoformat(), r1.isoformat())
+    pp = _period_profile(conn, res.kind, res.entity_id, p0.isoformat(), p1.isoformat())
+    out["coverage"] = {"recent": rp, "prior": pp}
+    lfl = {"basis": "title/abstract", "recent_30d": rp["title_abstract"], "prior_30d": pp["title_abstract"],
+           "change_pct": _pct(rp["title_abstract"], pp["title_abstract"])}
+    out["like_for_like"] = lfl
+    reasons: List[str] = []
+    if rp["papers"] >= _MIN_COVERAGE_PAPERS and pp["papers"] >= _MIN_COVERAGE_PAPERS:
+        deep_recent = 1.0 - rp["title_abstract"] / rp["papers"]
+        deep_prior = 1.0 - pp["title_abstract"] / pp["papers"]
+        if abs(deep_recent - deep_prior) >= _COVERAGE_GAP:
+            reasons.append(f"{rp['papers'] - rp['title_abstract']} of {rp['papers']} recent papers were matched only outside the title/abstract "
+                           f"(Methods, funding, affiliations) vs {pp['papers'] - pp['title_abstract']} of {pp['papers']} in the prior period")
+    small, large = sorted((rp["corpus"], pp["corpus"]))
+    if small >= _MIN_CORPUS_PAPERS and large / small >= _CORPUS_RATIO:
+        reasons.append(f"the store holds {rp['corpus']} papers dated in the recent period vs {pp['corpus']} in the prior one")
+    if reasons:
+        chg = f" ({lfl['change_pct']:+.1f}%)" if lfl["change_pct"] is not None else ""
+        out["note"] = ("the two periods are not like-for-like: " + "; ".join(reasons) +
+                       f". Title/abstract mentions only: {lfl['recent_30d']} vs {lfl['prior_30d']}{chg}")
+        out["change_pct"] = None
+
+
+def _trend(conn: sqlite3.Connection, since: str, until: str, res: Optional[Resolution] = None) -> Dict[str, Any]:
     """Papers in the last 30 days of the window vs the 30 days before, measured only inside [since, until]:
     the recent period is clipped to `since` (recent_days says how long it really is) and the prior period is
-    reported as None, with a note, when it would start before the window."""
+    reported as None, with a note, when it would start before the window. For an instrument or company
+    (`res`), the two periods are also checked for comparable coverage (`_coverage_check`)."""
     end = _iso_date(until) or datetime.now(timezone.utc).date()
     start = _iso_date(since)
     r0, r1 = end - timedelta(days=29), end
@@ -562,13 +619,13 @@ def _trend(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, Any]:
     sql = f"SELECT COUNT(*) FROM {_SCRATCH} e JOIN papers p ON p.id = e.paper_id WHERE ({_EFFECTIVE_DATE}) BETWEEN ? AND ?"
     recent = conn.execute(sql, (r0.isoformat(), r1.isoformat())).fetchone()[0]
     out: Dict[str, Any] = {"recent_30d": recent, "prior_30d": None, "change_pct": None, "recent_from": r0.isoformat(),
-                           "recent_days": (r1 - r0).days + 1, "prior_from": p0.isoformat(), "prior_to": p1.isoformat()}
+                           "recent_days": (r1 - r0).days + 1, "prior_from": p0.isoformat(), "prior_to": p1.isoformat(), "basis": "all sections"}
     if start and p0 < start:
         out["note"] = f"prior period would start before the window ({since}); widen --since to at least 60 days to measure a trend"
         return out
     prior = conn.execute(sql, (p0.isoformat(), p1.isoformat())).fetchone()[0]
     out["prior_30d"] = prior
-    out["change_pct"] = round(100.0 * (recent - prior) / prior, 1) if prior else None
+    out["change_pct"] = _pct(recent, prior)
     corpus_start = conn.execute(
         "SELECT MIN(CASE WHEN pub_date = '' THEN substr(first_seen, 1, 10) ELSE pub_date END) FROM papers WHERE pub_date != '' OR first_seen != ''"
     ).fetchone()[0]
@@ -577,6 +634,8 @@ def _trend(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, Any]:
         # the store holds nothing from the prior period: a zero there is a corpus boundary, not a trend
         out["note"] = f"the corpus starts {cs.isoformat()}, after the prior period ({p0.isoformat()}..{p1.isoformat()}); the comparison is not meaningful yet"
         out["change_pct"] = None
+    elif res is not None and res.kind in ENTITY_KINDS:
+        _coverage_check(conn, res, out, r0, r1, p0, p1)
     return out
 
 
@@ -707,7 +766,7 @@ def _dossier_one(store: Store, res: Resolution, since: str, until: str, limit: i
         out["papers_total"] = conn.execute(f"SELECT COUNT(*) FROM {_SCRATCH}").fetchone()[0]
         per_month = {r[0]: r[1] for r in conn.execute(f"SELECT {_MONTH} AS m, COUNT(*) FROM {_SCRATCH} e JOIN papers p ON p.id = e.paper_id GROUP BY m")}
         out["papers_per_month"], out["sparkline"], out["papers_out_of_range"] = _zero_filled(months, per_month, "papers")
-        out["trend"] = _trend(conn, since, until)
+        out["trend"] = _trend(conn, since, until, res)
         if res.kind in ENTITY_KINDS:
             out["sections"] = _rows(conn.execute(
                 f"SELECT m.section, COUNT(DISTINCT m.paper_id) AS papers, SUM(m.count) AS mentions FROM {_SCRATCH} e "
@@ -810,11 +869,20 @@ def render_dossier(d: Dict[str, Any]) -> str:
     if pm:
         lines.append(f"  {pm[0]['month']} .. {pm[-1]['month']}   {d['sparkline']}   (max {max(s['papers'] for s in pm)}/month)")
     t = d.get("trend") or {}
-    chg = f" ({t['change_pct']:+.1f}%)" if t.get("change_pct") is not None else ""
-    prior = f"prior 30 days {t['prior_30d']}" if t.get("prior_30d") is not None else f"prior 30 days n/a (window starts {w.get('since')})"
+    measured = t.get("prior_30d") is not None
+    if t.get("change_pct") is not None:
+        chg = f" ({t['change_pct']:+.1f}%)"
+    else:
+        chg = " (change n/a, see note)" if measured and t.get("note") else ""
+    prior = f"prior 30 days {t['prior_30d']}" if measured else f"prior 30 days n/a (window starts {w.get('since')})"
     lines.append(f"  trend: last {t.get('recent_days', 30)} days {t.get('recent_30d', 0)} vs {prior}{chg}")
-    if t.get("note") and t.get("prior_30d") is not None:
+    if t.get("note") and measured:
         lines.append(f"  note: {t['note']}")
+    lfl = t.get("like_for_like")
+    if lfl and measured and t.get("change_pct") is None:
+        chg2 = f" ({lfl['change_pct']:+.1f}%)" if lfl.get("change_pct") is not None else ""
+        lines.append(f"  like-for-like ({lfl.get('basis', 'title/abstract')} mentions only): last {t.get('recent_days', 30)} days {lfl['recent_30d']} "
+                     f"vs prior 30 days {lfl['prior_30d']}{chg2}")
     if d.get("papers_out_of_range"):
         lines.append(f"  note: {d['papers_out_of_range']} paper(s) dated outside the window months (undated items first seen after --until, "
                      "or malformed dates) are in the total but not in the series")

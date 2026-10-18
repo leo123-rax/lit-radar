@@ -102,7 +102,8 @@ def _json(base: str, path: str):
 def test_search_shape_and_chips(served):
     status, data = _json(served["base"], "/search?q=Xenium")
     assert status == 200
-    assert set(data) == {"query", "since", "sections", "limit", "count", "results"}
+    assert set(data) == {"query", "since", "sections", "limit", "sort", "collapse", "count", "results"}
+    assert data["sort"] == "relevance" and data["collapse"] is True
     assert data["limit"] == 50 and data["count"] == 2
     hit = next(r for r in data["results"] if r["id"] == "doi:10.1000/test1")
     assert {"id", "doi", "title", "journal", "pub_date", "url", "kind", "source", "snippet", "rank", "instruments", "companies"} <= set(hit)

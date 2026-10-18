@@ -157,7 +157,8 @@ def test_company_detail(db, entries):
     assert d["id"] == "acme-bio" and d["slug"] == "acme-bio" and d["public"] is True
     assert d["windows"]["90d"]["papers"] == 3 and d["windows"]["365d"]["papers"] == 4
     assert d["windows"]["90d"]["news"] == 1 and d["windows"]["365d"]["news"] == 2
-    assert len(d["monthly"]) == 24 and d["monthly"][-1] == {"month": "2026-10", "papers": 3, "mentions": 6}
+    assert len(d["monthly"]) == 24 and d["monthly"][-1] == {"month": "2026-10", "papers": 3, "mentions": 6, "subject": 1}
+    assert d["coverage"] is None  # too few papers per month to judge the section mix
     assert {m["month"]: m["papers"] for m in d["monthly"]}["2026-03"] == 1
     assert d["instruments"] == [{"id": "inst-x", "name": "Instrument X", "vendor": "", "ticker": "", "papers": 2, "unlisted": False}]
     assert [(c["id"], c["papers"]) for c in d["companies"]] == [("beta-tools", 2), ("unlisted:foo-corp", 1)]

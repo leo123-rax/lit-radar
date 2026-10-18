@@ -3,8 +3,9 @@
   litradar run      [--days 7 | --since YYYY-MM-DD --until YYYY-MM-DD] [--llm] [--no-fulltext] [--sources a,b] [--email] [--slack]
   litradar digest   [--since --until] [--out DIR] [--allow-empty]  re-render from the database without fetching (exit 1 before the first run)
   litradar rematch  [--since 90d]                             re-annotate stored papers after editing the gazetteers
-  litradar search   "query" [--since 90d] [--in methods,coi] [--limit 50] [--raw-fts] [--json]
-                                                              a plain multi-word query is a phrase; --raw-fts passes FTS5 syntax through
+  litradar search   "query" [--since 90d] [--in methods,coi] [--limit 50] [--sort relevance|score|date] [--keep-duplicates] [--raw-fts] [--json]
+                                                              a plain multi-word query is a phrase; --raw-fts passes FTS5 syntax through;
+                                                              research papers come before letters and dataset deposits, repeated titles fold
   litradar entity   <entity_id> [--since 90d] [--limit 100]   distinct papers that mention one gazetteer entry
   litradar entities [--kind instrument|company] [--grep text] list gazetteer entries and ids
   litradar stats    [--json]                                  database totals and last runs
@@ -46,7 +47,7 @@ from typing import List, Optional
 # Nothing here depends on that OpenSSL feature set, so the warning is noise for this CLI.
 warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL")
 
-from . import __version__, backfill, browser, entities, i18n, toolkit, trends  # noqa: E402
+from . import __version__, backfill, browser, entities, i18n, toolkit, trends, worktype  # noqa: E402
 from . import export as export_mod  # noqa: E402
 from . import query as Q  # noqa: E402
 from .config import (  # noqa: E402
@@ -63,7 +64,7 @@ from .digest import deliver, render  # noqa: E402
 from .extract.gazetteer import Gazetteer  # noqa: E402
 from .http import Http  # noqa: E402
 from .pipeline import RUN_SOURCES, Pipeline, unknown_sources  # noqa: E402
-from .store import FTS_COLUMNS, Store  # noqa: E402
+from .store import FTS_COLUMNS, SEARCH_SORTS, Store  # noqa: E402
 
 _parse_since = Q.parse_since  # kept for callers that imported the old private name
 
@@ -230,7 +231,8 @@ def cmd_search(args) -> int:
     if err:
         fts_query = Q.phrase_query(query)
         print(f"litradar search: note: the query is not valid FTS5 ({err}); searching for it as the phrase {fts_query} instead", file=sys.stderr)
-    rows = store.search(fts_query, since=args.since or None, limit=args.limit, sections=sections)
+    rows = store.search(fts_query, since=args.since or None, limit=args.limit, sections=sections,
+                        sort=args.sort, collapse=not args.keep_duplicates)
     if args.json:
         _attach_scores(store, rows)
         print(json.dumps(rows, indent=1, default=str))
@@ -239,7 +241,12 @@ def cmd_search(args) -> int:
         print("no matches")
         return 0
     for r in rows:
-        print(f"- {r['pub_date'] or 'n.d.'}  {r['title']}\n    {r['journal'] or r['source']}  {r['url']}\n    [{r.get('section') or '-'}] …{r['snippet']}…")
+        tags = ""
+        if r.get("record_type"):
+            tags += f"  [{worktype.PHRASES.get(r['record_type'], r['record_type'])}]"
+        if r.get("duplicates"):
+            tags += f"  (+{r['duplicates']} more with this title)"
+        print(f"- {r['pub_date'] or 'n.d.'}  {r['title']}\n    {r['journal'] or r['source']}  {r['url']}{tags}\n    [{r.get('section') or '-'}] …{r['snippet']}…")
     return 0
 
 
@@ -812,6 +819,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--in", dest="in_sections", help="restrict to columns: title,abstract,methods,funding,coi,affiliations,body,mentions "
                                                     "(mentions = the gazetteer's attributions: entity names, matched aliases and ids, not paper text)")
     p.add_argument("--limit", type=_positive_int, default=50, help="rows to print (default 50)")
+    p.add_argument("--sort", choices=SEARCH_SORTS, default="relevance",
+                   help="relevance (default: bm25 with title and abstract weighted), score (stored rank score, highest first) or date "
+                        "(newest first); research papers always come before letters, editorials and dataset / software deposits")
+    p.add_argument("--keep-duplicates", action="store_true", dest="keep_duplicates",
+                   help="keep every row that shares a title (dataset versions deposited many times); by default they fold into the best-placed one")
     p.add_argument("--raw-fts", action="store_true", dest="raw_fts", help="pass the query to FTS5 exactly as typed (no automatic phrase quoting)")
     p.add_argument("--json", action="store_true", help="machine-readable output, with each paper's score")
     p.set_defaults(func=cmd_search)

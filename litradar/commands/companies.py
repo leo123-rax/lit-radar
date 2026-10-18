@@ -63,6 +63,9 @@ def _print_detail(d: Dict[str, Any]) -> None:
     active = [m for m in d["monthly"] if m["papers"]]
     if active:
         print("  by month: " + "  ".join(f"{m['month']} {m['papers']}" for m in active))
+        if d.get("coverage"):
+            print("  by month (title/abstract only): " + "  ".join(f"{m['month']} {m.get('subject', 0)}" for m in active))
+            print(f"  note: {d['coverage']['note']}")
     else:
         print(f"  by month: no papers in the last {len(d['monthly'])} months")
     if d["instruments"]:

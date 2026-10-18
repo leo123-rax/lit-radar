@@ -315,26 +315,38 @@ first openFDA applicants.
 
 ### 8.1 Heuristic (always on, legible)
 
-Every point has a reason string, printed under each digest item.
+Every point has a reason string, printed under each digest item. The table is ranking v2, the version
+that ships (`litradar/rank/heuristics.py::DEFAULT_WEIGHTS`; `docs/ranking.md` section 4 explains each
+component and what changed from v1).
 
 | Component | Default weight |
 |---|---|
-| journal tier | A = 4, B = 2.5, C = 1, preprint = 1, unknown = 0.5 |
-| platforms named (sequencers, single-cell, spatial, proteomics, cryo-EM, arrays, synthesis, cell engineering) | +1.0 per distinct entity, cap 3 |
-| lab tools named (QC, library prep, PCR, automation, imaging, cytometry, bioprocess) | +0.2 per distinct entity, cap 3 |
-| companies named | +0.5 per distinct entity, cap 3 |
+| venue prior (journal tier from `config/journals.yaml`) | A = 5.0, B = 3.0, C = 1.0, preprint = 1.0, unknown = 0.5; a preprint whose published version is stored takes that journal's tier; the A/B prior is withheld (floor 0.5) when no topical signal fires (topical gate) |
+| first platform named (sequencers, single-cell, spatial, proteomics, cryo-EM, arrays, synthesis, cell engineering) | +1.0 for the first platform only (`instrument_cap` 1); further platforms are listed, not scored |
+| platform central (named in the title or abstract) | +1.0 |
+| lab tools named (QC, library prep, PCR, automation, imaging, cytometry, bioprocess) | +0.2 per distinct entity, cap 3; `software` entities are listed, never scored |
+| first commercial company named | +0.5 for the first only (`company_cap` 1); institutes, foundations and AI tools are listed, not scored |
 | company-affiliated author | +1.0 |
 | watchlist terms (`config/radar.yaml`) | +1.0 per term, cap 3 |
-| tracked author | +3.0 |
+| tracked author | +3.0 by OpenAlex id, +1.5 by name only |
 | novelty language | +0.5 per cue, cap 1.0 |
-| early citations (`cited_by_count > 0` inside the window) | +1.0 |
+| new-platform cue ("we present / introduce ... a platform / method / assay") | +1.5 |
+| citations (age-aware) | within 90 days of publication: +1.0 once cited, +0.5 more at >= 1 citation/week; older: +1.0 only at >= 3 citations/month; +0.5 for an influential citation; cap 2.0 |
+| preprint published as a journal article | +1.0 |
+| news co-mention in the window | +1.0 |
+| first corpus appearance of a concept | +1.0 |
+| correction / retraction notice | −4.0 |
+| not a research paper (letter, editorial, dataset / software / protocol deposit, supplementary file, dissertation, peer-review report) | −4.0, and the venue prior falls to the unranked floor |
 | full text parsed | 0 by default (configurable) |
 
-The sum is scaled to 0–10. The review found that with these weights only 42 of 220 tier-A journal
-articles reached the LLM shortlist and 33 of the top 50 were among the 12% of papers with parsed
-full text (Nature Methods' best rank was 106): parsed Methods inflate mention counts. The fix being
-specified weights company mentions by section (title/abstract ×1, funding/COI ×0.5, Methods ×0) and
-guarantees tier-A articles a place in the shortlist.
+The sum is scaled to 0–10 (`scale_max_raw` 16). The v1 weights (A = 4, B = 2.5, +1.0 per platform
+and +0.5 per company with cap 3, +3.0 for any tracked author, +1.0 for any early citation, no notice
+penalty, no topical gate) let parsed Methods sections win: in the review only 42 of 220 tier-A journal
+articles reached the LLM shortlist and 33 of the top 50 were among the 12% of papers with parsed full
+text (Nature Methods' best rank was 106). The fix specified at the time (company mentions weighted by
+section and a guaranteed tier-A slot in the shortlist) was superseded by what shipped: first-platform
+and first-company caps, a stronger venue prior gated on topical signals, weaker name-only author
+matches, the notice penalty and the non-research penalty.
 
 ### 8.2 LLM rubric (optional, `--llm`)
 

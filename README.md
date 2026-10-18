@@ -200,12 +200,20 @@ for any feed reader. E-mail (SMTP) and Slack remain as before (`run --email`, `r
 
 ## How ranking works
 
-The heuristic is deliberately legible: journal tier (A = 4, B = 2.5, C = 1, preprint = 1),
-+1.0 per distinct platform named (cap 3), +0.2 per lab tool (cap 3), +0.5 per company mentioned
-(cap 3), +1.0 for a company-affiliated author, +1.0 per watchlist term (cap 3), +3.0 for a tracked
-author, +0.5 per novelty cue (cap 1.0), +1.0 for early citations; the sum is scaled to 0-10 and
-every score carries a reasons string shown in the digest. Weights are overridable in
-`config/radar.yaml` under `ranking.weights`.
+The heuristic is deliberately legible (ranking v2, `litradar/rank/heuristics.py::DEFAULT_WEIGHTS`):
+a venue prior (journal tier A = 5.0, B = 3.0, C = 1.0, preprint = 1.0, unranked = 0.5; the A/B prior
+is withheld when no topical signal fires), +1.0 for the first platform named (further platforms are
+listed, not scored), +1.0 when a platform is named in the title or abstract, +0.2 per lab tool
+(cap 3), +0.5 for the first commercial company named, +1.0 for a company-affiliated author, +1.0 per
+watchlist term (cap 3), +3.0 for a tracked author matched by OpenAlex id (+1.5 by name only), +0.5
+per novelty cue (cap 1.0), +1.5 when the text says the paper introduces a platform / method / assay,
+age-aware citation points (cap 2.0), +1.0 for a preprint that has since been published, +1.0 for a
+news co-mention, +1.0 for a concept's first appearance in the corpus, and −4.0 for correction /
+retraction notices and for records that are not research papers (letters to the editor, editorials,
+dataset / software deposits, dissertations), which also lose their venue prior. The raw sum is
+scaled to 0-10 (16 raw points = 10) and every score carries a reasons string shown in the digest.
+Weights are overridable in `config/radar.yaml` under `ranking.weights`; `docs/ranking.md` section 4
+has the full table and the topical gate.
 
 With `--llm`, the shortlist (default: heuristic >= 3, max 300 papers) is scored by Claude against a
 fixed rubric (novelty, commercial implication, instrument role, clinical readiness, hype risk,
@@ -215,8 +223,9 @@ abstract, venue and the matcher's hits, never stored full text. The final score 
 0.4 x heuristic + 0.6 x LLM composite. Cost in the current single-stage form is about $2 a week
 for 300 abstracts on Claude Opus 5.5 (about $1 through Batches; cents on Haiku 5.5); the
 recommended two-stage cascade (Haiku triage of every candidate, Opus deep scoring of the top ~250
-with Methods text) is modelled at about $5.86 a week, roughly $305 a year. See `litradar/rank/`
-and `docs/DESIGN.md` section 8.
+with Methods text) is modelled at about $5.86 a week, roughly $305 a year. See `litradar/rank/`,
+`docs/ranking.md` (the shipped heuristic, section 4) and `docs/DESIGN.md` section 8 (the LLM rubric
+and the cost model).
 
 ## Data sources at a glance
 

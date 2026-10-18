@@ -50,6 +50,15 @@ each; the newest news items; and the rows of `candidate_companies` that are this
 spelling (same normalised name as the name or an alias, a shared e-mail domain, or a promotion that produced
 this id). `--json` returns the same structure as a dict (`companies.company_detail`).
 
+**Coverage caveat.** Methods, funding and affiliation mentions exist only for papers whose full text or rich
+metadata was harvested, while title and abstract mentions exist for every source. A month harvested with full
+text next to an abstract-only backfill month therefore shows a step that is coverage, not adoption. Each row of
+the monthly series carries `subject` (distinct papers naming the company in the title or abstract: the
+like-for-like series) next to `papers`, and `company_detail` adds `coverage`: `null` when the section mix is flat,
+else a `note`, the `basis` (`title/abstract`) and `deep_share` (per month with at least 5 papers, the share of
+papers matched only outside the title/abstract). The note fires when that share differs by 25 points or more
+between months; `show` then prints a second `by month (title/abstract only)` line and the note.
+
 **`export`** writes one CSV row per company with the 90-day counts. The header is fixed
 (`companies.EXPORT_COLUMNS`): `id, name, ticker, public, type, parent, papers_90d, mentions_90d, author_90d,
 funding_coi_90d, subject_90d, supplier_90d, other_90d, news_90d, candidates_linked, last_paper, domains,
@@ -108,7 +117,9 @@ The company pages add about 1.6 MB to a 3.1 MB site; the build still takes under
 | `paper_counts(conn, since, until)` | per company id: distinct papers, summed mentions, distinct papers per role, last paper date |
 | `news_counts(conn, since, until)` | news items per `companies_json` key |
 | `list_companies(conn, entries, since, until, type_=None, public=None)` | one row per entry, sorted |
-| `company_detail(conn, entry, today=None, windows=(90, 365), months=24)` | the `show` / profile-page structure |
+| `monthly_series(conn, entity_id, months)` | per month: distinct `papers`, summed `mentions`, distinct `subject` papers (title / abstract) |
+| `coverage_note(monthly)` | the coverage caveat above, or None when the monthly section mix is flat |
+| `company_detail(conn, entry, today=None, windows=(90, 365), months=24)` | the `show` / profile-page structure (`windows`, `monthly`, `coverage`, co-mentions, recent papers, news, candidates) |
 | `export_rows(conn, entries, since, until)` / `write_csv(rows, fh)` | the CSV |
 | `comention_graph(conn, since, until, entries=None, min_weight=1, include_unlisted=False, keep_isolated=False)` | nodes and weighted links |
 | `sec_ticker_proposals(entries, tickers)` | exact-brand SEC matches for entries whose ticker is a placeholder |

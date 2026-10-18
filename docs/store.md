@@ -84,9 +84,19 @@ Measured on a copy of a live store (3,562 papers): re-upserting 200 unchanged pa
   117,409), `--fts-rebuild` wrote 3,562 rows, and `--vacuum` took the file from 137,060,352 to 114,896,896 bytes
   (22,163,456 bytes returned; freelist 4,480 pages before, 0 after).
 
-## 5. Search fallback
+## 5. Search ordering and fallback
 
-`Store.search(query, ...)` retries a query that FTS5 rejects (unbalanced parentheses, an unknown column such as
+`Store.search(query, since=None, limit=50, sections=(), fallback=True, sort="relevance", collapse=True)` puts
+research papers before records that are not papers (letters, editorials, dataset / software / protocol deposits,
+supplementary files, dissertations, peer-review reports; `litradar/worktype.py::sql_predicate` is the rule, each
+row's `record_type` the reason, None for a paper), then orders by `sort`: `relevance` = `bm25(papers_fts,
+FTS_BM25_WEIGHTS)` (title 4, abstract and mentions 2, body 0.5, the rest 1; lower `rank` is better), `score` =
+the stored `scores.final` (unscored rows last), `date` = newest first. With `collapse` rows sharing a title fold
+into the best-placed one (`duplicates` counts the rest; the query reads `limit x 5` rows to have enough to fold).
+bm25 normalises by document length, which is why a 100-character deposit record would otherwise outrank a
+full-text paper naming the same platform in its title; see docs/search.md.
+
+`Store.search` retries a query that FTS5 rejects (unbalanced parentheses, an unknown column such as
 `nosuchcol:Xenium`) as a quoted phrase, and records the FTS5 message in `Store.last_search_fallback` (None after
 a search that needed none) so a CLI or API can tell the user the column name was wrong instead of showing an
 empty result. `search(..., fallback=False)` raises the `sqlite3.OperationalError` instead, for callers that
