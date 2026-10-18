@@ -458,6 +458,10 @@ def test_topical_gate_withholds_the_venue_prior_for_off_topic_tier_a_papers():
     ments = [_m("company", "microsoft-research", "affiliations", name="Microsoft Research")]
     res4 = score_paper_v2(weather, ments, "A", ["spatial transcriptomics"], None, company_types={"microsoft-research": "software"})
     assert res4.facts["topical"] is False and [c for c in res4.components if c.key == "venue"][0].points == DEFAULT_WEIGHTS["tier_unknown"]
+    # an affiliation-derived unlisted company (not in the gazetteer, type unknown) is not topical either
+    res4b = score_paper_v2(weather, [_m("company", "unlisted:bigco-united-states", "affiliations", category="openalex-company", name="BigCo (United States)")],
+                           "A", [], None, company_types={"microsoft-research": "software"})
+    assert res4b.facts["topical"] is False
     # the same affiliation from a tools company is topical
     res5 = score_paper_v2(weather, [_m("company", "acme-tools", "affiliations", name="Acme Tools")], "A", [], None, company_types={"acme-tools": "tools"})
     assert res5.facts["topical"] is True and [c for c in res5.components if c.key == "venue"][0].points == DEFAULT_WEIGHTS["tier_A"]

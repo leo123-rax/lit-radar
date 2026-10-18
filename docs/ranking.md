@@ -360,6 +360,6 @@ otherwise push off-topic articles (weather forecasting, quantum hardware) into t
 scorer therefore withholds a tier-A or tier-B prior (it falls back to the unranked-venue floor, +0.5; tier C and
 preprint priors are small and stay) when none of the
 topical components fire: a platform or lab tool named, a watchlist term, a tracked author, or a company named or
-affiliated whose gazetteer type is not `software` (big-tech labs publish in every field, so an affiliation alone
-is not evidence of fit; a first-in-corpus n-gram or a bare "we introduce a new framework" cue is not either). The reason string says "prior withheld" so the reader can
+affiliated whose gazetteer type is known and not `software` (big-tech labs publish in every field, and an
+affiliation-derived `unlisted:` company says nothing about the field, so neither counts; a first-in-corpus n-gram or a bare "we introduce a new framework" cue is not either). The reason string says "prior withheld" so the reader can
 see why a prestigious venue scored low. `ranking.weights.topical_gate: false` restores the plain prior.

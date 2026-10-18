@@ -303,12 +303,14 @@ TOPICAL_KEYS = frozenset({"platforms", "platform_central", "lab_tools", "watchli
 NON_TOPICAL_COMPANY_TYPES = frozenset({"software"})
 
 
-def _is_topical(comps: Sequence[Component], facts: Dict[str, Any], types: Dict[str, str]) -> bool:
+def _is_topical(comps: Sequence[Component], company_ids: Sequence[str], author_company_ids: Sequence[str], types: Dict[str, str]) -> bool:
     if any(c.key in TOPICAL_KEYS for c in comps):
         return True
-    for cid in list(facts.get("companies") or []) + list(facts.get("author_companies") or []):
-        if types.get(str(cid).lower(), "") not in NON_TOPICAL_COMPANY_TYPES:
-            return True  # a tools, diagnostics, pharma, CRO or ai_bio company named or affiliated
+    for cid in list(company_ids) + list(author_company_ids):
+        ctype = types.get(str(cid).lower(), "")
+        if ctype and ctype not in NON_TOPICAL_COMPANY_TYPES:
+            return True  # a gazetteer tools, diagnostics, pharma, CRO or ai_bio company named or affiliated
+        # an affiliation-derived `unlisted:` company or one of unknown type says nothing about the field
     return False
 
 
@@ -504,7 +506,7 @@ def score_paper_v2(
             facts["notice"] = True
 
     # ---- topical gate
-    topical = _is_topical(comps, facts, types)
+    topical = _is_topical(comps, companies, author_companies, types)  # gazetteer ids, not display names
     facts["topical"] = topical
     if w.get("topical_gate", True) and not topical:
         floor = float(w["tier_unknown"])
