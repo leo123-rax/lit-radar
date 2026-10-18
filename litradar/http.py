@@ -12,9 +12,10 @@ User-Agent
 
 Rate limiting
     A host that answers HTTP 429 ``circuit_threshold`` times in a row (default 2; NCBI E-utilities 6,
-    because their 429s are transient and a long census must not be truncated by two unlucky pages)
-    is skipped for the rest of the run. A single 429 backs off for ``Retry-After`` or the host's
-    minimum (NCBI 2 s, GDELT 5 s, otherwise 1 s) and is retried.
+    because their 429s are transient and a long census must not be truncated by two unlucky pages;
+    GDELT 4, because its load shedding comes in bursts that clear within a minute) is skipped for
+    the rest of the run. A single 429 backs off for ``Retry-After`` or the host's minimum (NCBI 2 s,
+    GDELT 10 s, otherwise 1 s) and is retried.
 
 Logging
     Every URL that reaches a log line goes through :func:`_redact`, which blanks ``api_key``-style
@@ -60,16 +61,24 @@ DEFAULT_MIN_INTERVAL = {
     "api.fda.gov": 0.25,  # openFDA: 240 req/min per IP or key; 1,000/day anonymous, 120,000/day with a free key
     "api.cellxgene.cziscience.com": 1.0,  # CELLxGENE Discover curation API: one request per second
     "www.sec.gov": 0.11,  # EDGAR fair-access policy: at most 10 requests per second
-    "api.gdeltproject.org": 5.5,  # GDELT DOC 2.0 API: "please limit requests to one every 5 seconds"
+    # GDELT DOC 2.0 API: "please limit requests to one every 5 seconds". Pacing is measured from the START of the
+    # previous request and a GDELT answer takes 2-12 s, so 5.5 s left little margin once the response time is
+    # subtracted; 8 s keeps every request start at least 5 s after the previous response on the slow path too.
+    # Company queries are batched (gdelt.batch_companies), so a 70-company watchlist is ~10 requests, not 70.
+    "api.gdeltproject.org": 8.0,
     "news.google.com": 1.0,  # only used when news.google_news is switched on
 }
 NCBI_KEYED_INTERVAL = 0.12  # 10 req/s with an api_key, with a little slack
 
 # consecutive 429s before a host is skipped for the rest of the run
 DEFAULT_CIRCUIT_THRESHOLD = 2
-CIRCUIT_THRESHOLD = {"eutils.ncbi.nlm.nih.gov": 6}
+# NCBI: transient 429s must not truncate a long census. GDELT: its 429s come in runs of load shedding that clear
+# after tens of seconds, and the first request of a run is often the one that is shed, so two in a row is too
+# eager a trip; four 429s with 10/20/30 s back-offs between them (about a minute) is the evidence that the host
+# is really closed to this client for now.
+CIRCUIT_THRESHOLD = {"eutils.ncbi.nlm.nih.gov": 6, "api.gdeltproject.org": 4}
 # minimum back-off after a 429 when the host sends no Retry-After header
-RATE_LIMIT_BACKOFF = {"eutils.ncbi.nlm.nih.gov": 2.0, "api.gdeltproject.org": 5.0}
+RATE_LIMIT_BACKOFF = {"eutils.ncbi.nlm.nih.gov": 2.0, "api.gdeltproject.org": 10.0}
 
 _SENSITIVE_QUERY_KEYS = {"api_key", "apikey", "api-key", "key", "mailto", "email", "token", "access_token"}
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}", re.I)

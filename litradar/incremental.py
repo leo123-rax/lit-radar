@@ -8,7 +8,8 @@ schedule. This module holds the pieces both commands share:
 * window computation from the `runs` table (overlap for late-indexing sources, a cap so a long
   outage does not turn into a 90-day pull, explicit overrides);
 * the JSON run summary written to `<out_dir>/_work/last_update.json`;
-* the health report behind `litradar status` and its exit code.
+* the health report behind `litradar status` and its exit code, including the error classification
+  (failed / degraded / configuration) that decides which sources count against `--max-failing-sources`.
 
 Nothing here touches the network; everything is unit-testable against a seeded `runs` table.
 """
@@ -26,7 +27,7 @@ DEFAULT_OVERLAP_DAYS = 2      # Europe PMC indexes most PubMed records within 1-
 DEFAULT_MAX_DAYS = 14         # cap: a long outage is repaired by hand with --since, not by a giant pull
 FIRST_RUN_DAYS = 7            # no previous run: behave like the weekly run
 STALE_AFTER_DAYS = 3          # `status` exits 1 when the last run finished more than this many days ago
-MAX_FAILING_SOURCES = 2       # `status` exits 1 when the last run had errors on more than this many sources
+MAX_FAILING_SOURCES = 2       # `status` exits 1 when the last run had FAILURES on more than this many sources (see classify_error)
 RECENT_RUNS = 3               # per-source table depth in `status`
 RATE_WINDOW_DAYS = 14         # papers/day and archive records/day are averaged over this many days
 GAP_WINDOW_DAYS = 30          # days with zero new papers are reported over this many days
@@ -120,6 +121,73 @@ def error_sources(errors: Sequence[str]) -> List[str]:
     return out
 
 
+# Error text that points at this installation's configuration, not at the remote source: a re-run changes nothing,
+# and the fork owner already sees it in `keys configured` and in coverage's "(configuration, not an outage)" tag.
+CONFIG_ERROR_MARKERS = ("not set", "not configured", "api key", "api_key", "contact_email", "litradar_", "budget", "insufficient")
+# Error text that says the remote host throttled us (HTTP 429 or the client's own circuit breaker): the run went on
+# without that host, the pipeline reports exactly what it skipped, and tomorrow's run retries. Degraded, not failed.
+RATE_LIMIT_MARKERS = ("rate-limited", "rate limited", "http 429", "too many requests")
+
+ERROR_CLASSES = ("failed", "degraded", "config")
+
+
+def classify_error(message: str) -> str:
+    """'config' (missing key / identity / budget), 'degraded' (rate-limited, host skipped after 429s) or 'failed'
+    (everything else: outages, parse errors, HTTP 5xx, dead feeds). Configuration wins over rate limiting because an
+    anonymous-pool 429 ("Insufficient budget") is fixed by a key, not by waiting."""
+    t = (message or "").lower()
+    if any(m in t for m in CONFIG_ERROR_MARKERS):
+        return "config"
+    if any(m in t for m in RATE_LIMIT_MARKERS):
+        return "degraded"
+    return "failed"
+
+
+def classify_errors(errors: Sequence[str]) -> Dict[str, List[str]]:
+    """Split error strings into the three classes, order preserved: {'failed': [...], 'degraded': [...], 'config': [...]}."""
+    out: Dict[str, List[str]] = {c: [] for c in ERROR_CLASSES}
+    for e in errors:
+        out[classify_error(str(e))].append(str(e))
+    return out
+
+
+def sources_by_class(errors: Sequence[str]) -> Dict[str, List[str]]:
+    """Distinct source labels per error class. A source with both a failure and a 429 is listed under both; the
+    `status` exit rule reads only 'failed'."""
+    return {c: error_sources(msgs) for c, msgs in classify_errors(errors).items()}
+
+
+def dedupe_errors(errors: Sequence[str]) -> List[Tuple[str, int]]:
+    """Collapse identical error strings into (message, count), first occurrence order: seven identical NIH RePORTER
+    outage lines become one line with a count of 7."""
+    counts: Dict[str, int] = {}
+    for e in errors:
+        s = str(e)
+        counts[s] = counts.get(s, 0) + 1
+    return list(counts.items())
+
+
+def format_error_line(message: str, count: int, width: int = 160) -> str:
+    return f"{message[:width]}" + (f"  (x{count})" if count > 1 else "")
+
+
+def open_readonly(db_path: Path) -> Optional[sqlite3.Connection]:
+    """Open an existing database read-only; None when the file does not exist (never creates it).
+
+    A WAL-mode file copied without its -shm sidecar cannot be opened with `mode=ro` by some SQLite builds; the
+    fallback is a plain connection, which is still a read, and the main file already exists either way.
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        return conn
+    except sqlite3.OperationalError:
+        return sqlite3.connect(str(p))
+
+
 # ---------------------------------------------------------------------------------------------
 # window
 # ---------------------------------------------------------------------------------------------
@@ -185,8 +253,31 @@ def is_news_insert_counter(key: str) -> bool:
 
 
 def news_skipped_counters(counts: Dict[str, Any]) -> Dict[str, int]:
-    """`{'gdelt': 72, 'gnews': 8}` from the `news.<source>_skipped` counters."""
-    return {k[len("news."):-len("_skipped")]: int(v or 0) for k, v in counts.items() if k.startswith("news.") and k.endswith("_skipped") and v}
+    """`{'gdelt': 10, 'gnews': 8}` from the `news.<source>_skipped` counters (queries never sent). The companion
+    `news.<source>_companies_skipped` counter is not a source and is read by `news_skipped_companies`."""
+    return {
+        k[len("news."):-len("_skipped")]: int(v or 0)
+        for k, v in counts.items()
+        if k.startswith("news.") and k.endswith("_skipped") and not k.endswith("_companies_skipped") and v
+    }
+
+
+def news_skipped_companies(counts: Dict[str, Any]) -> Dict[str, int]:
+    """`{'gdelt': 44}` from the `news.<source>_companies_skipped` counters: companies whose batched queries were never sent."""
+    suffix = "_companies_skipped"
+    return {k[len("news."):-len(suffix)]: int(v or 0) for k, v in counts.items() if k.startswith("news.") and k.endswith(suffix) and v}
+
+
+def format_skipped(skipped: Dict[str, int], companies: Optional[Dict[str, int]] = None) -> str:
+    """'gdelt 10 queries skipped (44 companies), gnews 8 queries skipped'."""
+    companies = companies or {}
+    parts = []
+    for k, v in sorted(skipped.items()):
+        part = f"{k} {v} quer{'y' if v == 1 else 'ies'} skipped"
+        if companies.get(k):
+            part += f" ({companies[k]} compan{'y' if companies[k] == 1 else 'ies'})"
+        parts.append(part)
+    return ", ".join(parts)
 
 
 def summarize_update(report: Dict[str, Any], plan: Dict[str, Any], started: str, finished: str, db_path: Path, only: Optional[Sequence[str]]) -> Dict[str, Any]:
@@ -211,12 +302,14 @@ def summarize_update(report: Dict[str, Any], plan: Dict[str, Any], started: str,
         "news_new": int(sum(int(v or 0) for v in news.values())),
         "news_new_by_source": news,
         "news_queries_skipped": news_skipped_counters(counts),
+        "news_companies_skipped": news_skipped_companies(counts),
         "fulltext": fulltext,
         "mentions": int(counts.get("mentions", 0) or 0),
         "tracked_hits": int(counts.get("tracked_hits", 0) or 0),
         "llm_scored": int(counts.get("llm.scored", 0) or 0),
         "errors": errors,
         "error_sources": error_sources(errors),
+        "sources_by_class": sources_by_class(errors),
         "http": report.get("http") or {},
         "db_path": str(db_path),
         "db_bytes": db_size(Path(db_path)),
@@ -241,12 +334,11 @@ def read_summary(out_dir: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _skipped_suffix(skipped: Dict[str, int]) -> str:
-    """' (gdelt 72 queries skipped, gnews 8 queries skipped)' or '' when nothing was skipped."""
+def _skipped_suffix(skipped: Dict[str, int], companies: Optional[Dict[str, int]] = None) -> str:
+    """' (gdelt 10 queries skipped (44 companies), gnews 8 queries skipped)' or '' when nothing was skipped."""
     if not skipped:
         return ""
-    parts = [f"{k} {v} quer{'y' if v == 1 else 'ies'} skipped" for k, v in sorted(skipped.items())]
-    return " (" + ", ".join(parts) + ")"
+    return " (" + format_skipped(skipped, companies) + ")"
 
 
 def summary_paragraph(summary: Dict[str, Any]) -> str:
@@ -256,11 +348,17 @@ def summary_paragraph(summary: Dict[str, Any]) -> str:
         f"Updated {summary['since']}..{summary['until']} ({w.get('days')} days, {basis}{', capped' if w.get('capped') else ''}):",
         f"{summary['papers_fetched']} papers fetched, {summary['papers_new']} new to the store;",
         f"{summary['archive_new']} new archive records" + (f" ({', '.join(f'{k} {v}' for k, v in sorted(summary['archive_new_by_source'].items()))})" if summary.get("archive_new_by_source") else "") + ";",
-        f"{summary['news_new']} new news items" + _skipped_suffix(summary.get("news_queries_skipped") or {}) + ";",
+        f"{summary['news_new']} new news items" + _skipped_suffix(summary.get("news_queries_skipped") or {}, summary.get("news_companies_skipped") or {}) + ";",
     ]
     errs = summary.get("errors") or []
     if errs:
-        bits.append(f"{len(errs)} error(s) on {len(summary.get('error_sources') or [])} source(s): {', '.join(summary.get('error_sources') or [])}.")
+        by_class = summary.get("sources_by_class") or sources_by_class(errs)
+        detail = "; ".join(
+            f"{label}: {', '.join(by_class[c])}" for c, label in (("degraded", "degraded by rate limiting"), ("config", "configuration skips"))
+            if by_class.get(c)
+        )
+        bits.append(f"{len(errs)} error(s) on {len(summary.get('error_sources') or [])} source(s): {', '.join(summary.get('error_sources') or [])}"
+                    + (f" ({detail}; not counted by `status`)" if detail else "") + ".")
     else:
         bits.append("no source errors.")
     http = summary.get("http") or {}
@@ -431,14 +529,24 @@ def health(
     stale_after_days: int = STALE_AFTER_DAYS,
     max_failing_sources: int = MAX_FAILING_SOURCES,
 ) -> Dict[str, Any]:
-    """Everything `litradar status` prints, as one dict. `exit_code()` turns it into 0/1."""
+    """Everything `litradar status` prints, as one dict. `exit_code()` turns it into 0/1.
+
+    The failing-sources rule counts a source only for errors classified 'failed' (see `classify_error`):
+    configuration skips (SEC without a contact e-mail, OpenAlex without a key) and rate limiting (GDELT's 429s,
+    a host the client stopped calling) are printed as their own lines but never make the exit code 1, because
+    neither is an outage a re-run would repair and the pipeline degraded deliberately. Host labels are already
+    mapped to their owning source by the pipeline (an RSS host is `rss`), so one dead publisher host is one
+    source, not one per host.
+    """
     now = now or utc_now()
     today = now.date()
     runs = recent_runs(conn, RECENT_RUNS)
     last = runs[0] if runs else None
     finished = parse_timestamp(last["finished"]) if last else None
     age_days: Optional[float] = round((now - finished).total_seconds() / 86400, 2) if finished else None
-    failing = error_sources(last["errors"]) if last else []
+    all_sources = error_sources(last["errors"]) if last else []
+    by_class = sources_by_class(last["errors"]) if last else {c: [] for c in ERROR_CLASSES}
+    failing = by_class["failed"]
     problems: List[str] = []
     if last is None:
         problems.append("no runs recorded yet")
@@ -447,7 +555,10 @@ def health(
     elif age_days > stale_after_days:
         problems.append(f"last update finished {age_days:.1f} days ago (limit {stale_after_days})")
     if len(failing) > max_failing_sources:
-        problems.append(f"last run had errors on {len(failing)} sources (limit {max_failing_sources}): {', '.join(failing)}")
+        not_counted = "; ".join(
+            f"{label}: {', '.join(by_class[c])}" for c, label in (("degraded", "not counted, rate-limited"), ("config", "not counted, configuration")) if by_class[c]
+        )
+        problems.append(f"last run had errors on {len(failing)} sources (limit {max_failing_sources}): {', '.join(failing)}" + (f" ({not_counted})" if not_counted else ""))
     totals = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("papers", "archive_records", "news_items", "mentions", "runs")}
     # errors from the other recent runs: a clean rss-only pass must not hide yesterday's OpenAlex failure
     earlier_errors = [
@@ -468,8 +579,13 @@ def health(
             "papers_new": int(last["counts"].get("papers.new", 0) or 0),
             "papers_fetched": int(last["counts"].get("papers.unique", 0) or 0),
             "errors": last["errors"],
-            "error_sources": failing,
+            "errors_deduped": [{"error": m, "count": n, "class": classify_error(m)} for m, n in dedupe_errors(last["errors"])],
+            "error_sources": all_sources,
+            "failing_sources": failing,
+            "degraded_sources": by_class["degraded"],
+            "config_skipped_sources": by_class["config"],
             "news_queries_skipped": news_skipped_counters(last["counts"]),
+            "news_companies_skipped": news_skipped_companies(last["counts"]),
             "http": last["http"],
         },
         "earlier_errors": earlier_errors,
@@ -499,22 +615,31 @@ def format_status(report: Dict[str, Any]) -> str:
     if lu:
         lines.append(f"last update (the most recent run only): finished {lu['finished']} ({lu['age_days']} days ago), window {lu['since']}..{lu['until']} ({lu['window_days']} days), {lu['papers_fetched']} papers fetched / {lu['papers_new']} new")
         if lu["errors"]:
+            deduped = lu.get("errors_deduped") or [{"error": m, "count": n, "class": classify_error(m)} for m, n in dedupe_errors(lu["errors"])]
             lines.append(f"  errors in last run ({len(lu['errors'])}, sources: {', '.join(lu['error_sources'])}):")
-            for e in lu["errors"][:10]:
-                lines.append(f"    - {e[:160]}")
-            if len(lu["errors"]) > 10:
-                lines.append(f"    ... {len(lu['errors']) - 10} more")
+            for d in deduped[:10]:
+                tag = {"degraded": "  [degraded: rate-limited, not counted]", "config": "  [configuration, not counted]"}.get(d["class"], "")
+                lines.append(f"    - {format_error_line(d['error'], d['count'])}{tag}")
+            if len(deduped) > 10:
+                lines.append(f"    ... {len(deduped) - 10} more distinct")
+            counted = lu.get("failing_sources")
+            if counted is not None:
+                lines.append(f"  failing sources counted against the limit: {', '.join(counted) or 'none'}"
+                             + (f"; degraded (rate-limited): {', '.join(lu['degraded_sources'])}" if lu.get("degraded_sources") else "")
+                             + (f"; configuration skips: {', '.join(lu['config_skipped_sources'])}" if lu.get("config_skipped_sources") else ""))
         else:
             lines.append("  errors in last run: none")
         skipped = lu.get("news_queries_skipped") or {}
         if skipped:
-            lines.append("  news queries skipped in last run (not inserted items): " + ", ".join(f"{k} {v}" for k, v in sorted(skipped.items())))
+            companies = lu.get("news_companies_skipped") or {}
+            lines.append("  news queries skipped in last run (not inserted items): "
+                         + ", ".join(f"{k} {v}" + (f" ({companies[k]} companies)" if companies.get(k) else "") for k, v in sorted(skipped.items())))
     else:
         lines.append("last update: none recorded")
     for er in report.get("earlier_errors") or []:
         lines.append(f"  earlier run {er['id']} (finished {er['finished']}, window {er['since']}..{er['until']}) had {len(er['errors'])} error(s) on {', '.join(er['error_sources'])}:")
-        for e in er["errors"][:3]:
-            lines.append(f"    - {e[:160]}")
+        for m, n in dedupe_errors(er["errors"])[:3]:
+            lines.append(f"    - {format_error_line(m, n)}")
     p, a = report["papers"], report["archive"]
     lines.append(f"papers/day (last {p['window_days']} days, by first_seen): {p['per_day']}  ({p['total']} total)")
     lines.append(f"archive records/day (last {a['window_days']} days, by first_public): {a['per_day']}  ({a['total']} total)")

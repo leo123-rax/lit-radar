@@ -1,7 +1,7 @@
 """Command-line interface.
 
   litradar run      [--days 7 | --since YYYY-MM-DD --until YYYY-MM-DD] [--llm] [--no-fulltext] [--sources a,b] [--email] [--slack]
-  litradar digest   [--since --until] [--out DIR]           re-render from the database without fetching
+  litradar digest   [--since --until] [--out DIR] [--allow-empty]  re-render from the database without fetching (exit 1 before the first run)
   litradar rematch  [--since 90d]                             re-annotate stored papers after editing the gazetteers
   litradar search   "query" [--since 90d] [--in methods,coi] [--limit 50] [--raw-fts] [--json]
                                                               a plain multi-word query is a phrase; --raw-fts passes FTS5 syntax through
@@ -24,6 +24,10 @@
                                                               what changed: this week vs last week vs the trailing baseline
   litradar export   [--parquet DIR | --csv DIR] [--duckdb FILE] [--tables a,b] [--db PATH]  export tables for analytics
   litradar tag      [--since 365d] [--translate] [--check]    tag papers with language + country codes; optionally translate non-English titles with Claude; --check only reports
+
+The list above is the built-in set only. Every module in litradar/commands/ that exposes register(subparsers)
+is added at start-up by the plugin loader in main() (update, status, coverage, serve, track, companies, ...);
+`litradar --help` prints the complete, current command list.
 """
 from __future__ import annotations
 
@@ -112,7 +116,19 @@ def cmd_run(args) -> int:
 def cmd_digest(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
     since, until = _window(args)
+    db_path = Path(settings.db_path)
+    hint = "no runs yet; run `litradar run --days 7` first (or pass --allow-empty to render an empty digest anyway)"
+    if not db_path.exists() and not getattr(args, "allow_empty", False):
+        # never create an empty database as a side effect of rendering
+        print(f"litradar digest: {hint}: no database at {db_path}", file=sys.stderr)
+        return 1
     store = Store(settings.db_path)
+    if not getattr(args, "allow_empty", False):
+        runs = store.conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        if not runs:
+            store.close()
+            print(f"litradar digest: {hint}: {db_path} holds no completed run", file=sys.stderr)
+            return 1
     company_types = {str(e["id"]): str(e.get("type") or "") for e in (settings.yaml("companies") or {}).get("entries", []) if e.get("id")}
     out = render.render(store, since, until, settings.radar, company_types=company_types)
     out["markdown"] += "\n" + render_coverage_markdown(store, since, until, settings)
@@ -670,6 +686,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--until", type=Q.until_arg, help=until_help)
     p.add_argument("--out", help="digest directory (default: out_dir in radar.yaml / LITRADAR_OUT_DIR, else digests/)")
     p.add_argument("--print", action="store_true", help="print the Markdown to stdout as well as writing it")
+    p.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                   help="render even when no run is recorded yet (default: exit 1 with a hint instead of writing a 'nothing in this window' digest)")
     p.set_defaults(func=cmd_digest)
 
     p = sub.add_parser("rematch", help="re-run gazetteer matching and scoring over stored papers (after editing config)")

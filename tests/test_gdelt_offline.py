@@ -43,6 +43,40 @@ def test_build_query_quotes_name_parenthesises_or_groups_and_adds_language():
     assert gdelt.build_query("10x Genomics", "(x OR y)", extra="domain:example.com") == '"10x Genomics" (x OR y) domain:example.com sourcelang:english'
 
 
+def test_batch_query_and_packing_under_the_query_length_limit():
+    ctx = "(sequencing OR genomics)"
+    assert gdelt.build_batch_query(["Illumina"], ctx) == gdelt.build_query("Illumina", ctx)  # a batch of one is the old query
+    assert gdelt.build_batch_query(["Illumina", "10x Genomics"], ctx) == '("Illumina" OR "10x Genomics") (sequencing OR genomics) sourcelang:english'
+    assert gdelt.build_batch_query([], ctx) == "(sequencing OR genomics) sourcelang:english"
+    members = [("Illumina", "illumina"), ("10x Genomics", "txg"), ("Pacific Biosciences", "pacb"), ("Oxford Nanopore", "ont"), ("Bruker", "bruker")]
+    # every query stays within max_chars; the greedy packer keeps the order and opens a new batch when the next name would not fit
+    batches = gdelt.batch_companies(members, ctx, max_chars=100, batch_size=0)
+    assert [[cid for _, cid in b] for b in batches] == [["illumina", "txg", "pacb"], ["ont", "bruker"]]
+    assert all(len(gdelt.build_batch_query([n for n, _ in b], ctx)) <= 100 for b in batches)
+    # the member cap applies on top of the length limit
+    assert [[cid for _, cid in b] for b in gdelt.batch_companies(members, ctx, max_chars=250, batch_size=2)] == [["illumina", "txg"], ["pacb", "ont"], ["bruker"]]
+    assert [[cid for _, cid in b] for b in gdelt.batch_companies(members, ctx, max_chars=250, batch_size=1)] == [[cid] for _, cid in members]
+    # the real limits: 70+ names of typical length need about ten requests, never a query over 250 characters
+    many = [(f"Company Number {i}", f"c{i}") for i in range(72)]
+    real = gdelt.batch_companies(many, '(sequencing OR genomics OR proteomics OR "life sciences" OR instrument OR biotech)')
+    assert 9 <= len(real) <= 12 and all(len(gdelt.build_batch_query([n for n, _ in b], '(sequencing OR genomics OR proteomics OR "life sciences" OR instrument OR biotech)')) <= gdelt.MAX_QUERY_CHARS for b in real)
+    # an oversize single name still goes alone (the API decides); blank names and names the API rejects as too short are dropped
+    assert gdelt.batch_companies([("x" * 300, "big"), ("", "blank"), ("Seer", "seer"), ("Illumina", "illumina")], ctx, max_chars=50) == [[("x" * 300, "big")], [("Illumina", "illumina")]]
+    assert gdelt.too_short("Seer") and not gdelt.too_short("Roche") and gdelt.too_short("  Abc ")
+
+
+def test_batch_news_reports_its_outcome_and_leaves_attribution_to_the_caller():
+    http = FakeHttp([_resp(200, json.dumps(ARTICLES)), None])
+    outcome = {}
+    items = list(gdelt.batch_news(http, [("Illumina", "illumina"), ("10x Genomics", "txg")], context="(x OR y)", since="2026-10-10", outcome=outcome))
+    assert http.calls[0][1]["query"] == '("Illumina" OR "10x Genomics") (x OR y) sourcelang:english'
+    assert outcome == {"answered": True, "articles": 3} and len(items) == 1  # the since filter dropped the old story, the url-less one was skipped
+    assert items[0].feed == "gdelt" and items[0].companies == []  # a multi-company batch: the pipeline's gazetteer attributes it
+    outcome = {}
+    assert list(gdelt.batch_news(http, [("Illumina", "illumina")], outcome=outcome)) == [] and outcome == {"answered": False, "articles": 0}
+    assert list(gdelt.batch_news(http, [("", "")])) == [] and len(http.calls) == 2  # nothing to ask
+
+
 def test_seen_date():
     assert gdelt._seen_date("20261015T143000Z") == "2026-10-15"
     assert gdelt._seen_date("20261015") == "2026-10-15"

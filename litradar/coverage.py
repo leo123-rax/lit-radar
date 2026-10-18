@@ -10,10 +10,13 @@ printed as Markdown, dumped as JSON or embedded in the digest.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from urllib.parse import urlsplit
 
 from .config import Settings
+from .incremental import classify_error, dedupe_errors
 from .rank.heuristics import is_platform
 from .store import Store
 
@@ -25,8 +28,6 @@ _IN_WINDOW = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND sub
 _IN_RANGE = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND substr(p.first_seen,1,10) >= ? AND substr(p.first_seen,1,10) <= ?))"
 
 PAPER_SOURCES = ("biorxiv", "europepmc", "openalex", "crossref", "arxiv", "rss")
-# errors whose text points at configuration, not at the remote source: a re-run changes nothing
-_CONFIG_ERROR_MARKERS = ("not set", "not configured", "api key", "api_key", "contact_email", "litradar_", "budget", "insufficient")
 
 
 def _trailing(since: str) -> Tuple[str, str]:
@@ -39,21 +40,54 @@ def _base_source(source: str) -> str:
 
 
 _SOURCE_LABEL_ALIASES = {"feed": "rss", "feeds": "rss", "subject": "rss", "news": "rss", "gnews": "rss"}
+_HOST_LABEL_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$", re.I)
 
 
-def error_source_id(label: str) -> str:
+def is_host_label(label: str) -> bool:
+    """'www.example.com' (a hostname the pipeline could not map to a source id) rather than 'rss Nature' or 'sec'."""
+    return bool(_HOST_LABEL_RE.match((label or "").strip()))
+
+
+def feed_hosts(settings: Settings) -> Set[str]:
+    """Hosts of every configured feed (feeds.yaml, journals.yaml `rss` and `subject_feeds`), lower-case."""
+    urls: List[Any] = [f.get("url") for f in (settings.yaml("feeds") or {}).get("feeds", []) or [] if isinstance(f, dict)]
+    journals = settings.yaml("journals") or {}
+    urls += [j.get("rss") for j in journals.get("journals", []) or [] if isinstance(j, dict)]
+    urls += [f.get("url") for f in journals.get("subject_feeds", []) or [] if isinstance(f, dict)]
+    out: Set[str] = set()
+    for u in urls:
+        try:
+            host = urlsplit(str(u or "")).netloc.lower()
+        except ValueError:
+            continue
+        if host:
+            out.add(host)
+    return out
+
+
+def error_source_id(label: str, known_feed_hosts: Optional[Set[str]] = None) -> str:
     """The source id behind a pipeline error label: 'SEC 8-K feeds skipped' -> 'sec', 'rss Nature Methods' -> 'rss',
     'feed Example Feed' -> 'rss', 'europepmc' -> 'europepmc'. The same first-word rule `litradar status` uses, so
-    suggestions name a real `--sources` value instead of echoing the whole label."""
-    first = (label or "").strip().split()
+    suggestions name a real `--sources` value instead of echoing the whole label.
+
+    A bare hostname is never split on its dots: it maps to `rss` when it is one of the configured feed hosts and is
+    otherwise returned as it is (printed plainly), so 'www.example.com' can never become `--sources www`."""
+    text = (label or "").strip()
+    if is_host_label(text):
+        return "rss" if text.lower() in (known_feed_hosts or set()) else text.lower()
+    first = text.split()
     key = (first[0].lower().split(":", 1)[0].split(".", 1)[0] if first else "") or "unknown"
     return _SOURCE_LABEL_ALIASES.get(key, key)
 
 
 def is_config_error(text: str) -> bool:
     """Does an error message describe a missing key/identity/budget rather than a source outage?"""
-    t = (text or "").lower()
-    return any(m in t for m in _CONFIG_ERROR_MARKERS)
+    return classify_error(text) == "config"
+
+
+def is_rate_limit_error(text: str) -> bool:
+    """Does an error message describe throttling (HTTP 429, a host the client stopped calling) rather than an outage?"""
+    return classify_error(text) == "degraded"
 
 
 # ----------------------------------------------------------------------------- store queries
@@ -258,10 +292,17 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
     if not last:
         out.append("No pipeline run is recorded in this database yet: run `litradar run --days 7` before reading the rest.")
     for e in report.get("errored_sources") or []:
+        times = f" ({e['count']} identical errors)" if int(e.get("count") or 1) > 1 else ""
         if e.get("config"):
             out.append(f"{e['source']} did not run in the last run because of configuration ({e['error'][:120]}): fix .env (see .env.example), then re-run.")
+        elif e.get("rate_limited"):
+            out.append(f"{e['source']} was rate-limited in the last run ({e['error'][:90]}){times}: degraded, not an outage; the next scheduled run "
+                       f"retries, or re-run it alone with `litradar run --sources {e['source_id']} -v` after a pause.")
+        elif is_host_label(e.get("source", "")) and e.get("source_id") == e.get("source", "").lower():
+            out.append(f"host {e['source']} answered nothing but errors in the last run ({e['error'][:90]}){times}: it is not a configured feed host, "
+                       "so find the source that uses it (`litradar run -v` logs every request) and re-run that source alone.")
         else:
-            out.append(f"{e['source']} errored in the last run ({e['error'][:90]}): re-run it alone with `litradar run --sources {e['source_id']} -v`.")
+            out.append(f"{e['source']} errored in the last run ({e['error'][:90]}){times}: re-run it alone with `litradar run --sources {e['source_id']} -v`.")
     if bool((src_cfg.get("openalex") or {}).get("enabled", True)) and not settings.openalex_api_key:
         out.append(
             "No OpenAlex key configured: OPENALEX_API_KEY is empty and anonymous OpenAlex traffic is metered per IP, so the topic, "
@@ -270,12 +311,26 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
     if not settings.contact_email:
         out.append("LITRADAR_CONTACT_EMAIL is empty: SEC 8-K feeds are skipped and Crossref/OpenAlex serve you from the slow anonymous pool.")
     present = {_base_source(s["source"]) for s in report.get("sources") or []}
-    pulled_last_run = {_base_source(str(k).split(".", 1)[1]) for k in ((last or {}).get("counts") or {}) if str(k).startswith("fetched.")}
+    # `fetched.<source>` is written for every pull that completed, zero included, so a present key with value 0 is
+    # "pulled, nothing in the window" and an absent key is "not pulled" (a --sources subset or a failure)
+    pulled_counts: Dict[str, int] = {}
+    for k, v in ((last or {}).get("counts") or {}).items():
+        if str(k).startswith("fetched."):
+            base = _base_source(str(k).split(".", 1)[1])
+            pulled_counts[base] = pulled_counts.get(base, 0) + int(v or 0)
+    window_days = _window_days(report.get("since"), report.get("until"))
     for name in PAPER_SOURCES:
         if bool((src_cfg.get(name) or {}).get("enabled", True)) and name not in present and last:
-            if pulled_last_run and name not in pulled_last_run:
+            if pulled_counts and name not in pulled_counts:
                 out.append(f"Source {name} is enabled but contributed 0 papers in the window and was not pulled in the last run "
                            f"(a `--sources` subset, or it failed before returning anything): `litradar run --sources {name} -v` pulls it alone.")
+            elif pulled_counts and pulled_counts.get(name, 0) == 0:
+                short = " (normal on a window this short; judge it over a week)" if window_days is not None and window_days < 3 else ""
+                out.append(f"Source {name} is enabled, was pulled in the last run and returned 0 records for its window{short}: "
+                           f"if it stays at 0 over a full week, check it with `litradar run --sources {name} -v`.")
+            elif pulled_counts:
+                out.append(f"Source {name} is enabled but contributed 0 papers in the window although the last run fetched {pulled_counts[name]} record(s) "
+                           f"from it (none lands in the window by publication date: late-indexed or re-dated records, see docs/live.md on lags).")
             else:
                 out.append(f"Source {name} is enabled but contributed 0 papers in the window: check it with `litradar run --sources {name} -v`.")
     for s in report.get("sources") or []:
@@ -330,6 +385,29 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
 
 
 # ----------------------------------------------------------------------------- public API
+def _window_days(since: Any, until: Any) -> Optional[int]:
+    try:
+        return (date.fromisoformat(str(until)) - date.fromisoformat(str(since))).days
+    except (TypeError, ValueError):
+        return None
+
+
+def errored_sources(errors: Sequence[str], settings: Optional[Settings] = None) -> List[Dict[str, Any]]:
+    """The run's error list as one row per distinct (source label, message), with a count, the owning source id,
+    and the classification (`config`, `rate_limited`, else an outage). Seven identical NIH RePORTER lines become one
+    row with count 7; a host label maps to `rss` when it is a configured feed host, else stays a plain host."""
+    hosts = feed_hosts(settings) if settings is not None else set()
+    out: List[Dict[str, Any]] = []
+    for msg, count in dedupe_errors([str(e) for e in errors]):
+        src, _, rest = msg.partition(":")
+        label = src.strip() or "unknown"
+        out.append({
+            "source": label, "source_id": error_source_id(label, hosts), "error": rest.strip() or msg, "count": count,
+            "config": is_config_error(msg), "rate_limited": is_rate_limit_error(msg),
+        })
+    return out
+
+
 def _journal_pull_was_complete(last: Optional[Dict[str, Any]]) -> bool:
     """Did the last run pull the ISSN-driven sources over at least a week? Only then is a silent ISSN suspicious."""
     if not last:
@@ -350,11 +428,7 @@ def coverage_report(store: Store, since: str, until: str, settings: Settings) ->
     window aggregate); the Markdown says so next to the numbers.
     """
     last = _last_run(store)
-    errored = []
-    for msg in (last or {}).get("errors") or []:
-        src, _, rest = str(msg).partition(":")
-        label = src.strip() or "unknown"
-        errored.append({"source": label, "source_id": error_source_id(label), "error": rest.strip() or str(msg), "config": is_config_error(str(msg))})
+    errored = errored_sources((last or {}).get("errors") or [], settings)
     journals = list((settings.yaml("journals") or {}).get("journals") or [])
     n_window = store.conn.execute(f"SELECT COUNT(*) FROM papers p WHERE {_IN_WINDOW}", (since, until, since)).fetchone()[0]
     report: Dict[str, Any] = {
@@ -452,8 +526,9 @@ def render_coverage_markdown(store: Store, since: str, until: str, settings: Set
     md.append("### Sources that errored in the last run\n")
     if r["errored_sources"]:
         for e in r["errored_sources"]:
-            tag = " _(configuration, not an outage)_" if e.get("config") else ""
-            md.append(f"- **{e['source']}**: {e['error'][:200]}{tag}")
+            tag = " _(configuration, not an outage)_" if e.get("config") else (" _(rate-limited: degraded, not an outage)_" if e.get("rate_limited") else "")
+            times = f" (x{e['count']})" if int(e.get("count") or 1) > 1 else ""
+            md.append(f"- **{e['source']}**: {e['error'][:200]}{times}{tag}")
         md.append("")
     else:
         md.append("_none_\n" if last else "_no run recorded_\n")
