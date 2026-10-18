@@ -224,6 +224,23 @@ def load_subgroups(config_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
 
 
 # ----------------------------------------------------------------------------- queries
+def _coverage_start(conn: sqlite3.Connection) -> Optional[str]:
+    """The earliest `since` of the runs that built this store (YYYY-MM-DD), or None when no run is recorded or the
+    table is missing. Buckets before it were never fetched for and must not be read as weeks with few papers."""
+    try:
+        row = conn.execute("SELECT MIN(since) FROM runs WHERE since IS NOT NULL AND since != ''").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    value = str(row[0])[:10]
+    try:
+        _parse_date(value)
+    except ValueError:
+        return None
+    return value
+
+
 def _weekly_totals(conn: sqlite3.Connection, params: Dict[str, Any], weeks: int) -> Tuple[Dict[int, int], Dict[int, int]]:
     papers: Dict[int, int] = {}
     for wk, n in conn.execute(_PW + "SELECT wk, COUNT(*) FROM pw GROUP BY wk", params):
@@ -506,6 +523,16 @@ def compute_trends(
 
     first_seen_min = conn.execute("SELECT MIN(substr(first_seen, 1, 10)) FROM papers").fetchone()[0]
     cold_start = first_seen_min is None or first_seen_min >= week_start
+    # how much of 'last week' the runs that built this store actually covered: a corpus whose first run pulled
+    # 2026-10-10..17 has one day of the 2026-10-04..10 bucket, and week-over-week movers against it are artefacts
+    covered_from = _coverage_start(conn)
+    if covered_from is None or covered_from <= prev_start:
+        prev_days_covered = 7
+    elif covered_from > prev_end:
+        prev_days_covered = 0
+    else:
+        prev_days_covered = (_parse_date(prev_end) - _parse_date(covered_from)).days + 1
+    previous_week_coverage = {"covered_from": covered_from, "days_covered": prev_days_covered, "partial": prev_days_covered < 7}
     new_entities = {
         "instrument": _new_mention_entities(conn, "instrument", week_start, until),
         "company": _new_mention_entities(conn, "company", week_start, until),
@@ -540,6 +567,7 @@ def compute_trends(
             "archive_weeks_dropped_partial": dropped_archive,
             "previous_week_partial_papers": any(d["week"] == 1 for d in dropped_papers),
             "previous_week_partial_archive": any(d["week"] == 1 for d in dropped_archive),
+            "previous_week_coverage": previous_week_coverage,
         },
         "thresholds": {"notable_z": notable_z, "min_count": min_count, "std_floor": STD_FLOOR},
         "cold_start": cold_start,
@@ -719,10 +747,28 @@ def render_trends_markdown(
 
     risers, fallers = top_movers(trends, n=top_n)
     headers = ["Entity", "Kind", "This week", "Last week", "Baseline mean ± std", "z", "Detail"]
-    md.append(f"{hh} Biggest risers\n")
-    md.append(_table(headers, _mover_rows(risers)))
-    md.append(f"{hh} Biggest fallers\n")
-    md.append(_table(headers, _mover_rows(fallers)))
+    cov = hist.get("previous_week_coverage") or {}
+    wow_only = not hist["z_available_papers"] and not hist["z_available_archive"]
+    if cov.get("partial") and wow_only:
+        # the movers would be ranked by week-over-week change against a bucket the runs only partly covered:
+        # every "faller" would be an artefact of the missing days, so the tables wait for a full previous week
+        md.append(f"{hh} Biggest risers and fallers\n")
+        md.append(
+            f"_Suppressed: the runs that built this store cover 'last week' ({trends['previous_week']['start']} to "
+            f"{trends['previous_week']['end']}) from {cov.get('covered_from')} only ({cov.get('days_covered')} of 7 days), and with no "
+            f"baseline the movers would be ranked by week-over-week change against that partial bucket. They appear once a run has "
+            f"covered a full previous week._\n"
+        )
+    else:
+        if cov.get("partial"):
+            md.append(
+                f"_'Last week' is only partly covered by the runs that built this store (from {cov.get('covered_from')}, "
+                f"{cov.get('days_covered')} of 7 days); read the 'Last week' column as a lower bound._\n"
+            )
+        md.append(f"{hh} Biggest risers\n")
+        md.append(_table(headers, _mover_rows(risers)))
+        md.append(f"{hh} Biggest fallers\n")
+        md.append(_table(headers, _mover_rows(fallers)))
 
     md.append(f"{hh} New this week\n")
     ne = trends["new_entities"]

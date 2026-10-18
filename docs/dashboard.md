@@ -80,17 +80,20 @@ still merged case-insensitively with any mixed-case spelling. The map is only a 
 records themselves still carry no `entity_id`, so adding the model to `config/instruments.yaml`
 is what makes them count per instrument.
 
-### Enabling the countries page
+### The countries page
 
-Neither of these is written by the base pipeline, which is why the page ships with an explanation
-instead of a chart:
+The page reads either of two places and fills in with no configuration when one of them is populated:
 
 1. a `country` column on `papers` — an adapter may add one with `ALTER TABLE papers ADD COLUMN
    country TEXT` after the schema has been created; or
 2. a `country` string (or a `countries` list, first element used) in each paper's `extra_json`.
 
-Store ISO 3166-1 alpha-2 codes, derived from the first author's affiliation or from an institution
-record. The page fills in on the next build with no configuration.
+The language/country tagger (`litradar/i18n.py`, `tag_store`, run at the end of every `litradar run`)
+writes ISO 3166-1 alpha-2 codes into `extra_json.countries` (first author first) from institution
+records or affiliation strings, so a store built by the pipeline carries the chart out of the box (the
+hosted overview showed US 709 / CN 278 / GB 112 for one week). Only a store whose papers were never
+tagged (an import that skipped the step, or a run that failed before it) shows the explanation instead
+of a chart.
 
 ### Enabling the subgroups page
 
@@ -152,28 +155,30 @@ The same index is written to `data/papers.json` for anything else that wants it.
 
 1. **Settings → Pages → Build and deployment → Source: GitHub Actions.** (Not "Deploy from a
    branch" — nothing is committed to the repository; the site is uploaded as an artifact.)
-2. Run `weekly-digest` at least once, so there is a cached database to build from.
+2. Run `weekly-digest` at least once, so the `db-latest` release carries a database snapshot
+   (`radar.sqlite.zst`) to build from.
 3. The `pages` workflow then runs automatically whenever `weekly-digest` **completes successfully**
    (`workflow_run`), and can be run by hand from the Actions tab (`workflow_dispatch`, with an
    optional `weeks` input).
 
-The workflow restores the database from the same Actions cache the digest workflow writes
-(`restore-keys: radar-db-`), runs `litradar dashboard --db data/radar.sqlite --out site`, then
+The workflow downloads `radar.sqlite.zst` from the repository's `db-latest` release (the state release
+the weekly digest publishes; `gh release download db-latest --pattern 'radar.sqlite.zst'`), decompresses
+it, runs `PRAGMA integrity_check`, then `litradar dashboard --db data/radar.sqlite --out site`, and
 uploads and deploys with `actions/upload-pages-artifact` and `actions/deploy-pages`. It needs
-`pages: write` and `id-token: write`, which are declared in the workflow. If no cached database is
-found — a fresh fork that has not run the digest yet — the workflow posts a notice and finishes
-green without deploying, rather than failing. If the cached database is unreadable the build step
-fails red (see *What it reads*), and the previous deployment stays up. The `weeks` dispatch input
-reaches the shell through an environment variable (`WEEKS`), never by interpolation into the
-command line.
+`pages: write` and `id-token: write`, which are declared in the workflow. If no snapshot exists yet —
+a fresh fork that has not run the digest — the workflow posts a notice and finishes green without
+deploying, rather than failing. If the snapshot is unreadable the build step fails red (see *What it
+reads*), and the previous deployment stays up. The `weeks` dispatch input reaches the shell through an
+environment variable (`WEEKS`), never by interpolation into the command line.
 
 Notes and limits:
 
 * `workflow_run` triggers only fire for workflow files on the **default branch**; a pages workflow
   on a feature branch will not be started by a digest run.
-* Actions cache visibility: caches written by the digest on the default branch are readable from
-  any branch, so a manually dispatched pages run on a feature branch can still restore the
-  database; caches written on a feature branch are not visible to the default branch.
+* The `db-latest` release is repository-wide, so a manually dispatched pages run on a feature branch
+  builds from the same snapshot the default branch publishes; there is no per-branch state to restore.
+* The footer of every page names the build time; the counts are those of the snapshot the site was
+  built from, not of a local checkout.
 * The published site is **public if the repository is public**. The corpus is metadata, abstracts
   and open-licensed text (see `docs/LEGAL.md`), but check what your gazetteers and watchlist terms
   say about your interests before publishing, and keep the repository private if that matters —

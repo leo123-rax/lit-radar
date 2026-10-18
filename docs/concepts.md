@@ -105,8 +105,16 @@ without calling the model again.
 
 * A term is counted once per paper, however often it appears; abstracts contribute for every paper,
   Methods only when open full text was parsed, so Methods-only vocabulary is under-counted.
-* The seed list and stop lists are deliberately conservative. Edit `_SEED_SPECS`, `GENERIC_PHRASES`
-  and `HYPHEN_STOP` in `litradar/concepts.py` to tune recall; run `litradar concepts --force` after
+* Disease names, anatomy, study populations and regulators are not concepts here: a small blocklist
+  (`CLINICAL_PHRASES`: amyotrophic lateral sclerosis, autism spectrum disorder, Parkinson's disease,
+  healthy controls, natural killer, drug administration, ...) plus a head-word rule (`CLINICAL_HEAD_WORDS`:
+  a phrase ending in disease / disorder / syndrome / carcinoma / patients / controls / ... ) drops them at
+  extraction; curated seeds are exempt. Fragments are dropped at report time: a term that is a strict
+  sub-phrase of another counted term with at least as many papers this month ("dependent acquisition"
+  inside "data dependent acquisition", "dna double strand" inside "dna double strand break") is the parent
+  seen through the 4-token window, and the report lists them under `fragments_dropped`.
+* The seed list and stop lists are deliberately conservative. Edit `_SEED_SPECS`, `GENERIC_PHRASES`,
+  `CLINICAL_PHRASES` and `HYPHEN_STOP` in `litradar/concepts.py` to tune recall; run `litradar concepts --force` after
   changing them so every week is recounted with the new rules.
 * With a one-week corpus (a fresh install) everything is "new" and the ranking degrades to paper counts
   of established terms; bursts need a few months of history to mean anything.

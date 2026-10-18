@@ -401,3 +401,48 @@ def test_partial_week_rule_with_two_weeks_uses_the_other_week(tmp_path):
     st.commit()
     hist = trends.compute_trends(st, UNTIL, weeks=4)["history"]
     assert hist["paper_weeks_with_data"] == 2 and hist["paper_weeks_dropped_partial"] == []
+
+
+def test_previous_week_only_partly_covered_by_the_runs_suppresses_week_over_week_movers(tmp_path):
+    """Seen live: a corpus built by one `run --days 7` holds a single day of 'last week', and with no baseline the
+    movers were ranked week-over-week against that bucket (every faller an artefact). The runs table says how much
+    of the previous week was ever fetched; below seven days the tables wait."""
+    st = Store(tmp_path / "cov.sqlite")
+    _add_instrument_papers(st, "x", "X", 1, 1)  # the one covered day of 'last week' (2026-10-10)
+    _add_instrument_papers(st, "x", "X", 0, 9)
+    st.record_run("2026-10-17T00:00:00Z", "2026-10-10", "2026-10-17", {})
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    cov = tr["history"]["previous_week_coverage"]
+    assert cov == {"covered_from": "2026-10-10", "days_covered": 1, "partial": True}
+    assert tr["history"]["z_available_papers"] is False
+    md = trends.render_trends_markdown(tr)
+    assert "### Biggest risers and fallers" in md and "Suppressed: the runs that built this store cover 'last week'" in md
+    assert "from 2026-10-10 only (1 of 7 days)" in md
+    assert "### Biggest fallers" not in md and "| 9 | 1 |" not in md
+    # an earlier run that covered the whole previous week lifts the suppression
+    st.record_run("2026-10-10T00:00:00Z", "2026-09-01", "2026-10-10", {})
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    assert tr["history"]["previous_week_coverage"] == {"covered_from": "2026-09-01", "days_covered": 7, "partial": False}
+    md = trends.render_trends_markdown(tr)
+    assert "### Biggest risers" in md and "### Biggest fallers" in md and "Suppressed" not in md
+    # no run recorded at all (a store built another way): nothing is assumed, the tables stay
+    st2 = Store(tmp_path / "noruns.sqlite")
+    _add_instrument_papers(st2, "x", "X", 1, 1)
+    _add_instrument_papers(st2, "x", "X", 0, 9)
+    st2.commit()
+    tr2 = trends.compute_trends(st2, UNTIL, weeks=4)
+    assert tr2["history"]["previous_week_coverage"] == {"covered_from": None, "days_covered": 7, "partial": False}
+    assert "### Biggest fallers" in trends.render_trends_markdown(tr2)
+
+
+def test_partial_coverage_with_a_baseline_keeps_the_tables_and_flags_last_week(synthetic):
+    synthetic.record_run("2026-10-17T00:00:00Z", "2026-10-08", "2026-10-17", {})  # 3 of the 7 days of 2026-10-04..10
+    synthetic.commit()
+    tr = trends.compute_trends(synthetic, UNTIL)
+    assert tr["history"]["previous_week_coverage"] == {"covered_from": "2026-10-08", "days_covered": 3, "partial": True}
+    assert tr["history"]["z_available_papers"] is True
+    md = trends.render_trends_markdown(tr)
+    assert "### Biggest risers" in md and "### Biggest fallers" in md
+    assert "'Last week' is only partly covered by the runs that built this store (from 2026-10-08, 3 of 7 days)" in md
