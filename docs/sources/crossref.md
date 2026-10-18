@@ -33,6 +33,14 @@ fall outside the window downstream). `extra["published_parts"]` keeps the raw de
 `extra["created"]` the registration day, so either can be recovered. `extra["issn"]` carries the record's
 ISSNs for the journal-tier lookup. `_date()` tolerates `null` parts and string parts.
 
+## Metadata hygiene
+
+Crossref titles arrive with JATS/HTML markup and the publisher's line breaks (`<i>de novo</i>`,
+`mouse\n   <i>Malat1</i>\n   long noncoding RNA`), and one record can list the same funder once per award
+(24 copies of one NIH institute were seen live). `to_paper` runs title, container title and abstract through
+`litradar.sources.clean_text` (tags stripped, entities decoded, whitespace collapsed) and keeps each funder
+name once, in order, in both `extra["funders"]` and the `funding` section.
+
 ## Known limitations
 
 * Abstracts are present only when the publisher deposits them (Nature portfolio and Cell Press mostly do;

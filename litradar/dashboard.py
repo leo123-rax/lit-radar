@@ -387,7 +387,7 @@ def _instrument_entities(conn: sqlite3.Connection, weeks: List[str], start: str,
             "id": eid,
             "name": info["name"],
             "vendor": info["vendor"],
-            "ticker": info["ticker"],
+            "ticker": _ticker(info["ticker"]),
             "papers_per_week": pw,
             "experiments_per_week": aw,
             "papers_total": sum(pw),
@@ -464,7 +464,7 @@ def _company_entities(conn: sqlite3.Connection, weeks: List[str], start: str, en
         entities.append({
             "id": eid,
             "name": info["name"],
-            "ticker": info["ticker"],
+            "ticker": _ticker(info["ticker"]),
             "author": author,
             "funding_coi": funding,
             "subject": subject,
@@ -773,6 +773,16 @@ def _nav(active: str) -> str:
     return "\n      ".join(items)
 
 
+_TICKER_PLACEHOLDERS = {"n/a", "na", "none", "null", "-", "--", "?"}
+
+
+def _ticker(value: Any) -> str:
+    """A ticker worth a pill, or '' for the placeholders the gazetteers use for entities without one
+    (`n/a` for open-source software; the page used to render a literal 'n/a' tag)."""
+    s = str(value or "").strip()
+    return "" if s.lower() in _TICKER_PLACEHOLDERS else s
+
+
 def _page(title: str, active: str, lede: str, body: str, payload: Any, script: str, generated: str) -> str:
     return f"""<!doctype html>
 <html lang="en" data-theme="auto">
@@ -798,8 +808,8 @@ def _page(title: str, active: str, lede: str, body: str, payload: Any, script: s
 {body}
 </main>
 <footer class="wrap site-foot">
-  <p>Generated {generated} from the local corpus. Counts are of records in the store, not of
-  everything published; see the project documentation for coverage and method.</p>
+  <p>Generated {generated} from the radar database this site was built from. Counts are of records in
+  the store, not of everything published; see the project documentation for coverage and method.</p>
 </footer>
 <script type="application/json" id="page-data">{_json_blob(payload)}</script>
 <script src="{CHARTJS_URL}" integrity="{CHARTJS_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -1078,7 +1088,7 @@ body {
 .brand { font-weight: 600; }
 .muted, .note, .lede { color: var(--text-secondary); }
 .note { font-size: 13px; margin: 0 0 12px; }
-.lede { max-width: 72ch; }
+.lede { max-width: 72ch; overflow-wrap: anywhere; }
 .nav { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-left: auto; }
 .nav a { color: var(--text-secondary); text-decoration: none; padding: 4px 2px; border-bottom: 2px solid transparent; }
 .nav a:hover { color: var(--text-primary); }
@@ -1094,8 +1104,11 @@ a { color: var(--series-1); }
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 16px; margin: 16px 0;
+  /* a card never widens the page: charts and tables shrink or scroll inside it (phone widths) */
+  min-width: 0; max-width: 100%; overflow: hidden; box-sizing: border-box;
 }
-.chart { position: relative; height: 300px; }
+.chart { position: relative; height: 300px; min-width: 0; max-width: 100%; }
+.chart canvas { max-width: 100% !important; }
 .chart.small { height: 170px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .grid2 > * { min-width: 0; }
@@ -1120,6 +1133,9 @@ summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .table-scroll { overflow-x: auto; }
 .table-scroll.capped { max-height: 320px; overflow-y: auto; }
 .table-scroll table { min-width: 100%; width: max-content; }
+/* a table that must stay in view (search results) fits the card and lets its long text column wrap */
+.table-scroll.fit table { width: 100%; min-width: 0; table-layout: auto; }
+td.wrap, th.wrap { white-space: normal; min-width: 16em; max-width: 46em; overflow-wrap: anywhere; }
 .entity-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 8px; }
 .entity-head .tag {
   font-size: 12px; color: var(--text-secondary); border: 1px solid var(--border);
@@ -1332,7 +1348,7 @@ var litradar = (function () {
     }
     var wrapper;
     if (options.collapsible === false) {
-      wrapper = el("div", null, { "class": "table-scroll" });
+      wrapper = el("div", null, { "class": options.fit ? "table-scroll fit" : "table-scroll" });
       container.appendChild(wrapper);
     } else {
       var details = el("details");
@@ -1345,7 +1361,7 @@ var litradar = (function () {
     var thead = el("thead");
     var tr = el("tr");
     headers.forEach(function (h) {
-      tr.appendChild(el("th", h.label, h.num ? { "class": "num" } : null));
+      tr.appendChild(el("th", h.label, h.num ? { "class": "num" } : (h.wrap ? { "class": "wrap" } : null)));
     });
     thead.appendChild(tr);
     t.appendChild(thead);
@@ -1354,7 +1370,7 @@ var litradar = (function () {
       var r = el("tr");
       row.forEach(function (cell, i) {
         var head = headers[i] || {};
-        var td = el("td", null, head.num ? { "class": "num" } : null);
+        var td = el("td", null, head.num ? { "class": "num" } : (head.wrap ? { "class": "wrap" } : null));
         if (cell && typeof cell === "object" && cell.href && isWebUrl(cell.href)) {
           var a = el("a", cell.text, { href: cell.href, rel: "noopener" });
           td.appendChild(a);
@@ -1640,9 +1656,11 @@ var litradar = (function () {
         rows.push([p.date, { text: p.title, href: p.url }, p.journal,
                    (p.instruments || []).join(", "), (p.companies || []).join(", ")]);
       }
-      table(results, [{ label: "Date" }, { label: "Title" }, { label: "Venue" },
+      /* the title wraps and the table fits the card, so venue / instruments / companies stay in view
+         instead of sitting in an unmarked horizontal scroll region */
+      table(results, [{ label: "Date" }, { label: "Title", wrap: true }, { label: "Venue" },
                       { label: "Instruments" }, { label: "Companies" }], rows,
-            { collapsible: false, empty: "No matches." });
+            { collapsible: false, fit: true, empty: "No matches." });
       if (countNode) {
         countNode.textContent = rows.length >= 300
           ? "Showing the first 300 matches of " + papers.length + " indexed papers."

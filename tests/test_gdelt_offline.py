@@ -71,3 +71,32 @@ def test_company_news_yields_items_with_gdelt_feed_and_since_filter():
     assert http.calls[0][1]["query"] == '"Illumina" (sequencing OR genomics) sourcelang:english'
     # no answer -> nothing yielded, no exception
     assert list(gdelt.company_news(FakeHttp([None]), "Illumina", "illumina")) == []
+
+
+def test_rate_limit_stops_the_company_loop_and_the_one_error_line_reaches_coverage(tmp_path, monkeypatch):
+    """A 429 blocks the host: later company queries are skipped without a request, the run records ONE error line
+    naming how many were skipped, and the digest coverage block lists it under the errored sources."""
+    from litradar.config import Settings
+    from litradar.coverage import coverage_report
+    from litradar.store import Store
+
+    # the adapter side: once the shared client has blocked the host, search() must not be reached again
+    http = FakeHttp([_resp(429, "slow down")])
+    assert gdelt.search(http, '"Illumina"') is None and len(http.calls) == 1
+    http.blocked_hosts.add(gdelt.DOC_API.split("/")[2])  # what Http._note_429 does on the second 429 in a row
+    skipped = 0
+    for company in ("Illumina", "PacBio", "10x Genomics"):
+        if gdelt.DOC_API.split("/")[2] in http.blocked_hosts:  # the pipeline's guard before each company query
+            skipped += 1
+            continue
+        list(gdelt.company_news(http, company, company.lower()))
+    assert skipped == 3 and len(http.calls) == 1  # no further requests on a blocked host
+    # the run-report side: the single error line the pipeline writes parses into source 'gdelt' for coverage
+    monkeypatch.setenv("LITRADAR_CACHE_DIR", str(tmp_path / ".cache"))
+    st = Store(tmp_path / "r.sqlite")
+    msg = f"gdelt: host rate-limited (HTTP 429) during the run; {skipped} company quer(y/ies) skipped"
+    st.record_run("2026-10-17T00:00:00Z", "2026-10-10", "2026-10-17", {"counts": {"news.gdelt_skipped": skipped}, "errors": [msg], "http": {}})
+    report = coverage_report(st, "2026-10-10", "2026-10-17", Settings.from_env())
+    _errs = report["errored_sources"]
+    assert len(_errs) == 1 and _errs[0]['source'] == 'gdelt' and 'rate-limited (HTTP 429)' in _errs[0]['error'] and '3 company' in _errs[0]['error']
+    st.close()

@@ -131,7 +131,7 @@ def cmd_candidates(args) -> int:
             print(f"{row['display_name']}: status -> {row['status']}")
             return 0
         if action == "promote":
-            result = discovery.promote(store, args.name, ticker=args.ticker, type_=args.type, add_company=company_writer(settings))
+            result = discovery.promote(store, args.name, ticker=args.ticker, type_=args.type, settings=settings)  # writes via litradar.track.add_company
             print(f"{result['candidate']}: status -> promoted")
             if not args.ticker:
                 h = _hint(result["candidate"], settings, True)

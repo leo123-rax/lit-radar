@@ -348,6 +348,52 @@ def normalize_term(phrase: str) -> str:
     return " ".join(parts)
 
 
+# Disease, anatomy, cohort and regulatory phrases: real biomedical terms, but not the methods / assays / modalities /
+# model classes the surfacer promises. Whole-phrase matches after normalisation; a small list of obvious cases seen
+# live (the extractor's capitalised-run and hyphen channels pick them up from titles), extended by a head-word rule.
+CLINICAL_PHRASES: Set[str] = set(
+    normalize_term(s)
+    for s in """amyotrophic lateral sclerosis|autism spectrum disorder|Parkinson's disease|Alzheimer's disease|
+    Huntington's disease|Crohn's disease|multiple sclerosis|rheumatoid arthritis|systemic lupus erythematosus|
+    chronic obstructive pulmonary disease|chronic kidney disease|acute myeloid leukemia|acute lymphoblastic leukemia|
+    non-small cell lung cancer|small cell lung cancer|triple-negative breast cancer|hepatocellular carcinoma|
+    pancreatic ductal adenocarcinoma|colorectal cancer|glioblastoma multiforme|major depressive disorder|
+    attention deficit hyperactivity disorder|post-traumatic stress disorder|obsessive compulsive disorder|
+    bipolar disorder|type 2 diabetes|type 1 diabetes|gestational diabetes|metabolic syndrome|irritable bowel syndrome|
+    polycystic ovary syndrome|acute respiratory distress syndrome|myocardial infarction|heart failure|atrial fibrillation|
+    traumatic brain injury|spinal cord injury|healthy controls|healthy control|healthy volunteers|healthy donors|
+    natural killer|natural killer cell|drug administration|food and drug administration|European Medicines Agency|
+    central nervous system|peripheral nervous system|gastrointestinal tract|respiratory tract|urinary tract|
+    DNA double-strand|double-strand break|double strand break|
+    breast cancer|lung cancer|prostate cancer|pancreatic cancer|ovarian cancer|gastric cancer|liver cancer|
+    bladder cancer|cervical cancer|skin cancer|head and neck cancer|cardiovascular disease|coronary artery disease|
+    inflammatory bowel disease|liver disease|kidney disease|heart disease|infectious disease|infectious diseases|
+    rare disease|rare diseases|neurodegenerative disease|neurodegenerative diseases|autoimmune disease|
+    autoimmune diseases|solid tumor|solid tumors|solid tumour|solid tumours|brain tumor|brain tumour""".split("|")
+    if s.strip()
+)
+# a phrase whose head (last) word is one of these names a disease, a lesion or a study population, not a technique.
+# "disease", "cancer" and "tumor" are deliberately absent: "minimal residual disease", "circulating tumor DNA" and
+# "cancer genome atlas" are concepts the radar tracks; disease names with those heads are listed above instead.
+CLINICAL_HEAD_WORDS: Set[str] = {
+    "disorder", "syndrome", "carcinoma", "adenocarcinoma", "sarcoma", "lymphoma", "leukemia", "leukaemia",
+    "myeloma", "melanoma", "glioma", "glioblastoma", "sclerosis", "arthritis", "diabetes", "infection", "injury",
+    "failure", "fibrosis", "cirrhosis", "dementia", "patient", "control", "volunteer", "donor", "survivor", "cohort",
+    "infarction", "stroke", "sepsis", "obesity", "hypertension", "asthma", "epilepsy", "schizophrenia", "depression",
+    "autism", "metastasis", "neoplasm", "malignancy",
+}
+
+
+def is_clinical_phrase(key: str) -> bool:
+    """True for a normalised key that names a disease, anatomy, a cohort or a regulator rather than a method."""
+    if not key:
+        return False
+    if key in CLINICAL_PHRASES:
+        return True
+    head = key.rsplit(" ", 1)[-1]
+    return head in CLINICAL_HEAD_WORDS
+
+
 def _is_numeric(tok: str) -> bool:
     return bool(_NUMERIC_RE.match(tok)) or not re.search(r"[^\W\d_]", tok)
 
@@ -558,6 +604,8 @@ def _emit(out: Dict[str, Candidate], tokens: Sequence[str], channel: str, excl: 
         return
     if key in GENERIC_PHRASES or (excl is not None and excl.blocks(key)):
         return
+    if channel != "seed" and is_clinical_phrase(key):
+        return  # disease names, anatomy, cohorts and regulators are not methods, assays, modalities or model classes
     if key not in out:
         out[key] = Candidate(key=key, display=display, channel=channel, acronym=acronym)
 
@@ -937,6 +985,33 @@ def burst_report(
             "series": [by_week.get(w, 0) for w in all_weeks],
         })
         scored.append(s)
+    # fragments: a phrase that is a strict sub-phrase of another counted term with at least as many papers this month
+    # ("dependent acquisition" inside "data dependent acquisition", "dna double strand" inside "dna double strand break")
+    # is the parent phrase seen through the 4-token window, not a concept of its own
+    cur_totals = {term: sum(v for w, v in by_week.items() if w in cur_set) for term, by_week in counts.items()}
+    by_first_token: Dict[str, List[str]] = defaultdict(list)
+    for term, n in cur_totals.items():
+        if n > 0:
+            for tok in set(term.split()):
+                by_first_token[tok].append(term)
+
+    def absorbed_by(term: str) -> Optional[str]:
+        n = cur_totals.get(term, 0)
+        padded = f" {term} "
+        best: Optional[str] = None
+        for parent in by_first_token.get(term.split()[0], ()):
+            if parent != term and len(parent) > len(term) and padded in f" {parent} " and cur_totals[parent] >= n:
+                if best is None or cur_totals[parent] > cur_totals[best]:
+                    best = parent
+        return best
+
+    fragments: Dict[str, str] = {}
+    for d in list(scored) + list(new_terms):
+        parent = absorbed_by(d["term"])
+        if parent:
+            fragments[d["term"]] = parent
+    scored = [d for d in scored if d["term"] not in fragments]
+    new_terms = [d for d in new_terms if d["term"] not in fragments]
     scored.sort(key=lambda d: (-d["score"], -d["papers"], d["term"]))
     new_terms.sort(key=lambda d: (-d["papers"], d["term"]))
     risers = scored[:top]
@@ -958,6 +1033,7 @@ def burst_report(
         "weak_baseline": len(base_active) < WEAK_BASELINE_WEEKS,
         "params": {"min_papers": min_papers, "min_new_papers": min_new_papers, "novelty_weeks": novelty_weeks, "std_floor": STD_FLOOR, "novelty_bonus": NOVELTY_BONUS},
         "candidates": len(scored), "risers": risers, "new_terms": new_terms, "new_terms_total": n_new_total,
+        "fragments_dropped": fragments,
         "weeks": all_weeks,
     }
 

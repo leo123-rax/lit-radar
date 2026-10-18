@@ -42,6 +42,19 @@ class OpenAlexBudgetExhausted(RuntimeError):
     message) is NOT this error; the pager waits and retries that once."""
 
 
+class OpenAlexRequestError(RuntimeError):
+    """OpenAlex rejected the request itself (HTTP 400/404/422...): an invalid `select` field, a malformed filter, an
+    unknown parameter. The body's `message` is carried verbatim (truncated) so the caller can print the reason;
+    retrying the same request would return the same answer, so the pager raises instead of returning nothing.
+    Verified live 2026-10-17: ``select=...,grants`` answers 400 ``{"error": "...", "message": "grants is not a valid
+    select field. Valid fields for select are: id, doi, title, ..."}``."""
+
+    def __init__(self, status: int, message: str = "") -> None:
+        self.status = int(status)
+        self.message = (message or "").strip()
+        super().__init__(f"HTTP {self.status}" + (f": {self.message}" if self.message else ""))
+
+
 def _sleep(seconds: float) -> None:  # module-level so tests can replace it
     time.sleep(seconds)
 
@@ -77,8 +90,10 @@ def works(
     `state`, when a dict is passed, reports how paging ended so callers can tell a finished query from an
     interrupted one: ``state["complete"]`` is True only when the API returned its last page; ``state["capped"]``
     is True when `max_records` stopped the pager with a cursor still open; ``state["error"]`` names any other
-    early stop (transport failure, non-JSON body, HTTP error, a rate limit that persisted after one retry).
-    Budget exhaustion raises OpenAlexBudgetExhausted; a plain HTTP 429 is retried once after `retryAfter` seconds.
+    early stop (transport failure, non-JSON body, HTTP 5xx, a rate limit that persisted after one retry).
+    Budget exhaustion raises OpenAlexBudgetExhausted; a plain HTTP 429 is retried once after `retryAfter` seconds;
+    a 4xx answer other than 403/429 (invalid select field, malformed filter) raises OpenAlexRequestError carrying
+    the API's message, because repeating the request cannot help and silence would hide a dead source.
     """
     if state is None:
         state = {}
@@ -114,6 +129,12 @@ def works(
                 _sleep(wait)
                 continue
             err = msg[:120] or (str(data.get("error"))[:120] if isinstance(data, dict) and data.get("error") else "")
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                # the request itself is wrong (bad select/filter/parameter): deterministic, so say why and stop
+                detail = msg or (str(data.get("error")) if isinstance(data, dict) and data.get("error") else "") or (getattr(resp, "text", "") or "")
+                log.warning("OpenAlex rejected the request (HTTP %s): %s", resp.status_code, (detail or "no message")[:300])
+                state["error"] = f"HTTP {resp.status_code}" + (f": {err}" if err else "")
+                raise OpenAlexRequestError(resp.status_code, detail[:300])
             state["error"] = f"HTTP {resp.status_code}" + (f": {err}" if err else "")
             break
         retried_429 = False

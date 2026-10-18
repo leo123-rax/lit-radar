@@ -204,6 +204,45 @@ def test_works_plain_429_is_retried_once_but_budget_raises(monkeypatch):
         list(openalex.works(FakeHttp([FakeResp(403, {"error": "forbidden"})]), {"a": "b"}))
 
 
+BAD_SELECT_400 = {  # verbatim shape of the live answer to select=...,grants (2026-10-17)
+    "error": "Invalid query parameters error.",
+    "message": "grants is not a valid select field. Valid fields for select are: id, doi, title, display_name, relevance_score, ...",
+}
+
+
+def test_works_raises_on_a_rejected_request_with_the_api_message(caplog):
+    """A 400 is deterministic: the pager must raise with OpenAlex's message, not return an empty result."""
+    from litradar.sources.openalex import OpenAlexRequestError
+
+    state = {}
+    with caplog.at_level("WARNING", logger="litradar.sources.openalex"):
+        with pytest.raises(OpenAlexRequestError) as info:
+            list(openalex.works(FakeHttp([FakeResp(400, BAD_SELECT_400)]), {"a": "b"}, state=state))
+    assert info.value.status == 400 and info.value.message.startswith("grants is not a valid select field")
+    assert str(info.value).startswith("HTTP 400: grants is not a valid select field")
+    assert state["error"].startswith("HTTP 400: grants is not a valid select field")
+    assert "OpenAlex rejected the request (HTTP 400): grants is not a valid select field" in caplog.text
+    # a 404 without a JSON message still raises with the status; a 5xx stays a soft early stop (retry next run)
+    with pytest.raises(OpenAlexRequestError, match="HTTP 404"):
+        list(openalex.works(FakeHttp([FakeResp(404, {"error": "not found"})]), {"a": "b"}))
+    state = {}
+    assert list(openalex.works(FakeHttp([FakeResp(502, {"error": "bad gateway"})]), {"a": "b"}, state=state)) == []
+    assert state == {"error": "HTTP 502: bad gateway"}
+    # the budget and plain-429 paths are untouched
+    with pytest.raises(OpenAlexBudgetExhausted):
+        list(openalex.works(FakeHttp([FakeResp(429, BUDGET_429)]), {"a": "b"}))
+
+
+def test_api_rejected_request_stops_the_run_with_the_reason(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    report = backfill.run_api(st, FakeHttp([FakeResp(400, BAD_SELECT_400)]), GROUPS, "2024-01", "2024-02", do_probe=False)
+    assert report["stopped"] == "request" and report["done"] == 0
+    assert "OpenAlex rejected the request (HTTP 400: grants is not a valid select field" in report["message"]
+    assert report["errors"] == ["single_cell 2024-01 all: HTTP 400: grants is not a valid select field. Valid fields for select are: id, doi, title, display_name, relevance_score, ..."]
+    assert progress_rows(st) == []
+    st.close()
+
+
 # ---------------------------------------------------------------- API route --------------------------------------
 def test_api_run_pages_upserts_and_records_progress(tmp_path):
     st = Store(tmp_path / "t.sqlite")

@@ -318,3 +318,53 @@ def test_llm_pass_handles_refusal_and_bad_json(monkeypatch):
     assert defs == {"x y": None}
     _fake_anthropic(monkeypatch, lambda kw: _Msg("not json"))
     assert C.define_concepts([{"term": "x y", "display": "x y"}], model="claude-opus-5-5", api_key="k") == {"x y": None}
+
+
+# ---- clinical phrases and fragments ---------------------------------------------------------
+def test_disease_names_cohorts_and_regulators_are_not_concepts(excl):
+    text = (
+        "Patients with Amyotrophic Lateral Sclerosis (ALS), Autism Spectrum Disorder and Parkinson's Disease versus "
+        "Healthy Controls. Natural Killer cells were profiled after Food and Drug Administration (FDA) review. "
+        "Pancreatic Ductal Adenocarcinoma organoids were imaged with Spatial Transcriptomics and Base Editing screens."
+    )
+    out = C.extract_terms(text, excl)
+    for banned in ("amyotrophic lateral sclerosis", "autism spectrum disorder", "parkinson disease", "healthy control",
+                   "natural killer", "natural killer cell", "drug administration", "food and drug administration",
+                   "pancreatic ductal adenocarcinoma"):
+        assert banned not in out, (banned, sorted(out))
+    assert "spatial transcriptomics" in out and "base editing" in out
+    # the rule itself: whole phrases and head words, with the curated seed channel exempt
+    assert C.is_clinical_phrase("pancreatic cancer") and C.is_clinical_phrase("healthy control") and C.is_clinical_phrase("parkinson disease")
+    assert C.is_clinical_phrase("triple negative breast cancer") and C.is_clinical_phrase("chronic kidney disease")
+    assert not C.is_clinical_phrase("base editing") and not C.is_clinical_phrase("circulating tumor dna") and not C.is_clinical_phrase("")
+    # concepts the radar tracks keep their disease/tumour head words
+    assert not C.is_clinical_phrase("minimal residual disease") and not C.is_clinical_phrase("cancer genome atlas") and not C.is_clinical_phrase("tumor microenvironment")
+    cands = {}
+    C._emit(cands, ["Parkinson's", "disease"], "term", excl)
+    C._emit(cands, ["healthy", "controls"], "term", excl)
+    C._emit(cands, ["Drug", "Administration"], "term", excl)
+    assert cands == {}
+    C._emit(cands, ["organoid", "intelligence"], "seed", excl)
+    C._emit(cands, ["disease", "model"], "seed", excl)  # curated seeds may name diseases on purpose
+    assert set(cands) == {"organoid intelligence", "disease model"}
+
+
+def test_fragments_of_a_counted_parent_phrase_are_dropped_from_the_report(tmp_path):
+    st = Store(tmp_path / "frag.sqlite")
+    C.ensure_schema(st)
+    cur = C.weeks_ending(UNTIL, 4)
+    rows = []
+    for wk in cur:
+        rows += [
+            ("data dependent acquisition", wk, 3, "data-dependent acquisition"), ("dependent acquisition", wk, 3, "dependent acquisition"),
+            ("dna double strand break", wk, 2, "DNA double-strand break"), ("dna double strand", wk, 2, "DNA double-strand"),
+            ("spatial transcriptomics", wk, 4, "spatial transcriptomics"), ("spatial transcriptomics atlas", wk, 1, "spatial transcriptomics atlas"),
+        ]
+    st.conn.executemany("INSERT INTO concept_counts (term, week, papers, display, computed_at) VALUES (?,?,?,?,?)", [r + ("now",) for r in rows])
+    st.conn.commit()
+    report = C.burst_report(st, UNTIL, baseline_weeks=26, current_weeks=4, min_papers=5, min_new_papers=3, with_details=False)
+    terms = {d["term"] for d in report["risers"]} | {d["term"] for d in report["new_terms"]}
+    assert "dependent acquisition" not in terms and "dna double strand" not in terms
+    assert {"data dependent acquisition", "dna double strand break", "spatial transcriptomics", "spatial transcriptomics atlas"} <= terms
+    assert report["fragments_dropped"] == {"dependent acquisition": "data dependent acquisition", "dna double strand": "dna double strand break"}
+    st.close()

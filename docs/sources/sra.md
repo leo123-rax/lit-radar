@@ -22,6 +22,20 @@ host after **6 consecutive** 429s (other hosts: 2). When the esummary loop does 
 `census truncated at <n> of <total> records` at WARNING, so a short census is never silent. `api_key=`
 values are redacted from every logged URL.
 
+## Failures are reported, not swallowed
+
+The opening `esearch` call decides whether there is a census at all, so its failures are raised as
+`SraError` (recorded under the run's `errors`, shown in the digest's "Sources that errored" section and by
+`litradar status`; `litradar fetch sra` exits 1 with the same message) instead of logging a warning and
+yielding nothing: a non-200 answer (`NCBI esearch answered HTTP 400 ... check NCBI_API_KEY ...` with NCBI's
+body), an `{"error": ...}` envelope (the rate-limit answer), NCBI's own `ERROR` field, no answer after the
+retries, or a count with no `WebEnv` to page it. A genuine zero-record window is an INFO line.
+
+`NCBI_API_KEY` is sent only when it looks like a key (a plain alphanumeric token). A `.env` line such as
+`NCBI_API_KEY=      # get one at ...` used to load the comment as the value, reach NCBI as
+`api_key=%23+get+one...` and earn HTTP 400 on every request; such a value is now dropped with one warning and
+the requests go out anonymously (3 req/s). GEO applies the same rule.
+
 ## ExpXml parsing (fixed 2026-10-17)
 
 With `retmode=json` the `expxml` string is already well-formed XML; `&amp;` inside it is a correctly

@@ -40,29 +40,94 @@ from ..models import ArchiveRecord
 
 log = logging.getLogger(__name__)
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+_API_KEY_RE = re.compile(r"^[A-Za-z0-9]+$")  # NCBI keys are 36 hex characters; anything with spaces, '#' or URL characters is a comment
+_warned_bad_key = False
+
+
+class SraError(RuntimeError):
+    """NCBI E-utilities refused or failed the request (HTTP 4xx/5xx, an `error` payload, no answer). Carries the
+    status and NCBI's message so a run reports *why* the census is empty instead of a silent zero."""
+
+
+def usable_api_key(api_key: str) -> str:
+    """The key to send, or '' when the configured value cannot be a real NCBI key.
+
+    A `.env` line such as ``NCBI_API_KEY=      # get one at ...`` used to reach the request as
+    ``api_key=# get one at ...`` and NCBI answered HTTP 400 for every call. Only a plain alphanumeric token is
+    sent; anything else is dropped with one warning and the request goes out anonymously (3 requests/s instead
+    of 10). A wrong-but-well-formed key still reaches NCBI and now surfaces as SraError (HTTP 400)."""
+    global _warned_bad_key
+    key = (api_key or "").strip()
+    if not key:
+        return ""
+    if _API_KEY_RE.match(key):
+        return key
+    if not _warned_bad_key:
+        _warned_bad_key = True
+        log.warning("NCBI_API_KEY does not look like an NCBI key (%d chars, contains %s); sending requests without a key",
+                    len(key), "spaces/'#'" if (" " in key or "#" in key) else "unexpected characters")
+    return ""
 
 
 def _term(start: str, end: str) -> str:
     return f"{start.replace('-', '/')}:{end.replace('-', '/')}[PDAT]"
 
 
+def _esearch(http: Http, params: Dict[str, Any], what: str) -> Dict[str, Any]:
+    """One esearch call. Returns the `esearchresult` mapping; raises SraError on a non-200 answer, an `error`
+    envelope or NCBI's own ``ERROR`` field, and when the client gave up (network failure, rate limit)."""
+    url = f"{EUTILS}/esearch.fcgi"
+    getter = getattr(http, "get", None)
+    if callable(getter):
+        resp = getter(url, params=params, headers={"Accept": "application/json"})
+        if resp is None:
+            raise SraError(f"NCBI esearch gave no answer for {what} (network failure, retries exhausted or host rate-limited)")
+        status = int(getattr(resp, "status_code", 0) or 0)
+        if status != 200:
+            body = " ".join((getattr(resp, "text", "") or "").split())[:200]
+            hint = "; check NCBI_API_KEY (a malformed key is the usual cause)" if status == 400 else ""
+            raise SraError(f"NCBI esearch answered HTTP {status} for {what}{hint}" + (f": {body}" if body else ""))
+        try:
+            data = resp.json()
+        except ValueError:
+            raise SraError(f"NCBI esearch returned a non-JSON body for {what}") from None
+    else:  # duck-typed clients that only offer get_json (tests, thin wrappers)
+        data = http.get_json(url, params=params)
+        if data is None:
+            raise SraError(f"NCBI esearch gave no answer for {what}")
+    if not isinstance(data, dict):
+        raise SraError(f"NCBI esearch returned an unexpected payload for {what}")
+    if data.get("error"):
+        raise SraError(f"NCBI esearch error for {what}: {str(data['error'])[:200]}")
+    result = data.get("esearchresult")
+    if not isinstance(result, dict):
+        raise SraError(f"NCBI esearch payload has no esearchresult for {what}")
+    if result.get("ERROR"):
+        raise SraError(f"NCBI esearch error for {what}: {str(result['ERROR'])[:200]}")
+    return result
+
+
 def esearch_history(http: Http, term: str, api_key: str = "") -> Tuple[int, str, str]:
+    """(count, WebEnv, query_key) for a term; raises SraError when NCBI refuses or fails the call."""
     params: Dict[str, Any] = {"db": "sra", "term": term, "usehistory": "y", "retmax": 0, "retmode": "json"}
-    if api_key:
-        params["api_key"] = api_key
-    data = http.get_json(f"{EUTILS}/esearch.fcgi", params=params)
-    if not data:
-        return 0, "", ""
-    r = data.get("esearchresult") or {}
+    key = usable_api_key(api_key)
+    if key:
+        params["api_key"] = key
+    r = _esearch(http, params, term)
     return int(r.get("count") or 0), r.get("webenv") or "", r.get("querykey") or ""
 
 
 def count(http: Http, term: str, api_key: str = "") -> int:
+    """Instant count for a term; 0 when NCBI cannot answer (the failure is logged, not raised: counts are advisory)."""
     params: Dict[str, Any] = {"db": "sra", "term": term, "retmax": 0, "retmode": "json"}
-    if api_key:
-        params["api_key"] = api_key
-    data = http.get_json(f"{EUTILS}/esearch.fcgi", params=params)
-    return int(((data or {}).get("esearchresult") or {}).get("count") or 0)
+    key = usable_api_key(api_key)
+    if key:
+        params["api_key"] = key
+    try:
+        return int(_esearch(http, params, term).get("count") or 0)
+    except SraError as exc:
+        log.warning("%s", exc)
+        return 0
 
 
 def counts_by_instrument(http: Http, start: str, end: str, models: Iterable[str], api_key: str = "") -> Dict[str, int]:
@@ -147,10 +212,17 @@ def _parse_expxml(xml_text: str) -> Dict[str, str]:
 
 
 def fetch(http: Http, start: str, end: str, api_key: str = "", max_records: int = 150000, batch: int = 500) -> Iterator[ArchiveRecord]:
+    """Yield one ArchiveRecord per SRA experiment made public in [start, end].
+
+    Raises SraError when NCBI refuses or fails the esearch call (HTTP 400 for a malformed api_key, 429/5xx with
+    retries exhausted, an `error` payload), so a run reports the failure instead of a silently empty census."""
+    api_key = usable_api_key(api_key)
     total, webenv, qk = esearch_history(http, _term(start, end), api_key)
-    if not total or not webenv:
-        log.warning("SRA: no records or history failed for %s..%s", start, end)
+    if not total:
+        log.info("SRA: no experiments published %s..%s", start, end)
         return
+    if not webenv or not qk:
+        raise SraError(f"NCBI esearch reported {total} experiments for {start}..{end} but returned no WebEnv/query_key to page them")
     todo = min(total, max_records)
     if todo < total:
         log.warning("SRA: sweeping %d of %d experiments (max_records cap)", todo, total)

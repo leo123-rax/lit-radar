@@ -95,3 +95,17 @@ Enabling this is the fork owner's decision and risk.
   (the outlet moved to `endpoints.news`; its own `/feed/` answers 403, so it remains Google-only and opt-in).
 * Added: GenomeWeb Arc feed (see note), Science news RSS.
 * Kept: STAT, BioPharma Dive, MedTech Dive, PR Newswire biotechnology and medical-devices lists.
+
+## Feed errors and link hygiene
+
+* A feed body that is not XML (an HTML error page, a bot challenge, a truncated download) is reported
+  **once per feed URL** at WARNING as `feed parse error in <feed name> (<url>): <parser error>; body starts
+  '<!doctype html> ...'`; repeats within the run go to DEBUG. `litradar.sources.rss.bad_feeds()` returns the
+  list for run reports.
+* Article links lose feed-reader tracking parameters before they are stored (`af=R` on ascopubs,
+  `dgcid=rss_...` on Nature, the `utm_*` family, Mailchimp/Facebook/Google click ids), so the digest and the
+  dashboard carry canonical URLs. Every other query parameter is kept exactly as the feed served it.
+* GDELT: once the host answers 429 twice in a row the shared client blocks it; the remaining company
+  queries are skipped without a request and the run records one error line, `gdelt: host rate-limited
+  (HTTP 429) during the run; N company quer(y/ies) skipped`, which the digest's coverage block lists under
+  the errored sources.

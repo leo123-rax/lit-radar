@@ -6,10 +6,11 @@ time, by model?" The command counts, per calendar month and per instrument model
 | source | what is counted | unit |
 |---|---|---|
 | `sra` | NCBI SRA experiments whose declared `instrument_model` is the model, by SRA publication date (`[PDAT]`) | experiments |
-| `ena` | ENA `read_experiment` records with that `instrument_model`, by `first_public` | experiments |
+| `ena` | ENA `read_experiment` **rows** with that `instrument_model`, by `first_public`. The endpoint returns one row per experiment-run pair, so this is a count of **runs**, not experiments (see caveat 6) | runs |
 | `epmc` | Europe PMC open-access papers whose **Methods** section names the model (any of the configured terms) | papers |
 
-It does **not** count installed machines. Read the caveats before quoting a number.
+The unit is written into every output: a `unit` column in the CSV and the unit in each Markdown table
+header. It does **not** count installed machines. Read the caveats before quoting a number.
 
 ```bash
 python -m litradar timeseries --entity pacb-revio --entity pacb-sequel-ii --from 2019-01 --to 2026-10 \
@@ -25,10 +26,52 @@ last 36 months), `--sources` (default all three), `--out` (default `<out_dir>/ti
 so on 2026-10-17 months >= 2026-08 are always re-fetched), `--force` (re-fetch and overwrite everything),
 `--no-chart`, `--dry-run`.
 
-Outputs in `--out`: `timeseries_<from>_<to>.csv` (long format `source,entity_id,model,month,count`),
-`timeseries_<from>_<to>.md` (one table per source, rows = months, columns = entity/model, with totals) and,
-when `matplotlib` happens to be importable, `timeseries_<from>_<to>.png` (one panel per source, lines per
-model). matplotlib is never a dependency; without it the report says `"png": null`.
+`--from` / `--to` are checked against the current month: a `--to` in the future is clamped to the current
+month with a warning, a `--from` in the future is an error before any request is spent (future months
+cannot have deposits or papers).
+
+Outputs in `--out`, named `timeseries_<from>_<to>_<selection>.*` where `<selection>` is the `--vendor` /
+`--entity` tokens joined with `+` (`timeseries_2019-01_2026-09_pacb.csv`; a long selection is shortened to
+its first token plus a hash of the resolved ids), so runs for different vendors into one directory keep
+their files; a run that re-creates its own files says so in `warnings`:
+
+* `.csv`: long format `source,entity_id,model,month,count,unit` (`unit` = `experiments`, `runs` or `papers`);
+* `.md`: one table per source in the `--sources` order, rows = months, columns = the planned series in
+  config order labelled with the gazetteer name and the archive string or term set
+  (`Revio (revio)`, `Sequel II (Sequel II, Sequel IIe)`), numbers right-aligned with thousands separators,
+  totals per column. A blank cell was never fetched; `fail` marks a request that failed in this run, so a
+  failed month is never read as zero deposits;
+* `.png`, when `matplotlib` happens to be importable (one panel per source, lines per model). matplotlib
+  is never a dependency; without it the report says `"png": null`.
+
+## Failures are named, and decide the exit code
+
+Every failed count request is listed under `backfill.failures` with its key and the reason: the HTTP status
+and the start of the body (`HTTP 400: {"error":"API key invalid"}`), `no answer (network failure, retries
+exhausted or host rate-limited)`, `non-JSON body`, `esearch errorlist ...`, `Properties clause not
+evaluated`, `unexpected payload`. `backfill.failed` keeps the bare keys. Nothing failed is cached, so an
+older value survives and the next run retries. The run's verdict follows per source:
+
+* every request of a source failed -> an entry in `errors` (`sra: all 24 count request(s) of this run
+  failed: HTTP 400: ... (x24). Nothing cached for them; fix the cause and re-run`) and **exit code 1**;
+* some requests failed -> an entry in `warnings` with the same reasons and exit code 0; the cells are `fail`.
+
+`backfill.cutoff` is the first month inside the refresh window (`today` minus `--refresh-months` calendar
+months, `2026-08` on 2026-10-17 with the default 2): months at or after it are fetched again on every run
+because their counts are still growing; older cached months are not requested.
+
+`NCBI_API_KEY` is sent only when it looks like a key (a plain alphanumeric token); a `.env` comment loaded as
+the value used to earn HTTP 400 on every SRA request.
+
+### Launch floors
+
+An entity may carry `launch: YYYY-MM` (the announcement month) in `config/archive_models.yaml`. Months
+before it are stored as 0 **without a request** and counted under `backfill.pre_launch`: nothing can deposit
+from or name an instrument that did not exist, and Europe PMC phrase matches before a launch were only ever
+false positives (the `Vega` and `Revio` cases below). The floor is the announcement month, which precedes
+shipping, and is only set where the live audit showed a clear gap (Revio and Onso 2022-10, Vega 2024-11,
+NovaSeq X 2022-09, AVITI 2022-03, AVITI 24 2024-01, UG 100 2022-05, MiSeq i100 2024-10); Sequel II has none
+because early-access deposits reached SRA in 2019-03, before its April 2019 launch.
 
 ## Caching and politeness
 
@@ -157,14 +200,26 @@ fetched 2026-10-17). The relevant platforms:
 | MGI / BGI | `DNBSEQ-T7`, `DNBSEQ-G400`, `DNBSEQ-G400 FAST`, `DNBSEQ-G50`, `DNBSEQ-G800`, `DNBSEQ-T10x4RS`, `MGISEQ-2000RS`, `BGISEQ-500`, `BGISEQ-50` |
 | Ion Torrent | `Ion Torrent PGM`, `Ion Torrent Proton`, `Ion Torrent S5`, `Ion Torrent S5 XL`, `Ion Torrent Genexus`, `Ion GeneStudio S5`, `Ion GeneStudio S5 Prime`, `Ion GeneStudio S5 Plus` |
 
-Each entity in the config maps to `sra` (lower-case strings), `ena` (exact strings) and `epmc_terms`.
-`tests/test_timeseries.py` checks that every `ena` value is in this vocabulary, that `sra` is its lower-case
-twin, that no model string is claimed by two entities, and that every id exists in `config/instruments.yaml`
-unless flagged `proposed: true`. One legacy PacBio id is still pre-registered that way until the gazetteer
-gains an entry for it: `pacb-sequel` (first-generation Sequel; `pacb-rs-ii` landed in the gazetteer on
-2026-10-17 and its flag was dropped). It works in the time series today; `litradar check-config` prints the
-warning (and tells you when a `proposed` flag has become stale because the id now exists), and
-`litradar timeseries` repeats it in the `warnings` array of its report.
+Each entity in the config maps to `sra` (lower-case strings), `ena` (exact strings), `epmc_terms` and an
+optional `launch` month. `tests/test_timeseries.py` checks that every `ena` value is in this vocabulary, that
+`sra` is its lower-case twin, that no model string is claimed by two entities, that every id exists in
+`config/instruments.yaml` unless flagged `proposed: true`, and that no Europe PMC term is one of the bare
+words that produced false positives live. No id is currently flagged `proposed` (both legacy PacBio ids,
+`pacb-rs-ii` and `pacb-sequel`, landed in the gazetteer on 2026-10-17 and their flags were dropped);
+`litradar check-config` prints `0 warnings`. The mechanism stays: a pre-registered id works in the time series
+before its gazetteer entry exists, `check-config` warns about it and tells you when the flag has become
+stale, and `litradar timeseries` repeats the warning in the `warnings` array of its report.
+
+**Europe PMC terms must be vendor-qualified or brand tokens.** The phrase search is case-insensitive and
+prefix-inclusive, so an ordinary word is a false-positive machine: live on 2026-10-17 `METHODS:"Vega system"`
+returned knee implants, MRI software and astronomy (all 15 hits before 2025 and 12 of 14 after were not
+sequencers), bare `Revio` returned a robotics paper (REVIO odometry) as the model's "first mention", and
+`UG 100` would match `10 ug 100 uL` in a buffer recipe. The config therefore uses `PacBio Vega` / `Vega
+sequencer`, `PacBio Revio` / `Revio system` / `Revio sequencer` / `Revio platform`, `PacBio Sequel II` /
+`Sequel II system` / ..., `UG100` / `Ultima UG 100` / `UG 100 sequencer`; tokens such as `NovaSeq`, `MinION`,
+`DNBSEQ`, `AVITI` are brands and stay bare. The `epmc` series under-counts by design (a paper that writes
+"the Revio (Pacific Biosciences)" is missed) rather than over-counting. Changing an entity's terms changes
+its series key: cached months under the old term set stay in the table but leave the outputs.
 
 Not coverable from the archives (no `instrument_model` value): Nanopore sub-models and Flongle, Illumina
 MiSeq i100, MGI DNBSEQ-G99 and T20, Singular G4, Roche SBX. Those entities carry only `epmc_terms`.
@@ -184,24 +239,39 @@ GeneMind, Vela Sentosa, capillary and 454 instruments.
    and most direct-to-consumer and population programmes do not submit to SRA or ENA, and their papers (if
    any) rarely name instruments in open-access Methods. A vendor whose growth is clinical can be flat here
    while its consumables revenue grows.
-4. **SRA and ENA are mirrors with different month allocation.** ENA mirrors SRA (and DDBJ), so totals agree
-   over long windows (Revio 2023-01..2026-09: SRA 32,855 vs ENA 31,820, within 3%) but single months differ
-   because SRA's `[PDAT]` and ENA's `first_public` are not the same timestamp (2024-04: SRA 10 vs ENA 138;
-   2024-07: SRA 597 vs ENA 194). Compare within one source, or sum to quarters. ENA also has months where a
-   model is absent although SRA has it (`Illumina NovaSeq X Plus`, 2024-01: ENA 0, SRA 158): the ENA
-   vocabulary gained that value later and older mirrored records were not relabelled.
+4. **SRA and ENA are mirrors with different month allocation, and ENA-native submissions lead by months.**
+   ENA mirrors SRA (and DDBJ), so totals agree over long windows for models whose projects are one-run-per-
+   experiment (Revio 2023-01..2026-09: SRA 32,855 experiments vs ENA 31,820 runs, within 3%; across the
+   audited models the SRA/ENA ratio was 0.98-1.05 except MGI, see caveat 6) but single months differ because
+   SRA's `[PDAT]` and ENA's `first_public` are not the same timestamp (2024-04: SRA 10 vs ENA 138; 2024-07:
+   SRA 597 vs ENA 194). Projects submitted to ENA itself (`PRJEB` studies) appear in ENA first and reach SRA
+   **months later**: all 479 Sequel IIe runs of 2021-08..2022-05 were PRJEB studies that SRA only shows from
+   2022-06, and a 2025-06 MGI `DNBSEQ-T10x4RS` project (ENA 600) surfaced in SRA in 2026-04, ten months later.
+   So an SRA series can read "no deposits until mid-2022" for a model ENA has had since 2021. Compare within
+   one archive, or sum to quarters. ENA also has months where a model is absent although SRA has it
+   (`Illumina NovaSeq X Plus`, 2024-01: ENA 0, SRA 158): the ENA vocabulary gained that value later and older
+   mirrored records were not relabelled.
 5. **SRA Properties index vs esummary.** The `[Properties]` count is instant and exact on the whole model
    string, which makes it ideal for counting but blind to anything not in the controlled vocabulary.
    The weekly census (`litradar/sources/sra.py`) reads the same `instrument_model` from `esummary` ExpXml,
    which additionally gives study, organism, library strategy and submitter; the two agree on the model
    label (500/500 in the sample) but esummary is ~0.4 s per 500 records, so only the census uses it.
    `unspecified` is a legal value on every platform and is not counted anywhere.
-6. **Experiments are not runs or samples.** An SRA/ENA experiment is a library-on-instrument record; one
-   sample can have several, one run can hold many. ENA's `read_run` result type counts runs instead
-   (`result=read_run` on the same endpoint) if that is the quantity you need.
+6. **SRA counts experiments, ENA counts runs.** An SRA experiment is a library-on-instrument record (SRX);
+   one sample can have several, and one experiment can have many runs (lanes, re-runs). ENA's
+   `read_experiment` count endpoint returns one row per experiment-**run** pair, verified live on
+   2026-10-17: study `PRJNA1152220` counts 38,728 with `result=read_experiment` and 38,728 with
+   `result=read_run` while holding 341 distinct experiments (`SRX25823193` appears once per `SRR`). The
+   two series agree only when each experiment has one run; multi-lane projects inflate ENA against SRA
+   (MGISEQ-2000RS 2019-01..2026-09: SRA 79,138 experiments vs ENA 149,620 runs, ratio 0.53; 2026-04 alone
+   ENA 33,436 vs SRA 1,087 from one project). The CSV `unit` column and the Markdown headers say which is
+   which; never add an `sra` and an `ena` figure together. Counting distinct ENA experiments would mean
+   paging `experiment_accession` for every month (thousands of rows per request) and is not done.
 7. **Europe PMC counts open-access papers only**, with a tokenised phrase match that is case-insensitive
-   and prefix-inclusive. Terms are chosen to be specific (`PacBio Vega`, not `Vega`; nothing for the
-   first-generation Sequel), so the `epmc` series under-counts by design rather than over-counting.
+   and prefix-inclusive. Terms are vendor-qualified or brand tokens (`PacBio Vega` and `Vega sequencer`,
+   never `Vega`; `PacBio Revio` / `Revio system`, never `Revio`; nothing for the first-generation Sequel), so
+   the `epmc` series under-counts by design rather than over-counting; see the vocabulary section above for
+   the live false positives that forced this. Months before an entity's `launch` are 0 without a request.
 8. **Illumina is grouped by family** because the gazetteer is (`ilmn-hiseq` carries nine HiSeq models). The
    CSV keeps one row per model string, so per-model series are preserved; only the Markdown column label
    groups them under the entity.
@@ -211,9 +281,13 @@ GeneMind, Vela Sentosa, capillary and 454 instruments.
 `python -m litradar timeseries --entity pacb-revio --from 2023-01 --to 2026-09 --sources sra,ena,epmc`
 (135 requests, 0 failures, 0 kept; second run: 6 requests, 129 cached; re-run unchanged after the review
 fixes on the same day). Revio began shipping in early 2023, which is visible as the first deposits in
-2023-08 and the first Methods mentions in 2023-01/02 (early-access sites).
+2023-08 and the first Methods mentions in 2023-01/02 (early-access sites). The Europe PMC column below was
+produced with the bare `Revio` term of that day (1,308 papers; a later audit found one 2022-10 robotics false
+positive); the vendor-qualified terms now configured will give lower, cleaner counts on the next run. ENA
+figures are runs (caveat 6); for Revio they track SRA experiments closely because its projects are mostly
+one run per experiment.
 
-| month | SRA experiments | ENA experiments | Europe PMC papers |
+| month | SRA experiments | ENA runs | Europe PMC papers |
 |---|---:|---:|---:|
 | 2023-01 | 0 | 0 | 1 |
 | 2023-02 | 0 | 0 | 1 |

@@ -199,7 +199,10 @@ def test_priorities_write_update_clear_and_multiplier(settings):
     T.set_priority(settings, "source", "europepmc", 0.8)
     T.set_priority(settings, "subgroup", "spatial", 1.75)  # update in place
     text = _read(settings, "radar")
-    assert text.startswith(before)  # append-only: the original file is a prefix
+    # every original line survives in order; only the shipped `priorities: {}` line became a block that holds the entries
+    head, tail = before.split("priorities: {}\n", 1)
+    assert text.startswith(head + "priorities:\n") and text.endswith(tail)
+    assert text.count("\npriorities:") == 1 and T.duplicate_top_level_keys(text) == []
     assert text.count("    spatial:") == 1
     radar = yaml.safe_load(text)
     assert radar["priorities"] == {"subgroup": {"spatial": 1.75}, "company": {"illumina": 2}, "journal": {"Nature Methods": 1.25},
@@ -298,6 +301,72 @@ def test_sec_lookup_uses_canned_json_and_caches(settings):
     assert T.match_ticker("", rows) == (None, 0.0, [])
 
 
+# ----------------------------------------------------------------------------- flow-form keys in radar.yaml
+def test_set_priority_edits_the_shipped_flow_mapping_in_place(settings):
+    """The shipped radar.yaml carries `priorities: {}`; prioritize must edit that key, not append a second one."""
+    before = _read(settings, "radar")
+    assert "\npriorities: {}\n" in before and T.duplicate_top_level_keys(before) == []
+    comment_idx = before.index("# Coverage priorities written by")
+    T.set_priority(settings, "company", "illumina", 2)
+    after = _read(settings, "radar")
+    assert after.count("\npriorities:") == 1 and "priorities: {}" not in after
+    assert T.duplicate_top_level_keys(after) == []
+    assert yaml.safe_load(after)["priorities"] == {"company": {"illumina": 2}}
+    # the comment stays where it was, directly above the (now block-form) key, and nothing after the block moved
+    assert after.index("# Coverage priorities written by") == comment_idx
+    assert after[comment_idx:].startswith("# Coverage priorities written by `litradar prioritize` (kind -> {target: weight}); 1.0 = neutral.\npriorities:\n  company:\n    illumina: 2\n")
+    assert after.split("# Name-only tracked-author matches", 1)[1] == before.split("# Name-only tracked-author matches", 1)[1]
+    T.set_priority(settings, "subgroup", "spatial", 1.5)
+    T.set_priority(settings, "company", "illumina", 3)
+    after = _read(settings, "radar")
+    assert after.count("\npriorities:") == 1
+    assert yaml.safe_load(after)["priorities"] == {"company": {"illumina": 3}, "subgroup": {"spatial": 1.5}}
+    # the same rule for `watchlist_terms: []` written in flow form
+    radar_path = settings.config_dir / "radar.yaml"
+    text = radar_path.read_text(encoding="utf-8")
+    start = text.index("\nwatchlist_terms:\n")
+    end = text.index("\n\n", start + 1)
+    radar_path.write_text(text[:start] + "\nwatchlist_terms: []   # none yet" + text[end:], encoding="utf-8")
+    T.add_term(settings, "organoid")
+    after = _read(settings, "radar")
+    assert "watchlist_terms:  # none yet\n  - organoid\n" in after and after.count("\nwatchlist_terms:") == 1
+    assert yaml.safe_load(after)["watchlist_terms"] == ["organoid"]
+
+
+def test_expand_flow_value_and_duplicate_key_detection():
+    lines = ["a: 1", "# note", "priorities: {company: {illumina: 2, pacbio: 1.5}, journal: {}}  # kept", "b: 2"]
+    out = T.expand_flow_value(lines, "priorities")
+    assert out == ["a: 1", "# note", "priorities:  # kept", "  company:", "    illumina: 2", "    pacbio: 1.5", "  journal: {}", "b: 2"]
+    assert yaml.safe_load("\n".join(out))["priorities"] == {"company": {"illumina": 2, "pacbio": 1.5}, "journal": {}}
+    assert T.expand_flow_value(["watchlist_terms: [a, 'b c']"], "watchlist_terms") == ["watchlist_terms:", "  - a", "  - b c"]
+    assert T.expand_flow_value(["priorities:", "  company:", "    x: 1"], "priorities") == ["priorities:", "  company:", "    x: 1"]  # already block form
+    assert T.expand_flow_value(["other: {}"], "priorities") == ["other: {}"]  # key absent
+    assert T.duplicate_top_level_keys("a: 1\nb:\n  a: 2\nlist:\n- a: 3\n#a: 4\na: 5\n") == ["a"]
+    assert T.duplicate_top_level_keys("a: 1\nb: 2\n") == []
+
+
+def test_set_priority_refuses_a_file_that_already_has_duplicate_keys(settings):
+    radar_path = settings.config_dir / "radar.yaml"
+    radar_path.write_text(radar_path.read_text(encoding="utf-8") + "\npriorities:\n  company:\n    illumina: 2\n", encoding="utf-8")
+    broken = radar_path.read_text(encoding="utf-8")
+    with pytest.raises(T.TrackError, match="duplicate top-level key"):
+        T.set_priority(settings, "company", "pacbio", 1.5)
+    assert radar_path.read_text(encoding="utf-8") == broken  # rolled back, nothing half-written
+
+
+def test_match_ticker_hides_noise_candidates():
+    rows = [
+        {"cik": "1", "ticker": "AGQ", "title": "ProShares Trust II"},
+        {"cik": "2", "ticker": "ILMN", "title": "ILLUMINA, INC."},
+        {"cik": "3", "ticker": "NDRA", "title": "ENDRA Life Sciences Inc."},
+    ]
+    best, conf, top = T.match_ticker("Shake Test Bio", rows)
+    assert best is None and top == [] and conf == 0.0  # 0.62 against an ETF trust is not a candidate worth showing
+    best, conf, top = T.match_ticker("Azenta Life Sciences", rows)
+    assert best is None and [r["ticker"] for _, r in top] == ["NDRA"]  # a near miss stays visible for the user to judge
+    assert all(sc >= T.TICKER_CANDIDATE_FLOOR for sc, _ in top)
+
+
 # ----------------------------------------------------------------------------- CLI round trip
 def test_cli_track_prioritize_untrack_round_trip(settings, capsys):
     cfg = str(settings.config_dir)
@@ -322,9 +391,12 @@ def test_cli_track_prioritize_untrack_round_trip(settings, capsys):
     assert main(["--config-dir", cfg, "untrack", "author", "A5000000009"]) == 0
     assert main(["--config-dir", cfg, "untrack", "company", "acme-genomics"]) == 0
     assert _read(settings, "companies") == before_c
-    # priorities header + section remain (append-only), but with no entries the file still parses and yields no multipliers
-    assert _read(settings, "radar").startswith(before_r)
-    assert T.load_priorities(yaml.safe_load(_read(settings, "radar"))) == {}
+    # the shipped `priorities: {}` line was edited in place (block form now, same comment above it), never duplicated;
+    # with no entries left the file still parses and yields no multipliers
+    after_r = _read(settings, "radar")
+    assert after_r.replace("priorities:\n", "priorities: {}\n", 1) == before_r
+    assert T.duplicate_top_level_keys(after_r) == [] and after_r.count("\npriorities:") == 1
+    assert T.load_priorities(yaml.safe_load(after_r)) == {}
     assert main(["--config-dir", cfg, "check-config"]) == 0
 
 

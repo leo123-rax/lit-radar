@@ -1,10 +1,22 @@
 """Instrument usage time series: monthly counts per instrument model from NCBI SRA, ENA and Europe PMC.
 
 The question this answers: "how many PacBio (or Nanopore, Illumina, ...) experiments and papers show
-up over time, by model?" It counts *deposited sequencing experiments* (SRA, ENA) and *open-access
-papers naming the model in their Methods* (Europe PMC). It never counts installed machines; see
-docs/sources/timeseries.md for the caveats (deposit lag, clinical and commercial sequencing that is
-never deposited, SRA Properties index vs esummary differences).
+up over time, by model?" It counts *deposited SRA experiments* (sra), *ENA experiment-run rows, i.e. runs*
+(ena) and *open-access papers naming the model in their Methods* (epmc). It never counts installed
+machines; see docs/sources/timeseries.md for the caveats (deposit lag, clinical and commercial sequencing
+that is never deposited, SRA Properties index vs esummary differences, runs vs experiments).
+
+Units differ by source and are written into every output (CSV `unit` column, Markdown headers):
+  sra   experiments   one SRA experiment = one library on one instrument (SRX accession)
+  ena   runs          ENA's `read_experiment` count endpoint returns one row per experiment-RUN pair
+                      (verified live 2026-10-17: study PRJNA1152220 counts 38,728 with result=read_experiment
+                      and 38,728 with result=read_run, while it holds 341 distinct experiments), so a
+                      multi-lane project inflates ENA against SRA by the runs-per-experiment ratio
+  epmc  papers        hitCount of papers whose Methods name any configured term
+
+Failures are kept apart from zeros: a count request that fails (HTTP status, no answer, unexpected payload)
+is reported under `backfill.failures` with its reason and never cached; the run's `errors` (exit 1) list
+only sources where EVERY request of the run failed, partial failures are `warnings`.
 
 Every (source, entity, model, month) count is cached in the `timeseries` table of the radar database,
 so backfills are incremental: a month is fetched again only when it is missing, when it is recent
@@ -37,7 +49,8 @@ ENA portal API, count endpoint (docs: https://www.ebi.ac.uk/ena/portal/api/ and
   -> {"count":"38"}       (without format=json the body is text/plain "count\\n38"; the number is a string)
   instrument_model values must be exact vocabulary strings of SRA.common.xsd ("Revio", "Sequel IIe",
   "Illumina NovaSeq X Plus", "PromethION", ...), quoted or unquoted. Matching is case-insensitive
-  ("revio" and "REVIO" also give 38); "PacBio Revio" is not a vocabulary value and returns 0.
+  ("revio" and "REVIO" also give 38); "PacBio Revio" is not a vocabulary value and returns 0. The count is
+  of experiment-run ROWS (one per run), not of distinct experiments: see the unit table above.
 
 Europe PMC REST search (docs: https://europepmc.org/RestfulWebService , https://europepmc.org/searchsyntax)
   GET https://www.ebi.ac.uk/europepmc/webservices/rest/search?format=json&resultType=idlist&pageSize=1
@@ -53,17 +66,19 @@ from __future__ import annotations
 
 import calendar
 import csv
+import hashlib
 import logging
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import yaml
 
 from .http import Http
+from .sources.sra import usable_api_key
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -72,6 +87,13 @@ EUTILS_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ENA_COUNT = "https://www.ebi.ac.uk/ena/portal/api/count"
 EPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 SOURCES: Tuple[str, ...] = ("sra", "ena", "epmc")
+# what one count means per source; written into the CSV `unit` column and the Markdown headers
+UNITS: Dict[str, str] = {"sra": "experiments", "ena": "runs", "epmc": "papers"}
+UNIT_NOTES: Dict[str, str] = {
+    "sra": "SRA experiments by instrument_model",
+    "ena": "ENA runs (experiment-run rows) by instrument_model",
+    "epmc": "open-access papers naming the model in Methods",
+}
 DEFAULT_REFRESH_MONTHS = 2
 DEFAULT_SPAN_MONTHS = 36
 MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
@@ -128,6 +150,7 @@ class ModelSpec:
     epmc_terms: List[str] = field(default_factory=list)
     proposed: bool = False
     notes: str = ""
+    launch: str = ""  # YYYY-MM the model was announced; months before it are stored as 0 without a request
 
     def models_for(self, source: str) -> List[str]:
         if source == "sra":
@@ -166,6 +189,10 @@ def load_archive_models(path: Path) -> Dict[str, ModelSpec]:
         if not isinstance(raw, dict):
             log.warning("archive_models: entry %s is not a mapping; skipped", eid)
             continue
+        launch = str(raw.get("launch") or "").strip()
+        if launch and not MONTH_RE.match(launch):
+            log.warning("archive_models: %s has launch=%r (expected YYYY-MM); ignored", eid, launch)
+            launch = ""
         out[str(eid)] = ModelSpec(
             entity_id=str(eid),
             vendor=str(raw.get("vendor") or ""),
@@ -174,6 +201,7 @@ def load_archive_models(path: Path) -> Dict[str, ModelSpec]:
             epmc_terms=_str_list(raw.get("epmc_terms")),
             proposed=bool(raw.get("proposed", False)),
             notes=str(raw.get("notes") or ""),
+            launch=launch,
         )
     return out
 
@@ -258,42 +286,87 @@ def sra_term(model: str, start: str, end: str) -> str:
     return f'{start.replace("-", "/")}:{end.replace("-", "/")}[PDAT] AND "instrument {model.lower()}"[Properties]'
 
 
-def sra_count(http: Http, model: str, start: str, end: str, api_key: str = "") -> Optional[int]:
-    """Experiments with the given instrument_model made public in [start, end]; None on failure.
+NO_ANSWER = "no answer (network failure, retries exhausted or host rate-limited)"
+
+
+def _get_json_detail(http: Http, url: str, params: Dict[str, Any]) -> Tuple[Any, str]:
+    """(parsed JSON or None, failure reason). Uses Http.get when the client has it so an HTTP status can be
+    named; a client that only offers get_json (tests, thin wrappers) yields 'no answer' on None."""
+    getter = getattr(http, "get", None)
+    if callable(getter):
+        resp = getter(url, params=params, headers={"Accept": "application/json"})
+        if resp is None:
+            return None, NO_ANSWER
+        status = int(getattr(resp, "status_code", 0) or 0)
+        if status != 200:
+            body = " ".join((getattr(resp, "text", "") or "").split())[:120]
+            return None, f"HTTP {status}" + (f": {body}" if body else "")
+        try:
+            return resp.json(), ""
+        except ValueError:
+            return None, "non-JSON body"
+    data = http.get_json(url, params=params)
+    if data is None:
+        return None, NO_ANSWER
+    return data, ""
+
+
+def sra_count_detail(http: Http, model: str, start: str, end: str, api_key: str = "") -> Tuple[Optional[int], str]:
+    """(experiments with the given instrument_model made public in [start, end], or None, failure reason).
 
     A count is accepted only when esearch really evaluated the Properties clause: NCBI answers a misspelt
     field tag with HTTP 200, a count, an `errorlist` and a querytranslation rewritten to [All Fields], and
     that number is not a Properties count. A zero-deposit string keeps the [Properties] clause and adds
     warninglist.quotedphrasesnotfound; that is a genuine 0."""
     params: Dict[str, Any] = {"db": "sra", "term": sra_term(model, start, end), "retmax": 0, "retmode": "json"}
-    if api_key:
-        params["api_key"] = api_key
-    data = http.get_json(EUTILS_ESEARCH, params=params)
+    key = usable_api_key(api_key)
+    if key:
+        params["api_key"] = key
+    data, reason = _get_json_detail(http, EUTILS_ESEARCH, params)
+    if reason:
+        return None, reason
     if not isinstance(data, dict):
-        return None
+        return None, "unexpected payload (not a JSON object)"
+    if data.get("error"):
+        return None, f"NCBI error: {str(data['error'])[:120]}"
     result = data.get("esearchresult")
     if not isinstance(result, dict) or "count" not in result:
-        return None  # {"error": "..."} and other unexpected shapes
+        return None, "unexpected payload (no esearchresult.count)"
     if result.get("errorlist"):
         log.warning("SRA esearch reported errorlist %s for %r", result.get("errorlist"), params["term"])
-        return None
+        return None, f"esearch errorlist {result.get('errorlist')}"
     translation = str(result.get("querytranslation") or "")
     if "[Properties]" not in translation:
         log.warning("SRA esearch did not evaluate the Properties clause (querytranslation=%r)", translation)
-        return None
-    return _to_int(result.get("count"))
+        return None, f"Properties clause not evaluated (querytranslation={translation[:80]!r})"
+    n = _to_int(result.get("count"))
+    return (n, "") if n is not None else (None, f"non-numeric count {result.get('count')!r}")
+
+
+def sra_count(http: Http, model: str, start: str, end: str, api_key: str = "") -> Optional[int]:
+    """Experiments with the given instrument_model made public in [start, end]; None on failure (see *_detail)."""
+    return sra_count_detail(http, model, start, end, api_key)[0]
 
 
 def ena_query(model: str, start: str, end: str) -> str:
     return f'first_public>={start} AND first_public<={end} AND instrument_model="{model}"'
 
 
-def ena_count(http: Http, model: str, start: str, end: str) -> Optional[int]:
-    """read_experiment records with instrument_model == model and first_public in [start, end]; None on failure."""
-    data = http.get_json(ENA_COUNT, params={"result": "read_experiment", "query": ena_query(model, start, end), "format": "json"})
+def ena_count_detail(http: Http, model: str, start: str, end: str) -> Tuple[Optional[int], str]:
+    """(ENA read_experiment rows, i.e. RUNS, with instrument_model == model and first_public in [start, end], or
+    None, failure reason). The endpoint counts experiment-run pairs, not distinct experiments."""
+    data, reason = _get_json_detail(http, ENA_COUNT, {"result": "read_experiment", "query": ena_query(model, start, end), "format": "json"})
+    if reason:
+        return None, reason
     if not isinstance(data, dict):
-        return None
-    return _to_int(data.get("count"))
+        return None, "unexpected payload (not a JSON object)"
+    n = _to_int(data.get("count"))
+    return (n, "") if n is not None else (None, f"non-numeric count {data.get('count')!r}")
+
+
+def ena_count(http: Http, model: str, start: str, end: str) -> Optional[int]:
+    """ENA runs (experiment-run rows) with instrument_model == model and first_public in [start, end]; None on failure."""
+    return ena_count_detail(http, model, start, end)[0]
 
 
 def epmc_query(terms: Sequence[str], start: str, end: str) -> str:
@@ -301,15 +374,23 @@ def epmc_query(terms: Sequence[str], start: str, end: str) -> str:
     return f"({term_part}) AND (FIRST_PDATE:[{start} TO {end}])"
 
 
-def epmc_count(http: Http, terms: Sequence[str], start: str, end: str) -> Optional[int]:
-    """Papers first published in [start, end] whose Methods name any of the terms; None on failure."""
+def epmc_count_detail(http: Http, terms: Sequence[str], start: str, end: str) -> Tuple[Optional[int], str]:
+    """(papers first published in [start, end] whose Methods name any of the terms, or None, failure reason)."""
     terms = [t for t in terms if t]
     if not terms:
-        return None
-    data = http.get_json(EPMC_SEARCH, params={"query": epmc_query(terms, start, end), "format": "json", "resultType": "idlist", "pageSize": 1})
+        return None, "no Europe PMC terms configured"
+    data, reason = _get_json_detail(http, EPMC_SEARCH, {"query": epmc_query(terms, start, end), "format": "json", "resultType": "idlist", "pageSize": 1})
+    if reason:
+        return None, reason
     if not isinstance(data, dict) or "hitCount" not in data:
-        return None
-    return _to_int(data.get("hitCount"))
+        return None, "unexpected payload (no hitCount)"
+    n = _to_int(data.get("hitCount"))
+    return (n, "") if n is not None else (None, f"non-numeric hitCount {data.get('hitCount')!r}")
+
+
+def epmc_count(http: Http, terms: Sequence[str], start: str, end: str) -> Optional[int]:
+    """Papers first published in [start, end] whose Methods name any of the terms; None on failure."""
+    return epmc_count_detail(http, terms, start, end)[0]
 
 
 # ---- backfill -------------------------------------------------------------------------------
@@ -345,16 +426,21 @@ def job_key(job: Job) -> str:
     return f"{job.source}:{job.entity_id}:{job.model}:{job.month}"
 
 
-def fetch_count(http: Http, job: Job, api_key: str = "") -> Optional[int]:
-    """One live count for a job (None on failure); dispatches on job.source."""
+def fetch_count_detail(http: Http, job: Job, api_key: str = "") -> Tuple[Optional[int], str]:
+    """(one live count for a job or None, failure reason); dispatches on job.source."""
     start, end = month_bounds(job.month)
     if job.source == "sra":
-        return sra_count(http, job.model, start, end, api_key)
+        return sra_count_detail(http, job.model, start, end, api_key)
     if job.source == "ena":
-        return ena_count(http, job.model, start, end)
+        return ena_count_detail(http, job.model, start, end)
     if job.source == "epmc":
-        return epmc_count(http, job.terms, start, end)
-    return None
+        return epmc_count_detail(http, job.terms, start, end)
+    return None, f"unknown source {job.source!r}"
+
+
+def fetch_count(http: Http, job: Job, api_key: str = "") -> Optional[int]:
+    """One live count for a job (None on failure); dispatches on job.source."""
+    return fetch_count_detail(http, job, api_key)[0]
 
 
 def backfill(
@@ -366,35 +452,52 @@ def backfill(
     today: Optional[date] = None,
     api_key: str = "",
     dry_run: bool = False,
+    launches: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Fetch and cache every job's count, committing each stored value on its own so an interrupted run
     (Ctrl-C, crash, exception) keeps everything fetched so far. Cached months older than the refresh
-    window are skipped unless force=True. Failed calls are reported under `failed` and never cached (an
-    older cached value survives). A fresh 0 for a key whose cached count is positive is reported under
-    `kept` and NOT stored unless force=True: public deposits are not withdrawn wholesale, so that pattern
-    means the archive renamed or dropped the vocabulary string (SRA then also reports
-    warninglist.quotedphrasesnotfound), and overwriting history with zeros would hide it."""
+    window are skipped unless force=True. Failed calls are reported under `failed` (keys) and `failures`
+    ([{key, reason}], the HTTP status or cause) and never cached (an older cached value survives). A fresh 0
+    for a key whose cached count is positive is reported under `kept` and NOT stored unless force=True:
+    public deposits are not withdrawn wholesale, so that pattern means the archive renamed or dropped the
+    vocabulary string (SRA then also reports warninglist.quotedphrasesnotfound), and overwriting history
+    with zeros would hide it. `launches` (entity_id -> YYYY-MM) stores 0 without a request for months before
+    a model was announced (`pre_launch` in the report): nothing can name or deposit from an instrument that
+    did not exist yet, and Europe PMC phrase matches before the launch were only ever false positives."""
     today = today or date.today()
     cutoff = refresh_cutoff(today, refresh_months)
-    report: Dict[str, Any] = {"jobs": len(jobs), "requests": 0, "cached": 0, "failed": [], "kept": [], "by_source": {}, "cutoff": cutoff}
+    launches = launches or {}
+    report: Dict[str, Any] = {"jobs": len(jobs), "requests": 0, "cached": 0, "pre_launch": 0, "failed": [], "failures": [], "kept": [],
+                              "by_source": {}, "cutoff": cutoff}
     try:
         for job in jobs:
-            bs = report["by_source"].setdefault(job.source, {"requests": 0, "cached": 0, "failed": 0, "kept": 0})
+            bs = report["by_source"].setdefault(job.source, {"requests": 0, "cached": 0, "failed": 0, "kept": 0, "pre_launch": 0})
             cached = store.get_timeseries_count(job.source, job.entity_id, job.model, job.month)
             if cached is not None and not force and job.month < cutoff:
                 report["cached"] += 1
                 bs["cached"] += 1
                 continue
+            launch = launches.get(job.entity_id, "")
+            if launch and job.month < launch:
+                report["pre_launch"] += 1
+                bs["pre_launch"] += 1
+                if not dry_run and (cached is None or force or int(cached["count"]) != 0):
+                    store.put_timeseries_count(job.source, job.entity_id, job.model, job.month, 0)
+                    store.commit()
+                continue
             if dry_run:
                 report["requests"] += 1
                 bs["requests"] += 1
                 continue
-            n = fetch_count(http, job, api_key)
+            n, reason = fetch_count_detail(http, job, api_key)
             report["requests"] += 1
             bs["requests"] += 1
             if n is None:
                 report["failed"].append(job_key(job))
+                report["failures"].append({"key": job_key(job), "source": job.source, "entity_id": job.entity_id, "model": job.model,
+                                           "month": job.month, "reason": reason or "unknown"})
                 bs["failed"] += 1
+                log.warning("timeseries: %s failed: %s", job_key(job), reason or "unknown")
                 continue
             if n == 0 and not force and cached is not None and int(cached["count"]) > 0:
                 log.warning(
@@ -412,18 +515,19 @@ def backfill(
 
 
 # ---- outputs --------------------------------------------------------------------------------
-CSV_COLUMNS = ("source", "entity_id", "model", "month", "count")
+CSV_COLUMNS = ("source", "entity_id", "model", "month", "count", "unit")
 
 
 def write_csv(rows: Sequence[Dict[str, Any]], path: Path) -> None:
-    """Long format: source,entity_id,model,month,count (one row per cached count)."""
+    """Long format: source,entity_id,model,month,count,unit (one row per cached count; unit = experiments for
+    sra, runs for ena, papers for epmc)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(CSV_COLUMNS)
         for r in rows:
-            w.writerow([r.get(c, "") for c in CSV_COLUMNS])
+            w.writerow([r.get(c, UNITS.get(str(r.get("source")), "") if c == "unit" else "") for c in CSV_COLUMNS])
 
 
 def _series(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[Tuple[str, str], Dict[str, int]]]:
@@ -435,38 +539,79 @@ def _series(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[Tuple[str, str], D
     return out
 
 
-def render_markdown(rows: Sequence[Dict[str, Any]], months: Sequence[str], title: str = "Instrument usage time series") -> str:
-    """One table per source, pivoted by month: rows are months, columns are entity/model series."""
+def _md_label(text: str) -> str:
+    """A table-safe label: pipes (the epmc term joiner) become commas, stray pipes are escaped."""
+    return ", ".join(p.strip() for p in str(text).split("|") if p.strip()).replace("|", "\\|")
+
+
+def series_label(entity_id: str, model: str, names: Optional[Dict[str, str]] = None) -> str:
+    """Column label: the gazetteer name with the archive string or term set, e.g. 'Revio (revio)' or
+    'Sequel II (Sequel II, Sequel IIe)'; the raw id and model when no name is known."""
+    name = (names or {}).get(entity_id, "")
+    model_label = _md_label(model)
+    if not name:
+        return f"{entity_id}: {model_label}"
+    return f"{name} ({model_label})"
+
+
+def render_markdown(
+    rows: Sequence[Dict[str, Any]],
+    months: Sequence[str],
+    title: str = "Instrument usage time series",
+    sources: Optional[Sequence[str]] = None,
+    names: Optional[Dict[str, str]] = None,
+    failed: Optional[Set[Tuple[str, str, str, str]]] = None,
+    order: Optional[Sequence[Tuple[str, str, str]]] = None,
+) -> str:
+    """One table per source, pivoted by month: rows are months, columns are entity/model series.
+
+    Sources appear in `sources` order (the --sources argument), columns in `order` (config order of the
+    planned series), numbers right-aligned with thousands separators, labels from `names` (gazetteer names).
+    Cells: a number; blank = never fetched; `fail` = the request failed in this run (`failed` holds
+    (source, entity_id, model, month) keys) so a failed month is never read as "no deposits"."""
     lines = [f"# {title}", ""]
     if months:
-        lines.append(f"Months {months[0]} to {months[-1]}. Counts are deposited experiments (sra, ena) or open-access papers (epmc) per calendar month; blank = not fetched.")
+        lines.append(
+            f"Months {months[0]} to {months[-1]}. Per calendar month: sra = SRA experiments, ena = ENA runs (experiment-run rows; "
+            "a multi-lane project counts once per run, so ena runs above sra experiments), epmc = open-access papers naming the "
+            "model in Methods. Blank = never fetched; fail = the request failed in this run (see `backfill.failures` in the report)."
+        )
         lines.append("")
     series = _series(rows)
-    if not series:
+    failed = failed or set()
+    if not series and not failed:
         lines.append("_No data._")
         return "\n".join(lines) + "\n"
-    for source, per_model in series.items():
-        unit = "papers naming the model in Methods" if source == "epmc" else "experiments by instrument_model"
-        lines.append(f"## {source} ({unit})")
+    source_order = [s for s in (sources or []) if s in series or any(f[0] == s for f in failed)]
+    source_order += [s for s in series if s not in source_order]
+    source_order += sorted({f[0] for f in failed} - set(source_order))
+    for source in source_order:
+        per_model = series.get(source, OrderedDict())
+        cols: List[Tuple[str, str]] = []
+        if order:
+            cols = [(eid, model) for (src, eid, model) in order if src == source]
+        for key in list(per_model.keys()) + sorted({(f[1], f[2]) for f in failed if f[0] == source}):
+            if key not in cols:
+                cols.append(key)
+        lines.append(f"## {source} ({UNIT_NOTES.get(source, source)})")
         lines.append("")
-        cols = list(per_model.keys())
-        header = ["month"] + [f"{eid}: {model}" for eid, model in cols] + ["total"]
+        header = ["month"] + [series_label(eid, model, names) for eid, model in cols] + ["total"]
         lines.append("| " + " | ".join(header) + " |")
-        lines.append("|" + "|".join(["---"] * len(header)) + "|")
+        lines.append("|" + "|".join(["---"] + ["---:"] * (len(header) - 1)) + "|")
         col_totals = [0] * len(cols)
         for month in months:
             cells: List[str] = []
             total = 0
-            for i, key in enumerate(cols):
-                v = per_model[key].get(month)
+            for i, (eid, model) in enumerate(cols):
+                v = per_model.get((eid, model), {}).get(month)
                 if v is None:
-                    cells.append("")
+                    cells.append("fail" if (source, eid, model, month) in failed else "")
                 else:
-                    cells.append(str(v))
+                    cells.append(f"{v:,}")
                     total += v
                     col_totals[i] += v
-            lines.append("| " + " | ".join([month] + cells + [str(total)]) + " |")
-        lines.append("| " + " | ".join(["**total**"] + [str(t) for t in col_totals] + [str(sum(col_totals))]) + " |")
+            lines.append("| " + " | ".join([month] + cells + [f"{total:,}"]) + " |")
+        lines.append("| " + " | ".join(["**total**"] + [f"{t:,}" for t in col_totals] + [f"{sum(col_totals):,}"]) + " |")
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -577,16 +722,27 @@ def run(
         return report
     d_start, d_end = default_months(today)
     start, end = start or d_start, end or d_end
+    current = today.strftime("%Y-%m")
     try:
+        parse_month(start)
+        parse_month(end)
+        if start > current:
+            report["errors"].append(f"--from {start} is in the future (current month {current}); nothing can be deposited or published yet")
+            return report
+        if end > current:
+            report["warnings"].append(f"--to {end} is in the future; clamped to the current month {current} (future months cannot have deposits)")
+            end = current
         months = month_range(start, end)
     except ValueError as exc:
         report["errors"].append(str(exc))
         return report
     jobs = plan_jobs(specs, entity_ids, months, sources)
+    launches = {eid: specs[eid].launch for eid in entity_ids if specs[eid].launch}
     report.update({"entities": entity_ids, "from": months[0], "to": months[-1], "months": len(months), "sources": list(sources)})
     http = http or Http(contact_email=contact_email, cache_dir=None, ncbi_api_key=ncbi_api_key)
     store = store or Store(Path(db_path))
-    report["backfill"] = backfill(http, store, jobs, refresh_months=refresh_months, force=force, today=today, api_key=ncbi_api_key, dry_run=dry_run)
+    report["backfill"] = backfill(http, store, jobs, refresh_months=refresh_months, force=force, today=today, api_key=ncbi_api_key,
+                                  dry_run=dry_run, launches=launches)
     if dry_run:
         report["dry_run"] = True
         return report
@@ -600,18 +756,48 @@ def run(
     ]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"timeseries_{months[0]}_{months[-1]}"
+    stem = output_stem(months[0], months[-1], entities, vendors, entity_ids)
     csv_path, md_path, png_path = out_dir / f"{stem}.csv", out_dir / f"{stem}.md", out_dir / f"{stem}.png"
+    if csv_path.exists() or md_path.exists():
+        report["warnings"].append(f"replacing the earlier outputs {stem}.csv/.md in {out_dir} (same months and selection)")
+    failed_keys = {(f["source"], f["entity_id"], f["model"], f["month"]) for f in report["backfill"]["failures"]}
+    names = {eid: (instruments.get(eid) or {}).get("name") or "" for eid in entity_ids}
+    order = [(j.source, j.entity_id, j.model) for j in jobs]
+    order = list(OrderedDict.fromkeys(order))
     write_csv(rows, csv_path)
-    md_path.write_text(render_markdown(rows, months), encoding="utf-8")
+    md_path.write_text(render_markdown(rows, months, sources=list(sources), names=names, failed=failed_keys, order=order), encoding="utf-8")
     report["outputs"] = {"csv": str(csv_path), "markdown": str(md_path), "rows": len(rows)}
     if chart:
         report["outputs"]["png"] = str(png_path) if write_png(rows, months, png_path) else None
-    if report["backfill"]["failed"]:
-        report["errors"].append(f"{len(report['backfill']['failed'])} count requests failed (not cached; re-run to retry)")
+    # failures: WHY, per source. A source where every request of this run failed is an error (exit 1);
+    # a source with some failed months is a warning: the cached values still stand and a re-run retries them.
+    for source in sources:
+        bs = report["backfill"]["by_source"].get(source) or {}
+        n_failed, n_requests = int(bs.get("failed") or 0), int(bs.get("requests") or 0)
+        if not n_failed:
+            continue
+        reasons = Counter(f["reason"] for f in report["backfill"]["failures"] if f["key"].startswith(f"{source}:"))
+        why = "; ".join(f"{r} (x{n})" for r, n in reasons.most_common(3))
+        if n_failed >= n_requests:
+            report["errors"].append(f"{source}: all {n_requests} count request(s) of this run failed: {why}. Nothing cached for them; fix the cause and re-run")
+        else:
+            report["warnings"].append(f"{source}: {n_failed} of {n_requests} count request(s) failed (shown as `fail`, not cached): {why}. Re-run to retry")
     if report["backfill"]["kept"]:
         report["warnings"].append(
             f"{len(report['backfill']['kept'])} fresh zero counts ignored because a positive count is cached (see backfill.kept; "
             "check the vocabulary string, or --force to overwrite)"
         )
     return report
+
+
+def output_stem(first_month: str, last_month: str, entities: Sequence[str], vendors: Sequence[str], entity_ids: Sequence[str]) -> str:
+    """`timeseries_<from>_<to>_<selection>`: the selection is the --vendor / --entity tokens (slugified, '+'-joined),
+    so two runs for different vendors into one --out directory keep both files; a long selection is shortened to its
+    first token plus a 6-character hash of the resolved entity ids."""
+    tokens = [re.sub(r"[^a-z0-9]+", "-", str(t).lower()).strip("-") for t in list(vendors) + list(entities)]
+    tokens = [t for t in dict.fromkeys(tokens) if t]
+    selection = "+".join(tokens) or "all"
+    if len(selection) > 60:
+        digest = hashlib.sha1("|".join(entity_ids).encode("utf-8")).hexdigest()[:6]
+        selection = f"{tokens[0][:24]}+{len(entity_ids)}ids-{digest}"
+    return f"timeseries_{first_month}_{last_month}_{selection}"

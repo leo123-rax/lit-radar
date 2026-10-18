@@ -71,6 +71,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
 
 from ..http import Http
 from ..models import ArchiveRecord
+from .sra import usable_api_key
 
 log = logging.getLogger(__name__)
 
@@ -182,8 +183,9 @@ def _result(data: Any) -> Tuple[List[str], Dict[str, Any]]:
 def _params(api_key: str, **kw: Any) -> Dict[str, Any]:
     p: Dict[str, Any] = {"db": "gds", "retmode": "json"}
     p.update(kw)
-    if api_key:
-        p["api_key"] = api_key
+    key = usable_api_key(api_key)  # a comment loaded as the key value must not reach NCBI as api_key=
+    if key:
+        p["api_key"] = key
     return p
 
 

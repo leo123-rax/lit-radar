@@ -20,6 +20,7 @@ from typing import Dict, Iterable, Iterator, List, Optional
 from ..extract.jats import parse_jats
 from ..http import Http
 from ..models import Author, Paper, normalize_doi
+from . import jats_abstract
 
 log = logging.getLogger(__name__)
 API = "https://api.biorxiv.org/details/{server}/{start}/{end}/{cursor}"
@@ -87,7 +88,10 @@ def fetch(
         cursor += count
         if count == 0 or cursor >= total:
             break
-    log.info("%s: %d preprints in %s..%s", server, len(seen), start, end)
+    if start and end:
+        log.info("%s: %d preprints in %s..%s", server, len(seen), start, end)
+    else:  # the by-DOI lookup (litradar add) feeds a canned single record through here: no date range to report
+        log.debug("%s: %d version(s) kept for %s", server, len(seen), ", ".join(seen) or "no DOI")
     yield from seen.values()
 
 
@@ -107,6 +111,8 @@ def attach_fulltext(http: Http, paper: Paper, retries: int = 1) -> bool:
     for key in ("methods", "funding", "coi", "ack", "data_availability", "body"):
         if parsed.get(key):
             paper.sections[key] = parsed[key]
+    if not paper.abstract:  # the API record had none: the JATS document carries it, at no extra request
+        paper.abstract = jats_abstract(resp.content)
     if parsed.get("affiliations"):
         paper.affiliations = list(dict.fromkeys(paper.affiliations + parsed["affiliations"]))
     if parsed.get("authors"):

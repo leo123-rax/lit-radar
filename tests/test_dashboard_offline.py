@@ -394,3 +394,31 @@ def test_page_script_links_only_http_urls():
     assert "function isWebUrl" in dashboard.APP_JS
     assert "isWebUrl(cell.href)" in dashboard.APP_JS
     assert r"/^https?:\/\//i" in dashboard.APP_JS
+
+
+def test_footer_wording_placeholder_tickers_and_layout_rules(tmp_path):
+    db = _seed(tmp_path, "layout.sqlite")
+    st = Store(db)
+    # an instrument whose gazetteer ticker is the placeholder 'n/a' (open-source software) must not get a ticker pill
+    st.replace_mentions("doi:10.1000/dash2", [
+        Mention("doi:10.1000/dash2", "instrument", "oss-tool", "Open Tool", "community", "n/a", "software", "methods", 1, "…"),
+        Mention("doi:10.1000/dash2", "company", "vendor-two", "Vendor Two", "", "VTWO", "", "methods", 1, "…"),
+    ])
+    st.commit()
+    st.close()
+    data = _collect(db)
+    inst = {e["id"]: e for e in data["instruments"]}
+    assert inst["oss-tool"]["ticker"] == "" and inst["inst-a"]["ticker"] == "VONE"
+    assert dashboard._ticker("n/a") == "" and dashboard._ticker("N/A") == "" and dashboard._ticker(" VONE ") == "VONE" and dashboard._ticker(None) == ""
+    out = tmp_path / "site-layout"
+    dashboard.build(db, out, weeks=4, today=TODAY)
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "from the local corpus" not in html and "from the radar database this site was built from" in html
+    css = (out / "assets" / "styles.css").read_text(encoding="utf-8")
+    # phone width: the lede wraps, cards and charts never widen the page
+    assert ".lede { max-width: 72ch; overflow-wrap: anywhere; }" in css
+    assert "min-width: 0; max-width: 100%; overflow: hidden" in css and ".chart canvas { max-width: 100% !important; }" in css
+    # search results: the title wraps and the table fits the card, so the other columns stay in view
+    assert ".table-scroll.fit table { width: 100%" in css and "td.wrap, th.wrap { white-space: normal" in css
+    js = (out / "assets" / "app.js").read_text(encoding="utf-8")
+    assert '{ label: "Title", wrap: true }' in js and "fit: true" in js and 'options.fit ? "table-scroll fit"' in js
