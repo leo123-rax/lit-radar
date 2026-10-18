@@ -42,7 +42,12 @@ says n/a when the prior 30-day period lies outside it; months outside the window
 Resolution order for the query string: gazetteer id -> canonical name -> alias -> company ticker ->
 an entity id that exists only in the mentions table (e.g. `unlisted:<slug>` institutions) -> a person
 (tracked author in config, tracked_author_hits, or any paper's author list). Ties return the best match
-and list the others under `candidates`.
+and list the others under `candidates`. When a company and an instrument match the same string at the
+same rank, an id or canonical-name match puts the company first, while a shared *alias* puts the
+instrument first: the alias is a product or brand name the company entry carries as a trade name
+("Olink" on the Thermo Fisher entry), so the user typed a product. `resolve_all` returns one Resolution
+per kind in that order and `dossier` attaches the other kind's dossier under `also`, so `show olink`
+prints the Olink platform dossier followed by the owner's.
 
 Full-text watch terms use the FTS5 index (`papers_fts`, porter + unicode61 tokenizer). A plain multi-word
 term is matched as a phrase (the words adjacent, in order; see `litradar.query.auto_phrase`); a term that
@@ -278,6 +283,10 @@ def _entry_identity(e: Entry) -> Dict[str, Any]:
                          "aliases": [a for a in e.aliases if a != e.name]}
     if e.kind == "instrument":
         d.update({"vendor": e.vendor, "category": e.category, "launched": e.launched, "status": e.status})
+        if e.family:
+            d["family"] = e.family
+        if e.granularity:
+            d["granularity"] = e.granularity
     else:
         d.update({"parent": e.parent, "domains": list(e.domains)})
     if e.notes:
@@ -289,24 +298,77 @@ def _candidate(e: Entry, how: str) -> Dict[str, Any]:
     return {"kind": e.kind, "id": e.id, "name": e.name, "vendor": e.vendor or e.parent, "ticker": e.ticker, "matched_by": how}
 
 
+# how the query matched: lower is better
+_MATCH_RANK = {"id": 0, "name": 1, "alias": 2, "ticker": 3}
+# when a company and an instrument match the same string at the same rank, which one leads: an id or a canonical name
+# is the company's own identity (company first); a shared *alias* is a brand or product name that the company entry
+# carries as a trade name ("Olink" on Thermo Fisher, "Oxford Nanopore" on the ONT company), so the product leads
+_COMPANY_FIRST_RANKS = {0, 1}
+
+
+def _kind_order(rank: int, kind: str) -> int:
+    instrument = kind == "instrument"
+    if rank in _COMPANY_FIRST_RANKS:
+        return 1 if instrument else 0
+    return 0 if instrument else 1
+
+
 def _gazetteer_matches(query: str, instruments: Optional[Gazetteer], companies: Optional[Gazetteer]) -> List[Tuple[int, int, str, Entry]]:
     ql = query.strip().lower()
     out: List[Tuple[int, int, str, Entry]] = []
-    for gz, kind_rank in ((companies, 0), (instruments, 1)):
+    for gz in (companies, instruments):
         if gz is None:
             continue
         for e in gz.entries:
             if e.id.lower() == ql:
-                out.append((0, kind_rank, "id", e))
+                how = "id"
             elif e.name.lower() == ql:
-                out.append((1, kind_rank, "name", e))
+                how = "name"
             elif any(a.lower() == ql for a in e.aliases):
-                out.append((2, kind_rank, "alias", e))
+                how = "alias"
             elif e.kind == "company" and e.ticker and e.ticker.lower() == ql and e.ticker.lower() != "private":
-                out.append((3, kind_rank, "ticker", e))
-    # best rank first; companies before instruments; a parent company before the subsidiaries that share its ticker
+                how = "ticker"
+            else:
+                continue
+            rank = _MATCH_RANK[how]
+            out.append((rank, _kind_order(rank, e.kind), how, e))
+    # best rank first; then the kind order above; a parent company before the subsidiaries that share its ticker
     out.sort(key=lambda t: (t[0], t[1], 1 if t[3].parent else 0, t[3].name.lower()))
     return out
+
+
+def other_kind_resolutions(res: Resolution, instruments: Optional[Gazetteer] = None, companies: Optional[Gazetteer] = None) -> List[Resolution]:
+    """Resolutions for the *other* entity kind(s) that matched the query string at the same rank as `res`
+    (read from `res.candidates`, so no gazetteer is required; when one is given the identity is taken from it,
+    otherwise from the candidate row). Empty for persons, unknowns and unambiguous queries."""
+    rank = _MATCH_RANK.get(res.matched_by)
+    if res.kind not in ENTITY_KINDS or rank is None:
+        return []
+    out: List[Resolution] = []
+    seen = {res.kind}
+    for c in res.candidates:
+        kind = c.get("kind")
+        if kind not in ENTITY_KINDS or kind in seen or _MATCH_RANK.get(str(c.get("matched_by"))) != rank:
+            continue
+        seen.add(kind)
+        gz = instruments if kind == "instrument" else companies
+        e = gz.by_id.get(c["id"]) if gz is not None else None
+        identity = _entry_identity(e) if e is not None else {
+            "id": c["id"], "name": c["name"], "kind": kind, "ticker": c.get("ticker") or "", "vendor": c.get("vendor") or "",
+            "note": f"identity taken from the match candidates (the {kind} gazetteer was not loaded)",
+        }
+        out.append(Resolution(query=res.query, kind=kind, entity_id=c["id"], name=c["name"], matched_by=str(c.get("matched_by")),
+                              identity=identity, candidates=[x for x in res.candidates if x["id"] != c["id"]]))
+    return out
+
+
+def resolve_all(store: Store, query: str, instruments: Optional[Gazetteer] = None, companies: Optional[Gazetteer] = None,
+                subgroups: Optional[Sequence[Dict[str, Any]]] = None) -> List[Resolution]:
+    """`resolve`, plus one further Resolution for every *other* entity kind that matched the same string at the
+    same rank: `show olink` yields [olink-explore (instrument), thermo-fisher (company)] instead of silently
+    picking the parent company. The first element is exactly what `resolve` returns."""
+    primary = resolve(store, query, instruments, companies, subgroups)
+    return [primary] + other_kind_resolutions(primary, instruments, companies)
 
 
 def _suggest(store: Store, query: str, instruments: Optional[Gazetteer], companies: Optional[Gazetteer], limit: int = 10) -> List[Dict[str, Any]]:
@@ -612,9 +674,26 @@ def _tracked_hits(conn: sqlite3.Connection, hit_names: Sequence[str], since: str
 
 
 def dossier(store: Store, res: Resolution, since: str, until: Optional[str] = None, limit: int = 15,
-            instruments: Optional[Gazetteer] = None, subgroups: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Build the full entity view as plain data (see the module docstring for the sections)."""
+            instruments: Optional[Gazetteer] = None, subgroups: Optional[Sequence[Dict[str, Any]]] = None,
+            companies: Optional[Gazetteer] = None, also: bool = True) -> Dict[str, Any]:
+    """Build the full entity view as plain data (see the module docstring for the sections).
+
+    When the query string names both an instrument and a company (a product name the company entry carries as a
+    trade name: "Olink", "Oxford Nanopore"), the dossier of the other kind is attached under ``also`` (a list of
+    dossiers, each without its own ``also``), so a reader gets the product view *and* the owner view instead of
+    one silently standing in for the other. The other kind is read from ``res.candidates``; the gazetteers, when
+    given, only enrich its identity. Pass ``also=False`` to skip it."""
     until = until or _today()
+    out = _dossier_one(store, res, since, until, limit, instruments, subgroups)
+    if also:
+        extra = other_kind_resolutions(res, instruments, companies)
+        if extra:
+            out["also"] = [_dossier_one(store, r, since, until, limit, instruments, subgroups) for r in extra]
+    return out
+
+
+def _dossier_one(store: Store, res: Resolution, since: str, until: str, limit: int,
+                 instruments: Optional[Gazetteer], subgroups: Optional[Sequence[Dict[str, Any]]]) -> Dict[str, Any]:
     conn = store.conn
     out: Dict[str, Any] = dict(res.to_dict())
     out["window"] = {"since": since, "until": until}
@@ -800,6 +879,12 @@ def render_dossier(d: Dict[str, Any]) -> str:
         for h in hits:
             lines.append(f"  {h.get('pub_date') or 'n.d.'}  [{h.get('subgroup')} · by {h.get('matched_by')}]  {h.get('title') or ''}")
             lines.append(f"              {h.get('journal') or ''}  {h.get('url') or ''}".rstrip())
+    for sub in d.get("also") or []:
+        lines.append("")
+        lines.append("=" * 78)
+        lines.append(f"'{d.get('query')}' also names a {sub.get('kind')}: {sub.get('name')} [{sub.get('entity_id')}] -- its dossier follows")
+        lines.append("=" * 78)
+        lines.append(render_dossier({k: v for k, v in sub.items() if k != "also"}))
     return "\n".join(lines)
 
 

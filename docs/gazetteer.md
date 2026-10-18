@@ -36,10 +36,32 @@ counted as `Novo Nordisk`. This is the mechanism to use when a longer phrase mus
 than its prefix (the foundation vs the company, `CFX Maestro` vs `Schrödinger Maestro`, `Coherent Chameleon` vs the
 SPT Labtech `chameleon`).
 
+**Addresses are not mentions.** A hit that is part of a web or e-mail address is skipped: `gnomad.broadinstitute.org`,
+`https://github.com/broadinstitute/gatk`, `name@illumina.com`, `imagej.net`. The rule looks at the character before
+the hit (`@`; a `.` preceded by an alphabetic host label such as `www.` or `portals.`; a `/` inside a URL) and at the
+text after it (`.` + a lower-case top-level domain with nothing glued on). "2.3.Illumina sequencing" (a section number
+with the space missing) and "Illumina.Interestingly" stay hits; "Illumina.in vitro" (missing space, lower-case `in`)
+is an accepted loss. Archive strings (`ignore_context=True`) are never checked, they contain no addresses. Live
+effect on the audited store: 12 company mentions, all `broad-institute` and `addgene` URL credits (`gnomad.`, `gatk.`,
+`software.`, `portals.` sub-domains, GitHub paths), stop counting as institute mentions.
+
+**Unicode hyphens.** The word-boundary test treats the hyphen U+2010 and the non-breaking hyphen U+2011 like the
+ASCII hyphen, both as separators inside an alias (`NovaSeq‐X Plus` matches) and as glue that blocks a hit
+(`University Medical Center Hamburg‐Eppendorf` -- the hospital -- is not a hit for the company `Eppendorf`). En and em
+dashes are deliberately left out: they are sentence punctuation (`Illumina—the vendor—`).
+
 **Sections.** Instruments are searched in title, abstract and Methods; companies additionally in funding, competing
 interests, acknowledgements and affiliations, and through author e-mail `domains`. Archive instrument strings
 (SRA/ENA `instrument_model`) are mapped with `match_archive_model`, which ignores context because the input is a
 controlled vocabulary: `Revio`, `Sequel`, `MinION` map on their own even though prose requires context for them.
+
+**Families.** Sibling models that a reader may want to see as one line share a `family` key: `novaseq-x`
+(NovaSeq X, NovaSeq X Plus), `sequel` (Sequel, Sequel II/IIe), `chromium` (Chromium, Chromium Flex, Chromium Multiome,
+Chromium Single Cell 3'), `nextseq-1000-2000`, `promethion`. The key never affects matching or storage: every entry
+keeps its own id and its own mention rows. `Gazetteer.families` maps entity ids to family keys and
+`Store.instrument_counts(..., families=gazetteer.families)` groups the rows (docs/store.md §8); the group is labelled
+with the member whose name slugifies to the key ("NovaSeq X", "Chromium"), else with the member names joined by
+" / " ("NextSeq 1000 / NextSeq 2000"). `litradar show <instrument>` prints the family in the identity block.
 
 **Scoring.** `litradar/rank/heuristics.py` splits instrument mentions into *platforms* (weight 1.0 per distinct entity,
 cap 3) and *lab tools* (0.2, cap 3) by category prefix; see section 4.
@@ -60,7 +82,9 @@ camera's name is visible as such in `mentions.alias`).
    and plasticware go in a `reagent` entry; the company itself goes in `companies.yaml`.
 2. **Write the entry on one line** as a YAML flow mapping (`- {id: ..., name: ..., ...}`). `id` is the stable key
    stored in the database -- never rename an id. Give `vendor`, `ticker` (`private` or `n/a` when unlisted), and
-   `parent` when a brand survived an acquisition. Quote names that contain `&`.
+   `parent` when a brand survived an acquisition. Quote names that contain `&`. One entry per model the archives
+   keep apart (`NovaSeq X` and `NovaSeq X Plus` are two entries); give sibling models a shared `family` key when a
+   roll-up line is useful.
 3. **Add aliases as they appear in Methods**, including spelling variants, model numbers and the useful phrase forms
    (`Xenium spatial`, `MinION flow cell`, `KAPA HyperPrep`). Prefer phrase aliases over gating when recall matters.
 4. **Gate anything risky.** If an alias is an English word (any case), a place, a surname, a 2-4 letter token or a
@@ -143,8 +167,22 @@ Instrument `category` values and how the ranking treats them (`PLATFORM_CATEGORI
 | `automation` | lab tool | liquid handlers, plate readers, histology instruments, electrophoresis gear, NMR, Biacore |
 | `bioprocess` | lab tool | Ambr, HyPerforma, ÄKTA, BioFlo, Xcellerex, centrifuges |
 | `qc` | lab tool | TapeStation, Bioanalyzer, Qubit, NanoDrop, cell counters |
-| `software` | lab tool | FlowJo, ZEN, NIS-Elements, Cell Ranger, Imaris, DIA-NN, cryoSPARC, vendor control software |
+| `software` | lab tool | FlowJo, ZEN, NIS-Elements, Cell Ranger, Imaris, DIA-NN, cryoSPARC, vendor control software; AI / foundation models used as tools (AlphaFold, ESMFold, RoseTTAFold, Boltz, Chai-1, BioNeMo, Parabricks, Evo 2, CELLxGENE) with the vendor set |
 | `reagent` | lab tool | Lipofectamine, QIAGEN extraction kits, TaqMan / SuperScript, Cytiva resins, Corning plasticware, Gibco media |
+| `method` | lab tool | academic protocols without a vendor (Slide-seq / Slide-seqV2 / Slide-tags); `vendor: open source`, `ticker: n/a` |
+
+Two more fields shape how entries are *displayed*, never how they match: `family` (section 1, "Families") and
+`granularity: unspecified`, which marks the per-vendor bucket for mentions that name a platform or chemistry but no
+model. Those buckets are named consistently -- `Illumina (model unspecified)` (`ilmn-sequencing`), `NovaSeq (model
+unspecified)` (`ilmn-novaseq`), `NextSeq (model unspecified)` (`ilmn-nextseq`), `Oxford Nanopore (model unspecified)`
+(`ont-chemistry`), `PacBio (model unspecified)` (`pacb-hifi`), `MGI DNBSEQ (model unspecified)` (`mgi-dnbseq`) -- so the
+digest's platform table and the dashboard read the same way; the chemistry entries `ilmn-5-base`, `ilmn-xleap-sbs` and
+`mgi-coolmps` carry the flag under their own names. Ids are stable and the previous display names ("Illumina
+sequencing", "NovaSeq", "Oxford Nanopore sequencing", "PacBio HiFi", "DNBSEQ") stayed on as aliases, so `rematch`
+migrates stored mentions without a rename map: every row it re-derives takes the new display name. Rows that
+`rematch` keeps because their source text is not stored under the data policy keep the old name until
+`litradar maintenance --refresh-entity-names` rewrites them from the gazetteer (docs/store.md §4). `litradar show`
+prints `family` and `granularity` in the identity block.
 
 Platforms are the instruments an investor tracks; everything else is infrastructure or consumables and scores 0.2
 per distinct entity. `software` and `reagent` exist precisely so that analysis software and consumables never
@@ -276,3 +314,76 @@ were extended to affiliation / funding vocabulary.
 * Run `python -m litradar rematch` and re-annotate `archive_records` so stored mentions and the archive census pick
   up the new entries; until then the digest shows the pre-pass hits.
 * `twist-dx-dup` is the id of the Burning Rock entry; ids are stable keys, so it was left alone.
+
+## 6. Changelog: hygiene pass of 2026-10-17 (deferred shakedown items)
+
+Starting point: instruments 404 entries / 3,663 aliases, companies 211 / 838. After the pass: instruments 407 /
+3,676, companies 211 / 838. `check-config` 0 warnings (archive_models 28 entities / 49 model strings); full suite
+and ruff green.
+
+**Model granularity.** `ilmn-novaseq-x` was one entry whose aliases swallowed `NovaSeq X Plus`, while the archive
+census kept "Illumina NovaSeq X" (5,221 experiments in the audited store) and "Illumina NovaSeq X Plus" (6,023) apart,
+so the paper table and the archive table used different definitions. Now two entries, `ilmn-novaseq-x` and
+`ilmn-novaseq-x-plus`, with `family: novaseq-x`; `config/archive_models.yaml` splits the SRA/ENA strings the same way
+(the Europe PMC term "NovaSeq X" is prefix-inclusive and still counts Plus papers; the yaml notes say so). Of the 15
+stored NovaSeq X Methods mentions, 13 were Plus matches. `family` was also added to the Sequel generations, the
+PromethION entry, the four Chromium assays and the NextSeq 1000/2000 pair (the shared alias "NextSeq 1000/2000" is
+credited to the 2000; the family roll-up shows both).
+
+**Bundled product lines split.** `Ceta` / `Ceta-D` (TEM cameras) moved from the Falcon direct-electron-detector
+entry to `thermo-ceta-camera` (category `imaging`, case-sensitive + TEM/camera/kV context): 3 of the 4 live
+"Falcon" hits were Ceta matches, one of them a Gatan K3 line. `ImageQuant` (software and LAS/800 CCD imagers) moved
+from `cytiva-typhoon` to `cytiva-imagequant` (category `software`): 2 of 3 live "Typhoon" hits were ImageQuant
+software credits.
+
+**Matcher.** Web and e-mail addresses are skipped and Unicode hyphens are word boundaries (section 1). Found by the
+live sweep of the 40 most-mentioned instruments and 40 companies (6 random snippets each, the method of section 5):
+`University Medical Center Hamburg‐Eppendorf` (U+2010) credited the company Eppendorf; `gnomad.broadinstitute.org`,
+`github.com/broadinstitute`, `software.broadinstitute.org` credited the Broad Institute as a Methods mention; Addgene
+URLs did the same. No other false positive was found in the 480 snippets; the remaining judgement calls are the
+known limitations (genericised trademarks `Transwell`, `Matrigel`, `Eppendorf tube`, `Milli-Q`; vendor-labelled
+consumables such as `iTaq Universal` credited to the CFX instrument; a paper that mislabels the ABI 7500 as a
+"Sciex" instrument).
+
+**Tickers verified against the SEC.** Every US-style ticker in `companies.yaml` (87 entries; exchange-suffixed
+tickers such as `ONT.L`, `688114.SS`, `ROG.SW` are outside the SEC file and were not checked) was compared with
+`https://www.sec.gov/files/company_tickers.json` (fetched 2026-10-17 with a declared User-Agent; the download is
+refused without one). 85 match the company or its parent. Two no longer exist in the file and were changed:
+`hologic` `HOLX` -> `private` (taken private; deal announced Oct 2025) and `exact-sciences` `EXAS` -> `ABT` with
+`parent: Abbott` (acquired; deal announced Nov 2025; `ABT` = ABBOTT LABORATORIES in the file). `SDGR` was flagged by
+the name comparison only because of the umlaut (Schrödinger vs "Schrodinger, Inc.") and is correct.
+
+**Findings from a rematch on an 89,165-paper backfilled copy** (reported by the pipeline shakedown, folded in here):
+
+* `google-deepmind` was the #1 "company" with 2,425 papers, 100 % from model aliases (AlphaFold/abstract 999,
+  AlphaFold/title 469, AlphaFold 2/abstract 413, AlphaFold 3/abstract 363, ...). A model name in a paper is tool
+  usage, not company involvement. Every AI / foundation model name moved out of `companies.yaml` into `software`
+  entries of `instruments.yaml` with the vendor set: `deepmind-alphafold` (AlphaFold 2/3, Multimer, the AlphaFold
+  Database, AlphaMissense, AlphaProteo), `deepmind-alphagenome`, `meta-esm` (ESMFold, ESM-2), `evolutionaryscale-esm3`,
+  `rosettafold` (RoseTTAFold, RFdiffusion, ProteinMPNN), `boltz`, `chai-discovery-models`, `nvidia-bionemo`,
+  `nvidia-parabricks`, `microsoft-bioemu`, `microsoft-evodiff`, `profluent-models`, `generate-chroma`, `latent-x`,
+  `bioptimus-h-optimus`, `arc-evo`, `arc-virtual-cell-atlas`, `czi-cellxgene`, `czi-transcriptformer`. The company
+  entries keep the organisation's names only (`google-deepmind`: DeepMind, Google Research; `nvidia`: NVIDIA, NVIDIA
+  Corporation -- its 65 affiliation + 46 funding mentions are real company involvement and stay). Rule for the
+  future: a commercial *product* a lab buys (Schrödinger Maestro, Olink panels, Illumina kits) stays a supplier alias
+  on the company; a *model* anyone can run is a software tool.
+* `curio-seeker` (75 papers) was 84 % Slide-seq / Slide-seqV2 / Slide-tags mentions, i.e. the academic method, with
+  "Curio Seeker" itself in about two. New `slide-seq` entry (category `method`, no vendor); `curio-seeker` keeps the
+  commercial kit names only.
+* The per-vendor "no model named" buckets (`ilmn-sequencing` 483 papers, `ont-chemistry` 1,683, `pacb-hifi` 1,155 on
+  that copy) were named three different ways. They now share the `(model unspecified)` naming and the
+  `granularity: unspecified` flag (section 4), ids unchanged.
+
+Measured by re-matching the 3,562-paper live copy (papers per entity, before -> after): `google-deepmind` 41 -> 2
+(the two remaining are a Google Research affiliation and a DeepMind acknowledgement); `deepmind-alphafold` 0 -> 37,
+`deepmind-alphagenome` 0 -> 3, `meta-esm` 0 -> 9, `boltz` 0 -> 7, `chai-discovery-models` 0 -> 4, `rosettafold` 0 -> 3,
+`arc-evo` 0 -> 2, `czi-cellxgene` 0 -> 2, `evolutionaryscale-esm3` / `microsoft-bioemu` 0 -> 1 each; `nvidia` 9 (unchanged:
+all organisation mentions), `chai-discovery` / `evolutionaryscale` / `microsoft-research` 0 as companies; `slide-seq`
+0 -> 1 and `curio-seeker` 0 (the live copy has no Curio kit paper). Distinct instrument entities 254 -> 265, company
+entities 127 -> 124; total mention rows 4,435 -> 4,458. Role split after the pass: 3,845 `used`, 573 `mentioned`, 40
+`reanalysis`.
+
+**Not changed here.** The ticker *hint* threshold in the discovery code (the 0.91 "Arda" vs "Aprea Therapeutics" case)
+and the concepts stop-list live in `litradar/discovery.py` and `litradar/concepts.py`, outside this pass. The CELLxGENE
+archive adapter (`litradar/sources/cellxgene.py`) still maps the EFO assay term "Slide-seqV2" to `curio-seeker`; with
+the new `slide-seq` entry the adapter owner may want to point it there.

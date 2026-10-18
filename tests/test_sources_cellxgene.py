@@ -171,8 +171,9 @@ def test_assay_to_gazetteer_mapping():
         ("Parse Evercode Whole Transcriptome v2", "EFO:0022601"): "parse-evercode",
         ("SPLiT-seq", "EFO:0009919"): "parse-evercode",
         ("BD Rhapsody Whole Transcriptome Analysis", "EFO:0700003"): "bd-rhapsody",
-        ("Slide-seqV2", "EFO:0030062"): "curio-seeker",
+        ("Slide-seqV2", "EFO:0030062"): "slide-seq",  # the academic method since 2026-10-17; the kit stays Curio
         ("curio biosciences seeker, 3mm", "EFO:0920002"): "curio-seeker",
+        ("Slide-tags", "EFO:9999998"): "slide-seq",  # unseen id -> label rule
         ("ScaleBio single cell RNA sequencing", "EFO:0022490"): "scale-bio",
         ("particle-templated instant partition sequencing", "EFO:0900000"): "fluent-pipseq",
         ("Drop-seq", "EFO:0008722"): "",

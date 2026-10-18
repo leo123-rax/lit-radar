@@ -11,6 +11,13 @@ Design notes
   a context term (usually the vendor) within a window, otherwise they are ignored.
 * Overlapping matches resolve to the longest alias, so "NovaSeq X Plus" is not double-counted
   as "NovaSeq X".
+* A hit that sits inside a web address or an e-mail address (``gnomad.broadinstitute.org``,
+  ``github.com/broadinstitute``, ``name@illumina.com``, ``imagej.net``) is skipped: a URL names a
+  resource, not an affiliation, a funder or a supplier.
+* Word boundaries treat the Unicode hyphens U+2010 / U+2011 like the ASCII hyphen, so
+  "Hamburg‐Eppendorf" (a hospital) is not a hit for "Eppendorf" (the company).
+* Entries may share a ``family`` key (NovaSeq X / NovaSeq X Plus, Sequel / Sequel II); it never
+  affects matching and only exists so counts can be rolled up for display.
 """
 from __future__ import annotations
 
@@ -22,6 +29,40 @@ from ..models import Mention
 
 CONTEXT_WINDOW = 250  # characters on each side used to look for a context term
 SNIPPET_RADIUS = 90
+# characters that join the parts of an alias and that may not be glued to a hit: ASCII hyphen, hyphen (U+2010),
+# non-breaking hyphen (U+2011). En/em dashes are left out on purpose: they are sentence punctuation ("Illumina—the").
+_HYPHENS = "\\-\u2010\u2011"
+_SEPARATOR = rf"[\s{_HYPHENS}]"
+# a hit followed by ".<tld>" with no space is part of a host name ("illumina.com", "imagej.net"); lower-case only so a
+# missing space after a full stop ("Illumina.In vitro") does not count
+_TLD_AFTER = re.compile(r"\.(?:com|org|net|edu|gov|io|ac|co|de|uk|eu|fr|ch|cn|jp|bio|ai|ca|au|nl|se|it|es|dk|fi|no|be|at|kr|in|tw|sg|il|br|cz|pl|ru|info)(?![A-Za-z0-9])")
+# the text right before a hit that marks it as a path segment of a URL ("https://github.com/broadinstitute")
+_URL_PATH_BEFORE = re.compile(r"(?:https?://|www\.|\.[a-z]{2,6}/)\S*$", re.IGNORECASE)
+# the text right before a hit that marks it as a host-name label ("www.illumina", "portals.broadinstitute"): a dotted
+# alphabetic label, not a section number ("2.3.Illumina" stays a hit)
+_HOST_LABEL_BEFORE = re.compile(r"[A-Za-z][\w-]*\.$")
+
+
+def _inside_address(text: str, start: int, end: int) -> bool:
+    """True when text[start:end] is part of a web or e-mail address rather than prose."""
+    before = text[start - 1] if start > 0 else ""
+    if before == "@":
+        return True
+    if before == "." and _HOST_LABEL_BEFORE.search(text, max(0, start - 64), start):
+        return True
+    if before == "/" and _URL_PATH_BEFORE.search(text, max(0, start - 120), start):
+        return True
+    return bool(_TLD_AFTER.match(text, end))
+
+
+def family_label(family: str, member_names: Iterable[str]) -> str:
+    """Display label for a roll-up: the member whose name slugifies to the family key ("NovaSeq X" for
+    novaseq-x, "Chromium" for chromium), else the sorted member names joined with " / "."""
+    names = sorted({str(n) for n in member_names if n})
+    for n in names:
+        if re.sub(r"[^a-z0-9]+", "-", n.lower()).strip("-") == family:
+            return n
+    return " / ".join(names) if names else family
 
 
 @dataclass
@@ -51,6 +92,8 @@ class Entry:
     case_sensitive_aliases: List[str] = field(default_factory=list)
     domains: List[str] = field(default_factory=list)
     notes: str = ""
+    family: str = ""  # roll-up key shared with sibling entries (config `family`); display only
+    granularity: str = ""  # '' = a specific model; 'unspecified' = the vendor's no-model bucket (config `granularity`)
 
 
 @dataclass
@@ -74,9 +117,9 @@ def _literal_token(alias: str) -> str:
 
 
 def _alias_to_regex(alias: str, case_sensitive: bool) -> re.Pattern[str]:
-    parts = [re.escape(p) for p in re.split(r"[\s\- ]+", alias.strip()) if p]
-    body = r"[\s\- ]*".join(parts)
-    pattern = rf"(?<![\w\-]){body}(?![\w\-])"
+    parts = [re.escape(p) for p in re.split(_SEPARATOR + "+", alias.strip()) if p]
+    body = f"{_SEPARATOR}*".join(parts)
+    pattern = rf"(?<![\w{_HYPHENS}]){body}(?![\w{_HYPHENS}])"
     return re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
 
@@ -116,6 +159,8 @@ def load_entries(items: Iterable[dict], kind: str) -> List[Entry]:
                 case_sensitive_aliases=[str(a) for a in (raw.get("case_sensitive_aliases") or [])],
                 domains=[str(d).lower() for d in (raw.get("domains") or [])],
                 notes=str(raw.get("notes") or ""),
+                family=str(raw.get("family") or ""),
+                granularity=str(raw.get("granularity") or ""),
             )
         )
     return entries
@@ -125,6 +170,8 @@ class Gazetteer:
     def __init__(self, entries: Sequence[Entry]) -> None:
         self.entries = list(entries)
         self.by_id: Dict[str, Entry] = {e.id: e for e in self.entries}
+        # entity id -> family key, for entries that declare one (Store.instrument_counts(families=...) rolls them up)
+        self.families: Dict[str, str] = {e.id: e.family for e in self.entries if e.family}
         self._patterns: List[_Pattern] = []
         for e in self.entries:
             default_context = [t for t in [e.vendor, e.parent, e.name] if t]
@@ -154,6 +201,14 @@ class Gazetteer:
         items = data.get("entries") if isinstance(data, dict) else data
         return cls(load_entries(items or [], kind))
 
+    def family_members(self, family: str) -> List[Entry]:
+        """Entries that declare `family`, in gazetteer order."""
+        return [e for e in self.entries if e.family == family]
+
+    def family_label(self, family: str) -> str:
+        """Display label for a family: see the module-level `family_label`."""
+        return family_label(family, [e.name for e in self.family_members(family)])
+
     def find(self, text: str, section: str = "", paper_id: str = "", ignore_context: bool = False, _prefilter: bool = True) -> List[Mention]:
         """Return one Mention per entry found in `text` (count = occurrences).
 
@@ -173,6 +228,8 @@ class Gazetteer:
                 span = (m.start(), m.end())
                 if any(s < span[1] and span[0] < e for s, e in taken):
                     continue
+                if not ignore_context and _inside_address(text, span[0], span[1]):
+                    continue  # a host name or e-mail address, not a mention (controlled vocabularies never contain them)
                 if pat.needs_context and not ignore_context:
                     lo, hi = max(0, span[0] - CONTEXT_WINDOW), min(len(text), span[1] + CONTEXT_WINDOW)
                     window = text[lo : span[0]] + " " + text[span[1] : hi]

@@ -3,10 +3,11 @@ import logging
 import sqlite3
 
 import pytest
+import yaml
 
 from litradar.models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from litradar.rank import heuristics
-from litradar.store import Store, archive_vendor_label, mentions_text
+from litradar.store import SCHEMA, Store, archive_vendor_label, mentions_text
 
 
 def _paper(i: int, **kw) -> Paper:
@@ -529,3 +530,108 @@ def test_http_host_accounting_and_400_body_warning(monkeypatch, caplog):
     assert rep["blocked_hosts"] == ["busy.example"] and rep["blocked_skips_by_host"] == {"busy.example": 1}
     assert rep["circuit_threshold"] == {"busy.example": 2} and "busy.example" not in rep["failed_only_hosts"]
     assert http.stats["failures"] == 4 and http.stats["blocked_skips"] == 1
+
+
+# ---- mention roles and family roll-ups (hygiene pass of 2026-10-17) ----
+from litradar.store import mention_role  # noqa: E402 - appended block
+
+
+def test_mention_role_rules():
+    assert mention_role("methods", "Libraries were sequenced on a NovaSeq X Plus.") == "used"
+    assert mention_role("body", "run on the Chromium Controller (10x Genomics)") == "used"
+    for cue in ("GSE196239 (10x Genomics Chromium v3, platform GPL24676)", "data were downloaded from GEO", "publicly available Xenium data",
+                "GEO accession GSE12345", "re-analysed Visium sections", "Re-analysis of previously published data", "raw reads from the SRA (PRJNA893571)",
+                "ArrayExpress E-MTAB-1234", "retrieved from the Sequence Read Archive"):
+        assert mention_role("methods", cue) == "reanalysis", cue
+    assert mention_role("abstract", "We re-analysed 12 Visium datasets") == "reanalysis"
+    for sec in ("title", "abstract", "funding", "coi", "ack", "affiliations", "data_availability"):
+        assert mention_role(sec, "Xenium spatial profiling") == "mentioned", sec
+    # accession tokens are case-sensitive, phrases are not
+    assert mention_role("methods", "the sra of the sample") == "used"
+    assert mention_role("methods", "gse is a gene") == "used"
+    assert mention_role("methods", "PUBLICLY AVAILABLE data") == "reanalysis"
+
+
+def test_roles_are_stored_derived_or_given_and_counted(tmp_path):
+    st = Store(tmp_path / "r.sqlite")
+    a, b, c = _paper(90, sections={}), _paper(91, sections={}), _paper(92, sections={})
+    for p in (a, b, c):
+        st.upsert_paper(p)
+    st.replace_mentions(a.id, [
+        Mention(a.id, "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "methods", 2, "loaded on the Chromium Controller (10x Genomics)"),
+        Mention(a.id, "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "abstract", 1, "Chromium single-cell profiling"),
+    ])
+    st.replace_mentions(b.id, [Mention(b.id, "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "methods", 1,
+                                       "(2) GSE196239 (10x Genomics Chromium v3, platform GPL24676): human embryonic cortex")])
+    st.replace_mentions(c.id, [Mention(c.id, "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell", "methods", 1, "", role="reanalysis")])
+    st.commit()
+    roles = {(m["section"], m["paper_id"]): m["role"] for m in st.mentions_for(a.id) + st.mentions_for(b.id) + st.mentions_for(c.id)}
+    assert roles == {("methods", a.id): "used", ("abstract", a.id): "mentioned", ("methods", b.id): "reanalysis", ("methods", c.id): "reanalysis"}
+    row = st.instrument_counts("2026-10-10", "2026-10-17")[0]
+    assert (row["entity_id"], row["papers"], row["papers_used"], row["papers_reanalysis"], row["papers_mentioned"]) == ("txg-chromium", 3, 1, 2, 1)
+    assert row["family"] == "" and row["members"] == ["txg-chromium"]
+    # kept rows (text not stored) keep their role
+    assert st.replace_mentions(b.id, [], keep_sections=("methods",)) == 1
+    assert st.mentions_for(b.id)[0]["role"] == "reanalysis"
+    # recomputing every row replaces the one caller-given role (paper c: blank snippet -> derived 'used'); then it is idempotent
+    assert st.backfill_mention_roles(only_blank=False) == 1
+    assert st.mentions_for(c.id)[0]["role"] == "used"
+    assert st.backfill_mention_roles(only_blank=False) == 0
+
+
+def test_legacy_store_without_role_column_is_backfilled_on_open(tmp_path, caplog):
+    path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(SCHEMA.replace("  role TEXT DEFAULT '',\n", ""))
+    assert "role" not in {r[1] for r in conn.execute("PRAGMA table_info(mentions)")}
+    conn.execute("INSERT INTO papers (id, title, pub_date, first_seen) VALUES ('doi:10.1000/legacy', 'Legacy', '2026-10-12', '2026-10-12T00:00:00Z')")
+    conn.execute("INSERT INTO mentions (paper_id, kind, entity_id, entity_name, section, count, snippet) VALUES "
+                 "('doi:10.1000/legacy', 'instrument', 'txg-visium', 'Visium', 'methods', 1, 'publicly available 10x Genomics Visium dataset GSE179572'), "
+                 "('doi:10.1000/legacy', 'instrument', 'txg-xenium', 'Xenium', 'methods', 1, 'Xenium slides were processed'), "
+                 "('doi:10.1000/legacy', 'instrument', 'txg-xenium', 'Xenium', 'title', 1, 'Xenium')")
+    conn.commit()
+    conn.close()
+    with caplog.at_level("INFO", logger="litradar.store"):
+        st = Store(path)
+    assert st.roles_backfilled == 3
+    assert "no 'role' column" in caplog.text
+    assert {(m["entity_id"], m["section"], m["role"]) for m in st.mentions_for("doi:10.1000/legacy")} == {
+        ("txg-visium", "methods", "reanalysis"), ("txg-xenium", "methods", "used"), ("txg-xenium", "title", "mentioned")}
+    st.close()
+    assert Store(path).roles_backfilled == 0  # second open: nothing to do
+
+
+def test_instrument_counts_roll_sibling_models_up_by_family(tmp_path):
+    st = Store(tmp_path / "f.sqlite")
+    pids = []
+    for i in range(4):
+        p = _paper(60 + i, sections={})
+        st.upsert_paper(p)
+        pids.append(p.id)
+    nx = lambda pid, n=1: Mention(pid, "instrument", "ilmn-novaseq-x", "NovaSeq X", "Illumina", "ILMN", "sequencer.short_read", "methods", n, "NovaSeq X run")  # noqa: E731
+    nxp = lambda pid, n=1: Mention(pid, "instrument", "ilmn-novaseq-x-plus", "NovaSeq X Plus", "Illumina", "ILMN", "sequencer.short_read", "methods", n, "NovaSeq X Plus run")  # noqa: E731
+    st.replace_mentions(pids[0], [nx(pids[0])])
+    st.replace_mentions(pids[1], [nxp(pids[1], 2)])
+    st.replace_mentions(pids[2], [nx(pids[2]), nxp(pids[2])])  # names both models: counts once for the family
+    st.replace_mentions(pids[3], [Mention(pids[3], "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "methods", 1, "")])
+    st.commit()
+    w = ("2026-10-10", "2026-10-17")
+    flat = {r["entity_id"]: r for r in st.instrument_counts(*w)}
+    assert flat["ilmn-novaseq-x"]["papers"] == 2 and flat["ilmn-novaseq-x-plus"]["papers"] == 2 and flat["txg-xenium"]["papers"] == 1
+    assert all(r["family"] == "" and r["members"] == [eid] for eid, r in flat.items())
+    families = {"ilmn-novaseq-x": "novaseq-x", "ilmn-novaseq-x-plus": "novaseq-x", "pacb-sequel": "sequel"}
+    rolled = st.instrument_counts(*w, families=families)
+    assert [(r["entity_id"], r["entity_name"], r["papers"], r["mentions"]) for r in rolled] == [("novaseq-x", "NovaSeq X", 3, 5), ("txg-xenium", "Xenium", 1, 1)]
+    fam = rolled[0]
+    assert fam["family"] == "novaseq-x" and fam["members"] == ["ilmn-novaseq-x", "ilmn-novaseq-x-plus"] and fam["papers_used"] == 3
+    assert fam["example_title"] and fam["vendor"] == "Illumina" and fam["ticker"] == "ILMN"
+    assert rolled[1]["family"] == "" and rolled[1]["members"] == ["txg-xenium"]
+    assert st.distinct_entities_in_window(*w, "instrument") == 3
+    assert st.distinct_entities_in_window(*w, "instrument", families=families) == 2
+    assert st.distinct_entities_in_window(*w, "instrument", families=families, platform_only=True) == 2
+    assert [r["entity_id"] for r in st.instrument_counts(*w, families=families, categories=("sequencer",))] == ["novaseq-x"]
+    # the real gazetteer's family map plugs straight in
+    from litradar.config import DEFAULT_CONFIG_DIR
+    from litradar.extract.gazetteer import Gazetteer
+    gz = Gazetteer.from_yaml(yaml.safe_load(open(DEFAULT_CONFIG_DIR / "instruments.yaml")), "instrument")
+    assert [r["entity_id"] for r in st.instrument_counts(*w, families=gz.families)] == ["novaseq-x", "txg-xenium"]

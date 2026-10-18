@@ -80,6 +80,7 @@ class Mention:
     section: str = ""  # title | abstract | methods | funding | coi | ack | affiliations
     count: int = 1
     snippet: str = ""
+    role: str = ""  # used | reanalysis | mentioned; '' = let the store derive it from section + snippet (store.mention_role)
 
 
 @dataclass

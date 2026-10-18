@@ -15,7 +15,7 @@ COMPANY_TYPES = {"tools", "diagnostics", "synthesis", "ai_bio", "pharma", "cro",
 INSTRUMENT_CATEGORIES = {
     "sequencer.short_read", "sequencer.long_read", "single_cell", "spatial", "proteomics.affinity", "proteomics.ms",
     "library_prep", "synthesis", "pcr", "array", "cytometry", "cryo_em", "imaging", "automation", "cell_engineering",
-    "bioprocess", "qc", "software", "reagent",
+    "bioprocess", "qc", "software", "reagent", "method",
 }
 # analysis / acquisition software names: they must live in a `software` entry, never credit hardware
 SOFTWARE_NAMES = [
@@ -25,7 +25,16 @@ SOFTWARE_NAMES = [
     "Analyst software", "Bionano Access", "AtoMx", "inForm", "xPONENT", "CaseViewer", "FluentControl", "Venus software",
     "MACSQuantify", "CFX Maestro", "Progenesis QI", "Columbus", "Image Studio", "AzureSpot", "ASTRA software", "SoftMax Pro",
     "CLC Genomics Workbench", "Ingenuity Pathway Analysis", "Momentum software", "NovoExpress", "IDEAS software", "MCD Viewer",
+    # AI / foundation models are tools used in papers, never company involvement (moved out of companies.yaml 2026-10-17)
+    "AlphaFold", "AlphaFold 3", "AlphaMissense", "AlphaGenome", "ESMFold", "ESM3", "RoseTTAFold", "RFdiffusion", "Boltz-1", "Chai-1",
+    "BioNeMo", "Parabricks", "BioEmu", "EvoDiff", "ProGen2", "OpenCRISPR", "Chroma model", "Latent-X", "H-optimus-0", "Evo 2", "CELLxGENE",
 ]
+# AI model names that must NOT be company aliases any more (they made Google DeepMind the #1 "company" on a backfill)
+MODEL_NAMES_NOT_COMPANY_ALIASES = ["AlphaFold", "AlphaFold3", "AlphaFold 2", "AlphaGenome", "ESM3", "Chai-1", "BioNeMo", "Parabricks", "BioEmu",
+                                   "EvoDiff", "ProGen2", "OpenCRISPR", "Chroma model", "Latent-X", "H-optimus", "Evo 2", "CELLxGENE", "TranscriptFormer"]
+# the per-vendor "no model named" buckets: one per vendor, named consistently, flagged for the digest / dashboard
+UNSPECIFIED_BUCKETS = {"ilmn-sequencing": "Illumina", "ilmn-novaseq": "NovaSeq", "ilmn-nextseq": "NextSeq", "ont-chemistry": "Oxford Nanopore",
+                       "pacb-hifi": "PacBio", "mgi-dnbseq": "MGI DNBSEQ"}
 # bare company names allowed as instrument aliases: single-platform vendors whose name implies the instrument
 SINGLE_PLATFORM_VENDORS = {
     "oxford nanopore", "sciex", "gatan", "covaris", "evosep", "olink", "luminex", "maxcyte", "vizgen", "lunaphore",
@@ -83,15 +92,73 @@ def _ids(mentions):
 def test_longest_alias_wins_and_no_double_count():
     gz = _instruments()
     hits = {m.entity_id: m for m in gz.find("Libraries were sequenced on a NovaSeq X Plus instrument.")}
-    assert "ilmn-novaseq-x" in hits
+    assert "ilmn-novaseq-x-plus" in hits
+    assert "ilmn-novaseq-x" not in hits  # the base model must not fire on the same span (split 2026-10-17)
     assert "ilmn-novaseq" not in hits  # generic entry must not fire on the same span
-    assert hits["ilmn-novaseq-x"].count == 1
+    assert hits["ilmn-novaseq-x-plus"].count == 1
+    hits = {m.entity_id: m for m in gz.find("Libraries were sequenced on a NovaSeq X instrument.")}
+    assert "ilmn-novaseq-x" in hits and "ilmn-novaseq-x-plus" not in hits and "ilmn-novaseq" not in hits
 
 
 def test_loose_spacing_and_hyphens():
     gz = _instruments()
-    for text in ["NovaSeq-X Plus", "NovaSeqX Plus", "NovaSeq X  Plus"]:
-        assert any(m.entity_id == "ilmn-novaseq-x" for m in gz.find(text)), text
+    for text in ["NovaSeq-X Plus", "NovaSeqX Plus", "NovaSeq X  Plus", "NovaSeq‐X Plus", "NovaSeq‑X Plus"]:
+        assert any(m.entity_id == "ilmn-novaseq-x-plus" for m in gz.find(text)), text
+
+
+def test_unicode_hyphens_are_word_boundaries():
+    gz = _companies()
+    # U+2010 hyphen and U+2011 non-breaking hyphen glue the hospital's name together exactly like the ASCII hyphen
+    for hyphen in ("-", "‐", "‑"):
+        assert not [m for m in gz.find(f"University Medical Center Hamburg{hyphen}Eppendorf, Germany") if m.entity_id == "eppendorf"], repr(hyphen)
+    assert [m for m in gz.find("tubes (Eppendorf, Hamburg, Germany)") if m.entity_id == "eppendorf"]
+    # en and em dashes stay sentence punctuation: a brand glued to one is still a hit
+    assert [m for m in gz.find("reagents from Illumina—the sequencing vendor—were used") if m.entity_id == "illumina"]
+
+
+def test_hits_inside_web_and_email_addresses_are_skipped():
+    from litradar.extract.gazetteer import _inside_address
+
+    gz = _companies()
+    for text in (
+        "gnomAD (https://gnomad.broadinstitute.org/) and GATK (https://github.com/broadinstitute/gatk-sv)",
+        "Morpheus ( https://software.broadinstitute.org/morpheus/ ) was used",
+        "contact: first.last@illumina.com",
+        "see illumina.com for details",
+        "www.illumina.com/products",
+    ):
+        assert not [m for m in gz.find(text) if m.entity_id in ("broad-institute", "illumina")], text
+    # prose next to a URL still counts, once
+    hits = {m.entity_id: m for m in gz.find("DRAGEN (Illumina) output was uploaded to BaseSpace (basespace.illumina.com).")}
+    assert hits["illumina"].count == 1
+    # a missing space after a section number is not a host name; a capitalised word after a full stop is not a TLD
+    assert [m for m in gz.find("2.3.Illumina sequencing was performed") if m.entity_id == "illumina"]
+    assert _inside_address("x Illumina.Interestingly", 2, 10) is False
+    assert _inside_address("x Illumina.in vitro", 2, 10) is True  # lower-case 'in' after the dot reads as a host name (accepted loss)
+    # archive vocabulary strings never carry addresses, and ignore_context skips the check anyway
+    assert gz.find("illumina.com", ignore_context=True)
+
+
+def test_family_fields_and_labels():
+    gz = _instruments()
+    fam = gz.families
+    assert fam["ilmn-novaseq-x"] == fam["ilmn-novaseq-x-plus"] == "novaseq-x"
+    assert fam["pacb-sequel"] == fam["pacb-sequel-ii"] == "sequel"
+    assert {e.id for e in gz.family_members("chromium")} >= {"txg-chromium", "txg-chromium-flex", "txg-multiome", "txg-single-cell-3prime"}
+    assert fam["ont-promethion"] == "promethion" and fam["ilmn-nextseq-1000"] == fam["ilmn-nextseq-2000"] == "nextseq-1000-2000"
+    assert "ilmn-novaseq-6000" not in fam and "txg-xenium" not in fam
+    # the label is the member whose name slugifies to the key, else the member names joined
+    assert gz.family_label("novaseq-x") == "NovaSeq X" and gz.family_label("sequel") == "Sequel"
+    assert gz.family_label("chromium") == "Chromium" and gz.family_label("promethion") == "PromethION"
+    assert gz.family_label("nextseq-1000-2000") == "NextSeq 1000 / NextSeq 2000"
+    from litradar.extract.gazetteer import family_label
+
+    assert family_label("foo", []) == "foo"
+    # a family never changes what matches
+    assert {m.entity_id for m in gz.find("sequenced on a NovaSeq X Plus")} == {"ilmn-novaseq-x-plus"}
+    for raw in _yaml("instruments")["entries"]:
+        if raw.get("family"):
+            assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", raw["family"]), f"{raw['id']}: family {raw['family']!r} is not a slug"
 
 
 def test_ambiguous_alias_requires_context():
@@ -129,7 +196,8 @@ def test_company_domains_and_affiliations():
 
 def test_archive_model_mapping():
     gz = _instruments()
-    assert gz.match_archive_model("Illumina NovaSeq X Plus").id == "ilmn-novaseq-x"
+    assert gz.match_archive_model("Illumina NovaSeq X Plus").id == "ilmn-novaseq-x-plus"
+    assert gz.match_archive_model("Illumina NovaSeq X").id == "ilmn-novaseq-x"
     assert gz.match_archive_model("PacBio Revio").id == "pacb-revio"
     assert gz.match_archive_model("Revio").id == "pacb-revio"
     assert gz.match_archive_model("PromethION").id == "ont-promethion"
@@ -201,7 +269,63 @@ def test_ai_tool_vendors_are_type_software():
     assert types["isomorphic"] == "ai_bio"
     gz = _companies()
     aliases = {a for e in gz.entries if e.id == "google-deepmind" for a in e.aliases}
-    assert "AlphaFold" in aliases and "AlphaFold3" in aliases
+    assert aliases == {"Google DeepMind", "DeepMind", "Google Research"}  # the organisation only; models live in instruments.yaml
+
+
+def test_ai_model_names_are_software_tools_not_company_aliases():
+    """A model name in a paper is tool usage. On an 89,165-paper backfill the AlphaFold aliases alone made Google DeepMind
+    the #1 'company' (2,425 papers, 100 % from AlphaFold/AlphaFold 2/AlphaFold 3 in titles and abstracts)."""
+    companies, instruments = _companies(), _instruments()
+    company_aliases = {a.lower(): e.id for e in companies.entries for a in e.aliases}
+    for name in MODEL_NAMES_NOT_COMPANY_ALIASES:
+        assert name.lower() not in company_aliases, f"{name!r} is still a company alias ({company_aliases.get(name.lower())})"
+    by_alias = {a.lower(): e for e in instruments.entries for a in e.aliases}
+    for name in MODEL_NAMES_NOT_COMPANY_ALIASES:
+        e = by_alias.get(name.lower())
+        assert e is not None and e.category == "software", f"{name!r} must be a software entry in instruments.yaml"
+        assert e.vendor, f"{e.id}: a model entry names its vendor"
+    text = "Structures were predicted with AlphaFold 3 and ESMFold, binders designed with RFdiffusion and scored by Boltz-2 co-folding."
+    assert {m.entity_id for m in instruments.find(text)} == {"deepmind-alphafold", "meta-esm", "rosettafold", "boltz"}
+    assert not [m for m in companies.find(text) if m.entity_id in ("google-deepmind", "evolutionaryscale", "chai-discovery")]
+    # the organisation itself still resolves as a company
+    assert {m.entity_id for m in companies.find("Google DeepMind, London, UK; NVIDIA Corporation, Santa Clara")} >= {"google-deepmind", "nvidia"}
+    assert {m.entity_id for m in instruments.find("Variant calling used NVIDIA Clara Parabricks; embeddings came from BioNeMo.")} == {"nvidia-parabricks", "nvidia-bionemo"}
+
+
+def test_academic_methods_are_not_vendor_platforms():
+    gz = _instruments()
+    e = gz.by_id["slide-seq"]
+    assert e.category == "method" and e.vendor == "open source" and not is_platform(e.category)
+    assert {m.entity_id for m in gz.find("Spatial transcriptomics was performed with Slide-seqV2 on 10-um sections.")} == {"slide-seq"}
+    assert {m.entity_id for m in gz.find("Slide-tags was applied to human cortex nuclei.")} == {"slide-seq"}
+    hits = {m.entity_id for m in gz.find("Sections were processed with the Curio Seeker kit (Curio Bioscience) following the Slide-seq protocol.")}
+    assert hits == {"curio-seeker", "slide-seq"}
+    assert "Slide-seq" not in gz.by_id["curio-seeker"].aliases and "Slide-seqV2" not in gz.by_id["curio-seeker"].aliases
+
+
+def test_unspecified_model_buckets_are_named_consistently():
+    gz = _instruments()
+    for eid, vendor_word in UNSPECIFIED_BUCKETS.items():
+        e = gz.by_id[eid]
+        assert e.granularity == "unspecified", eid
+        assert e.name == f"{vendor_word} (model unspecified)", (eid, e.name)
+    # every entry named "(model unspecified)" is flagged, and every flagged bucket keeps its old display name as an alias
+    for e in gz.entries:
+        if "(model unspecified)" in e.name:
+            assert e.granularity == "unspecified", e.id
+    for old_name, eid in (("Illumina sequencing", "ilmn-sequencing"), ("NovaSeq", "ilmn-novaseq"), ("NextSeq", "ilmn-nextseq"),
+                          ("Oxford Nanopore sequencing", "ont-chemistry"), ("PacBio HiFi", "pacb-hifi"), ("DNBSEQ", "mgi-dnbseq")):
+        assert old_name in gz.by_id[eid].aliases, (eid, old_name)
+    # matching unchanged: the buckets fire on vendor-level phrases and lose to a model name on the same span
+    assert {m.entity_id for m in gz.find("Libraries were sequenced on an Illumina platform (2 x 150 bp).")} == {"ilmn-sequencing"}
+    assert {m.entity_id for m in gz.find("Long reads were generated by Oxford Nanopore sequencing on a PromethION 24.")} == {"ont-chemistry", "ont-promethion"}
+    assert {m.entity_id for m in gz.find("HiFi sequencing (PacBio) produced 20-kb reads.")} == {"pacb-hifi"}
+    assert {m.entity_id for m in gz.find("Sequenced on the DNBSEQ platform (MGI).")} == {"mgi-dnbseq"}
+    assert {m.entity_id for m in gz.find("sequenced on the NovaSeq 6000 platform")} == {"ilmn-novaseq-6000"}
+    flagged = {e.id for e in gz.entries if e.granularity == "unspecified"}
+    assert flagged >= set(UNSPECIFIED_BUCKETS) | {"ilmn-5-base", "ilmn-xleap-sbs", "mgi-coolmps"}
+    for e in gz.entries:
+        assert e.granularity in ("", "unspecified"), (e.id, e.granularity)
 
 
 def test_case_sensitive_aliases_and_context_terms_are_declared_aliases():

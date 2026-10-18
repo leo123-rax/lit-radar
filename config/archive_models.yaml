@@ -103,11 +103,18 @@ entities:
     epmc_terms: ["NovaSeq 6000", "NovaSeq6000"]
   ilmn-novaseq-x:
     vendor: Illumina
-    sra: ["illumina novaseq x", "illumina novaseq x plus"]
-    ena: ["Illumina NovaSeq X", "Illumina NovaSeq X Plus"]
-    epmc_terms: ["NovaSeq X", "NovaSeq X Plus", "NovaSeqX"]
+    sra: ["illumina novaseq x"]
+    ena: ["Illumina NovaSeq X"]
+    epmc_terms: ["NovaSeq X", "NovaSeqX"]
     launch: 2022-09
-    notes: "announced 2022-09-29"
+    notes: "announced 2022-09-29; archive strings keep X and X Plus apart (split 2026-10-17). Europe PMC phrase search is prefix-inclusive, so the 'NovaSeq X' term also counts X Plus papers: the epmc series of this id is the NovaSeq X family, the epmc series of ilmn-novaseq-x-plus is the Plus subset"
+  ilmn-novaseq-x-plus:
+    vendor: Illumina
+    sra: ["illumina novaseq x plus"]
+    ena: ["Illumina NovaSeq X Plus"]
+    epmc_terms: ["NovaSeq X Plus", "NovaSeqX Plus"]
+    launch: 2022-09
+    notes: "announced 2022-09-29 with the NovaSeq X; SRA deposits from 2023-10, ENA vocabulary added 2024-12"
   ilmn-nextseq-550:
     vendor: Illumina
     sra: ["nextseq 500", "nextseq 550"]
