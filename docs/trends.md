@@ -76,9 +76,18 @@ to it (a plain median of the pair would be their average and let it through).
 ### Ranking of risers and fallers
 
 `top_movers(trends, n)` takes every entity with at least `min_count` counts this week, last week or
-on baseline average, and ranks by `z` when it exists, otherwise by the week-over-week change. The
-renderer bolds notable rows. On a cold start the tables therefore show the largest counts, and the
-header states that z-scores are suppressed.
+on baseline average, and ranks it in one of two tiers that are never interleaved: rows with a `z`
+first, ranked by `z`; then rows without one, ranked by the week-over-week change among themselves.
+The scales are not comparable (z-scores move by units, archive experiment counts by thousands a
+week), so when the paper families have a baseline and the archive family does not (or the other way
+round), the tables are z-ranked and the family without a baseline only fills the places left below
+the z-scored movers; the header says so and names `n`. Without this rule a store with 13 weeks of
+paper history and one week of archive history showed twenty archive rows with `z n/a`, ordered by a
+delta the table does not print, and none of the hundreds of notable paper movers it had just
+announced. A row without a `z` takes part only when its family's 'last week' is a complete,
+comparable bucket (see "Movers: two tiers, never a mixed scale" below); otherwise it is left out and
+the header says why. The renderer bolds notable rows. On a cold start (no z-score anywhere) the
+tables are the week-over-week tier alone, and the header states that z-scores are suppressed.
 
 ## Backfills: publication-date weeks, not ingestion
 
@@ -126,16 +135,20 @@ Two things do depend on how the rows arrived, and both are handled:
   reported separately in `history.previous_week_coverage_archive` (from the earliest `runs.since`, never from the
   paper backfill).
 
-## Movers: ranked by z, never by a mixed scale
+## Movers: two tiers, never a mixed scale
 
-`top_movers` ranks by z and leaves out every row whose z is suppressed: an archive model's week-over-week delta is in
-thousands of experiments and a paper z in standard deviations, so a family without a baseline is never ranked by its
-raw delta next to z-scored rows (live, with one week of archive history, the risers and fallers tables were ten
-`n/a`-z archive rows each, ranked by delta, and no paper row could appear). Only when no family has a z at all are the
-tables ranked by week-over-week change, and then only for families whose 'last week' is a complete, comparable bucket
-(`week_over_week_comparable(trends, family)`: fully covered by the runs — or, for papers, by a recorded backfill —
-and not dropped from the baseline as partial or for its source mix). The renderer says which family is left out and
-why; when every family is incomplete the tables are suppressed with the reasons.
+`top_movers` ranks rows with a z first, by z, and rows without one after them, by week-over-week change among
+themselves; the two tiers are never interleaved. An archive model's week-over-week delta is in thousands of
+experiments and a paper z in standard deviations, so a family without a baseline is never ranked by its raw delta
+next to z-scored rows (live, with one week of archive history, the risers and fallers tables were ten `n/a`-z
+archive rows each, ranked by delta, and no paper row could appear): its rows only fill the places left below the
+z-scored movers, and with `n` or more z-scored risers (or fallers) they do not appear at all. Rows without a z take
+part only for families whose 'last week' is a complete, comparable bucket (`week_over_week_comparable(trends,
+family)`: fully covered by the runs — or, for papers, by a recorded backfill — and not dropped from the baseline as
+partial or for its source mix); a delta against a bucket the runs covered for three of seven days is an artefact.
+The header says whether the family without a z is listed below the z-scored rows or left out, and why; when no
+family has a z the tables are the week-over-week tier alone, and when every family is incomplete they are suppressed
+with the reasons.
 
 ## Output structure (`compute_trends`)
 
@@ -254,8 +267,9 @@ trends:
   out as well, so after a single-source backfill the paper z-scores are suppressed until the live
   sources have fed `min_baseline_weeks` weeks; the archive family is unaffected. Set
   `min_source_coverage=0` to compare against every week regardless of source.
-* Movers are ranked by z and rows whose z is suppressed are left out of the tables; in the no-z
-  fallback a family whose 'last week' is incomplete is left out, with the reason printed.
+* Movers come in two tiers, z-scored rows first and rows without a z after them, never interleaved;
+  a family whose 'last week' is incomplete or non-comparable is left out of the second tier, with
+  the reason printed.
 * A `published_doi` back-filled onto a preprint whose journal version was already stored in an
   earlier week is not reported as a conversion (there is no persisted "already reported" state, so
   the alternative would be re-reporting old pairs every time a preprint is re-upserted).

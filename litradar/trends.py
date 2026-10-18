@@ -49,11 +49,12 @@ Definitions
   earlier week is never reported. Inside the digest the conversions are printed once, under the
   top list (``Store.preprint_conversions``, which also adds title matches); the digest passes
   ``conversions_note`` to the renderer, which then prints that pointer instead of its own table.
-* **movers** (``top_movers``) are ranked by z. A row whose z is suppressed (its family has too few
-  comparable baseline weeks) is left out of the tables rather than ranked by its raw week-over-week
-  delta next to z-scored rows (a 10,000-experiment archive delta would outrank every paper z).
-  Only when no family has a z at all are the tables ranked by week-over-week change, and then only
-  for families whose 'last week' is a complete, comparable bucket.
+* **movers** (``top_movers``) come in two tiers that are never interleaved: rows with a z first,
+  ranked by z, then rows without one, ranked by week-over-week change among themselves. A family
+  whose z is suppressed (too few comparable baseline weeks) is never ranked by its raw delta next
+  to z-scored rows (a 10,000-experiment archive delta would outrank every paper z): its rows only
+  fill the places left below the z-scored movers, and only when its 'last week' is a complete,
+  comparable bucket; otherwise they are left out and the renderer says why.
 
 Week length versus the digest window
 ------------------------------------
@@ -731,7 +732,7 @@ def _family(group: str) -> str:
 def week_over_week_comparable(trends: Dict[str, Any], family: str) -> bool:
     """True when 'last week' is a complete, comparable bucket for the family ('papers' | 'archive'): fully covered
     by the runs (or, for papers, a recorded backfill) and not dropped from the baseline as partial or for its
-    source mix. Only such families take part in the week-over-week fallback ranking of `top_movers`."""
+    source mix. Only such families take part in the week-over-week tier of `top_movers` (the rows without a z)."""
     hist = trends.get("history") or {}
     if family == "archive":
         cov = hist.get("previous_week_coverage_archive") or hist.get("previous_week_coverage") or {}
@@ -743,25 +744,27 @@ def week_over_week_comparable(trends: Dict[str, Any], family: str) -> bool:
 
 
 def top_movers(trends: Dict[str, Any], n: int = 10, min_count: Optional[int] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """(risers, fallers): ranked by z; rows whose z is suppressed are left out.
+    """(risers, fallers) in two tiers, never interleaved: rows with a z-score first, ranked by z; then rows without
+    one, ranked by week-over-week change among themselves.
 
     z-scores and raw deltas are not one scale (an archive model's week-over-week delta is in thousands of
     experiments, a paper z in units of standard deviation), so a family without a baseline is never ranked by delta
-    next to z-scored rows. Only when no family has a z at all are the tables ranked by week-over-week change, and
-    then only for families whose 'last week' is a complete, comparable bucket (`week_over_week_comparable`).
-    Entities need at least `min_count` counts this week, last week or on average, so one-paper blips do not crowd
-    out real movement.
+    next to z-scored rows: its rows only fill the places left below every z-scored mover, and with `n` or more
+    z-scored risers (or fallers) they do not appear at all. With no z anywhere (a cold start) the tables are the
+    week-over-week tier alone. A row without a z takes part only when its family's 'last week' is a complete,
+    comparable bucket (`week_over_week_comparable`): a delta against a bucket the runs covered for 3 of 7 days, or
+    one dropped from the baseline as partial or for its source mix, is an artefact, so such rows are left out and
+    the renderer says which family and why. Entities need at least `min_count` counts this week, last week or on
+    average, so one-paper blips do not crowd out real movement.
     """
     mc = trends["thresholds"]["min_count"] if min_count is None else min_count
     rows = [r for r in _all_rows(trends) if max(r["current"], r["previous"], r["mean"] or 0) >= mc]
     scored = [r for r in rows if r["z"] is not None]
-    if scored:
-        risers = sorted([r for r in scored if r["z"] > 0], key=lambda r: (-r["z"], -r["delta"], -r["current"], str(r["id"])))
-        fallers = sorted([r for r in scored if r["z"] < 0], key=lambda r: (r["z"], r["delta"], -r["previous"], str(r["id"])))
-        return risers[:n], fallers[:n]
-    rows = [r for r in rows if week_over_week_comparable(trends, _family(r["group"]))]
-    risers = sorted([r for r in rows if r["delta"] > 0], key=lambda r: (-r["delta"], -r["current"], str(r["id"])))
-    fallers = sorted([r for r in rows if r["delta"] < 0], key=lambda r: (r["delta"], -r["previous"], str(r["id"])))
+    unscored = [r for r in rows if r["z"] is None and week_over_week_comparable(trends, _family(r["group"]))]
+    risers = sorted([r for r in scored if r["z"] > 0], key=lambda r: (-r["z"], -r["delta"], -r["current"], str(r["id"])))
+    risers += sorted([r for r in unscored if r["delta"] > 0], key=lambda r: (-r["delta"], -r["current"], str(r["id"])))
+    fallers = sorted([r for r in scored if r["z"] < 0], key=lambda r: (r["z"], r["delta"], -r["previous"], str(r["id"])))
+    fallers += sorted([r for r in unscored if r["delta"] < 0], key=lambda r: (r["delta"], -r["previous"], str(r["id"])))
     return risers[:n], fallers[:n]
 
 
@@ -869,8 +872,8 @@ _FAMILY_LABEL = {"papers": "papers", "archive": "archive records"}
 
 
 def _wow_reason(trends: Dict[str, Any], family: str) -> Tuple[Tuple[Any, ...], str]:
-    """Why a family is left out of the week-over-week fallback ranking: (grouping key, phrase without the family
-    label), or ((), '') when it takes part."""
+    """Why a family's rows without a z are left out of the movers tables (the week-over-week tier): (grouping key,
+    phrase without the family label), or ((), '') when it takes part."""
     hist = trends["history"]
     prev = trends["previous_week"]
     cov = hist.get("previous_week_coverage_archive" if family == "archive" else "previous_week_coverage") or {}
@@ -937,8 +940,16 @@ def render_trends_markdown(
         md.append(f"_Fewer than {base['min_weeks_for_z']} {comparable}weeks of history: z-scores are suppressed and movers are ranked by week-over-week change._\n")
     elif not hist["z_available_papers"] or not hist["z_available_archive"]:
         missing = "paper" if not hist["z_available_papers"] else "archive"
-        md.append(f"_Fewer than {base['min_weeks_for_z']} {comparable if missing == 'paper' else ''}weeks of {missing} history: z-scores for that family "
-                  "are suppressed, and its rows are left out of the movers tables below (ranked by z)._\n")
+        fam = "papers" if missing == "paper" else "archive"
+        lead = (f"_Fewer than {base['min_weeks_for_z']} {comparable if missing == 'paper' else ''}weeks of {missing} history: z-scores for that family "
+                "are suppressed")
+        if week_over_week_comparable(trends, fam):
+            md.append(lead + ". Its rows (z n/a) are listed after every z-scored row in the tables below, ordered by week-over-week change "
+                      f"among themselves, so they appear only when fewer than {top_n} z-scored risers or fallers qualify._\n")
+        else:
+            why = _wow_reason(trends, fam)[1]
+            md.append(lead + ", and its rows are left out of the movers tables below (ranked by z)"
+                      + (f": {why} for {_FAMILY_LABEL[fam]}" if why else "") + "._\n")
     tot = trends["totals"]
     md.append(f"**Corpus:** {_fmt_total(tot['papers'])} papers · {_fmt_total(tot['archive_experiments'])} archive experiments.\n")
     notable = trends["notable"]
