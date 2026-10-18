@@ -159,10 +159,11 @@ successive runs that covered it.
    snapshot is never replaced by a 7-day one. No asset yet means a fresh start (first-run window).
 2. **Update.** `python -m litradar update --overlap-days 2 --max-days 14`, with optional
    `since` and `sources` from `workflow_dispatch` inputs for repairs.
-3. **Upload.** `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA integrity_check`, `zstd -19`, then
-   `gh release upload db-latest radar.sqlite.zst --clobber`. This also runs after a failed update
-   (SQLite stays consistent and upserts are idempotent, so partial progress is kept) but never
-   after a failed restore.
+3. **Upload.** FTS optimize + `VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)`, then `PRAGMA
+   integrity_check`: anything other than `ok` fails the step before `zstd -19` and
+   `gh release upload db-latest radar.sqlite.zst --clobber`, so `db-latest` keeps the previous
+   snapshot. This step also runs after a failed update (SQLite stays consistent and upserts are
+   idempotent, so partial progress is kept) but never after a failed restore.
 4. **Artifact.** `digests/_work/last_update.json` is kept for 30 days as the artifact
    `last_update`, including on failure (the update command writes a failure summary).
 5. **Freshness check.** `python -m litradar status` ends the job; its exit code is the job's.

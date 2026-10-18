@@ -123,9 +123,15 @@ older than a few months into monthly counts; that is an ordinary SQLite operatio
 file.
 
 **Safety rails.** The radar job refuses to continue if a restored snapshot fails `PRAGMA
-integrity_check`. The publish job refuses to overwrite `db-latest` with a file less than half the
-size of the published one. In both cases the run fails loudly and the new file stays attached to the
-run as the `radar-state` artifact, so nothing is lost while you look.
+integrity_check`. After the run, the same check is enforced on the database that is about to be
+published: a result other than `ok` (or a file SQLite cannot read) fails the radar job before the
+file is compressed, and the daily update's upload step fails the same way before `gh release upload`,
+so a damaged database never replaces `db-latest` or the month's `db-YYYY-MM` roll-back point. The
+publish job then decompresses the incoming file and checks it once more (the last gate before
+`--clobber`), and refuses to overwrite `db-latest` with a file less than half the size of the
+published one. In every case the run fails loudly and the published releases keep the previous
+snapshot; when the publish job refuses, the new file also stays attached to the run as the
+`radar-state` artifact, so nothing is lost while you look.
 
 **Rolling back.** Download the asset from the monthly release you want, then re-publish it:
 
@@ -250,5 +256,7 @@ updates:
 | `.zst` asset grows by megabytes on a day with few new papers | the FTS optimize/VACUUM step did not run or was skipped; check the "Upload the database snapshot" log for `FTS optimize skipped` and `ok` (section 4, size expectations) |
 | `llm` run shows "LLM-scored: 0" | `ANTHROPIC_API_KEY` missing, or the provider rejected the model name in `LITRADAR_LLM_MODEL` |
 | Publish job fails with "new snapshot is N bytes, the published one is M bytes" | the run produced a much smaller database (usually a source outage or a wiped restore); inspect the `radar-state` artifact, then re-run or roll back (section 4) |
-| Radar job fails `integrity_check` | the published snapshot is damaged; roll `db-latest` back from the newest `db-YYYY-MM` (section 4) |
+| Radar job fails `integrity_check` at "Restore the database" | the published snapshot is damaged; roll `db-latest` back from the newest `db-YYYY-MM` (section 4) |
+| Radar job fails `integrity_check` at "Optimize, checkpoint, verify and compress", or the daily upload step fails with "database failed integrity_check after the update" | the run's own database was damaged (runner disk, an interrupted write) and was not published; the releases still hold the previous snapshot, so re-run the workflow |
+| Publish job fails with "incoming snapshot failed integrity_check" | the artifact round-trip delivered a damaged file; nothing was overwritten. Inspect the `radar-state` artifact, then re-run |
 | Digest not committed | you are in a fork; set the variable `LITRADAR_COMMIT_DIGESTS=true` if you want it committed |
