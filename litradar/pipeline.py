@@ -672,7 +672,17 @@ class Pipeline:
         emails = (p.extra or {}).get("emails", []) + [a.email for a in p.authors if a.email]
         for e in self.companies.match_domains(emails):
             mentions.append(Mention(p.id, "company", e.id, e.name, e.parent, e.ticker, "author-email", "affiliations", 1, "author e-mail domain"))
+        # OpenAlex resolves raw affiliation strings to ROR institutions and the step is noisy (an ORCID URL typed as a
+        # social-media company, "Mivax" resolved to "Mabvax"), so a company-typed institution only counts when the raw
+        # affiliation of an author who carries it corroborates the name (sources.openalex.affiliation_corroborates).
+        # Authors stored without institutions (older rows) or without raw strings leave nothing to check against and
+        # are taken at face value.
         for inst_name in (p.extra or {}).get("company_institutions", []) or []:
+            carriers = [a.affiliation for a in p.authors
+                        if any(isinstance(i, dict) and i.get("type") == "company" and i.get("name") == inst_name for i in (a.institutions or []))]
+            if carriers and not openalex_src.affiliation_corroborates(inst_name, carriers):
+                self.counts["company_institutions.uncorroborated"] += 1
+                continue
             hits = self.companies.find(inst_name)
             if hits:
                 h = hits[0]

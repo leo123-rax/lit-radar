@@ -51,7 +51,18 @@ ASCII hyphen, both as separators inside an alias (`NovaSeq‐X Plus` matches) an
 dashes are deliberately left out: they are sentence punctuation (`Illumina—the vendor—`).
 
 **Sections.** Instruments are searched in title, abstract and Methods; companies additionally in funding, competing
-interests, acknowledgements and affiliations, and through author e-mail `domains`. Archive instrument strings
+interests, acknowledgements and affiliations, and through author e-mail `domains`. OpenAlex's institution typing
+(`authorships[].institutions[].type == "company"`) adds an `affiliations` mention as well -- a gazetteer hit when the
+name resolves, else an `unlisted:<slug>` candidate -- but only when the raw affiliation string of an author who carries
+the institution corroborates the resolved name: one distinctive token of it (legal forms, sector words and the
+appended country do not count) must start a word there (`4Genentech, South San Francisco` supports `Genentech`,
+`Amazon Web Services` supports `Amazon (United States)`), or the whole name when it has no distinctive token
+(`Discovery Laboratories`). OpenAlex's ROR resolution is noisy -- an ORCID URL has been typed as a social-media
+company, `Mivax Therapeutics` resolved to the unrelated `Mabvax Therapeutics` -- and on the 2026-10-18 corpus the check
+dropped 268 of 3,724 such mentions, 267 of them `unlisted:` and the one gazetteer hit a `C2i Genomics` address resolved
+to BGI Genomics. Authors without raw strings or without stored institutions are taken at face value
+(`sources.openalex.affiliation_corroborates`; the run counter is `company_institutions.uncorroborated`). `unlisted:`
+ids are listed as candidates and never scored (docs/ranking.md). Archive instrument strings
 (SRA/ENA `instrument_model`) are mapped with `match_archive_model`, which ignores context because the input is a
 controlled vocabulary: `Revio`, `Sequel`, `MinION` map on their own even though prose requires context for them.
 
@@ -132,9 +143,14 @@ city is Wuxi), `the Broad`, `Janssen` (a surname in citations), `Lilly` (a given
 Three practical rules follow:
 
 1. **Dictionary sweep.** `test_dictionary_words_and_short_tokens_are_gated` loads `/usr/share/dict/words` and fails
-   on any alias that is a plain dictionary word (<= 10 letters, hyphens/spaces/dots removed) or a 2-4 letter token
-   unless it is case-sensitive, belongs to a `context_required` entry, or is auto-ambiguous. Tokens that contain a
-   digit are exempt because the digit sequence is preserved whatever the case flag (`DS-11`, `Gen5`, `ZEN 3`).
+   on any alias that is a plain dictionary word (<= 10 letters, hyphens/spaces/dots removed), a regular inflection of
+   one, or a 2-4 letter token, unless it is case-sensitive, belongs to a `context_required` entry, or is
+   auto-ambiguous. The inflection check exists because the dictionary lists `smart` but not `smarter`: `SMARTer`
+   (Takara) passed the sweep and matched the comparative in 23 of 30 stored hits, and `Latitude S` (Gatan) read
+   `latitudes` through the optional separator. It is deliberately narrow (`-s`/`-es`/`-ed`/`-er`/`-est`/`-ing`/`-ies`
+   with minimum stem lengths, no undoubling of consonants) so that `Bruker`, `Cellares`, `CoolLED` and `GenePS` pass.
+   Tokens that contain a digit are exempt because the digit sequence is preserved whatever the case flag (`DS-11`,
+   `Gen5`, `ZEN 3`).
 2. **Phrase aliases rescue recall.** Gating `Xenium` costs the bare title mention; `Xenium spatial`, `Xenium
    platform`, `Xenium assay` ... are plain aliases that need no context, so the common forms still fire.
 3. **COI vocabulary.** Gated pharma names (`Bayer`, `GSK`, `BMS`, `MSD`, `Vertex`, `Kite`, `Lilly`, `Biogen`,

@@ -7,6 +7,7 @@ coverage by ISSN. Abstracts come as an inverted index and are rebuilt here.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
@@ -202,3 +203,59 @@ def to_paper(w: Dict[str, Any]) -> Paper:
 
 def or_join(values: Iterable[str]) -> str:
     return "|".join(v for v in values if v)
+
+
+# ---- institution corroboration ------------------------------------------------------------------------------------
+# OpenAlex resolves raw affiliation strings to ROR institutions and the step is noisy: an ORCID URL has been typed as
+# a social-media company, "Mivax Therapeutics" resolved to the unrelated "Mabvax Therapeutics", "Immunology Discovery
+# Research, AbbVie ..." to "Discovery Laboratories". Before a company-typed institution becomes an affiliation mention
+# (Pipeline.extract), the author's own affiliation text has to support the resolved name. These tokens carry no
+# identity and never count as support: legal forms, sector words, generic English, and the country OpenAlex appends
+# to display names ("Illumina (United States)", which is stripped before tokenising).
+GENERIC_INSTITUTION_TOKENS = frozenset({
+    # legal forms
+    "inc", "incorporated", "ltd", "llc", "llp", "corp", "corporation", "company", "gmbh", "plc", "pty", "pte", "spa", "srl",
+    "limited", "holdings", "holding", "group",
+    # sector words
+    "technologies", "technology", "tech", "therapeutics", "pharmaceuticals", "pharmaceutical", "pharma", "biopharma",
+    "biopharmaceutical", "biopharmaceuticals", "biosciences", "bioscience", "biotech", "biotechnology", "biotechnologies",
+    "bio", "biologics", "biomedical", "laboratories", "laboratory", "labs", "lab", "research", "sciences", "science",
+    "scientific", "medical", "medicine", "health", "healthcare", "systems", "solutions", "diagnostics", "genomics",
+    "genetics", "life", "institute", "institutes", "center", "centre", "discovery", "development", "innovation",
+    "innovations", "services", "industries", "industrial", "energy", "digital",
+    # generic English and geography that survives the parenthetical strip
+    "the", "and", "for", "new", "applied", "advanced", "general", "international", "global", "national", "american",
+    "european", "united", "states", "kingdom", "usa", "china",
+})
+_TRAILING_PARENTHETICAL = re.compile(r"\s*\([^()]*\)\s*$")
+_INSTITUTION_TOKEN = re.compile(r"[a-z][a-z0-9]*|\d+[a-z][a-z0-9]*")
+
+
+def institution_tokens(name: str) -> List[str]:
+    """Distinctive lower-case tokens of an OpenAlex institution display name: the trailing "(Country)" is dropped, so
+    are generic tokens and anything shorter than three characters. "Mabvax Therapeutics (United States)" -> ["mabvax"];
+    "Thermo Fisher Scientific (United States)" -> ["thermo", "fisher"]; "Discovery Laboratories (United States)" -> []."""
+    core = _TRAILING_PARENTHETICAL.sub("", name or "").lower()
+    return [t for t in _INSTITUTION_TOKEN.findall(core) if len(t) >= 3 and t not in GENERIC_INSTITUTION_TOKENS]
+
+
+def affiliation_corroborates(institution: str, affiliations: Iterable[Optional[str]]) -> bool:
+    """True when the raw affiliation strings support OpenAlex's resolution of them to `institution`.
+
+    One distinctive token of the institution name has to start a word in the raw text: "4Genentech, South San
+    Francisco" supports "Genentech" (the superscript glued to the name is not a letter), "Amazon Web Services"
+    supports "Amazon (United States)", "Thermo Fisher, Waltham" supports "Thermo Fisher Scientific (United States)".
+    A name without a distinctive token ("Discovery Laboratories") must appear whole. Empty raw strings leave nothing to
+    check against, and the institution is accepted as typed."""
+    raws = [r for r in affiliations if r]
+    if not raws:
+        return True
+    low = "\n".join(raws).lower()
+    tokens = institution_tokens(institution)
+    if tokens:
+        return any(re.search(r"(?<![a-z])" + re.escape(t), low) for t in tokens)
+    words = re.findall(r"[a-z0-9]+", _TRAILING_PARENTHETICAL.sub("", institution or "").lower())
+    if not words:
+        return False
+    pattern = r"(?<![a-z0-9])" + r"[^a-z0-9]*".join(re.escape(w) for w in words) + r"(?![a-z0-9])"
+    return re.search(pattern, low) is not None
