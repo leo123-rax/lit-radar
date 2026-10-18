@@ -54,7 +54,8 @@ from . import __version__
 from . import query as Q
 from .store import FTS_COLUMNS, SEARCH_SORTS, Store
 
-# FTS_COLUMNS is what `in=` accepts (the gazetteer's `mentions` column included); SEARCH_SORTS is what `sort=` accepts
+# FTS_COLUMNS comes from the store (the searchable columns, the gazetteer's `mentions` column included; docs/store.md
+# section 2): one list, not a copy, and what `in=` accepts. SEARCH_SORTS is what `sort=` accepts.
 ENTITY_KINDS: Tuple[str, ...] = ("instrument", "company")
 MAX_LIMIT = 200  # per-paper endpoints (/search, /top, /entities)
 MAX_COUNT_LIMIT = 500  # aggregate endpoints (/instruments, /companies, /archive, /news)
@@ -829,7 +830,7 @@ code { font-size: .88em; background: var(--line); padding: 0 4px; border-radius:
 <body>
 <main>
 <h1>Literature radar search</h1>
-<p class="sub" id="stats">Full-text search over stored papers: titles, abstracts, Methods, funding, competing interests, affiliations and open-access bodies, plus the gazetteer's attributions (mentions: entity names, matched aliases and ids).</p>
+<p class="sub" id="stats">Full-text search over stored papers: titles, abstracts, Methods, funding, competing interests, affiliations, open-access bodies and the entities attributed to each paper (<code>mentions</code>: names, aliases and ids from the gazetteer).</p>
 <form id="f" autocomplete="off">
   <input id="q" type="search" placeholder='e.g. methods:Xenium  or  "spatial transcriptomics" NEAR(single-cell)  or  NovaSeq*' autofocus>
   <select id="since" title="published since">

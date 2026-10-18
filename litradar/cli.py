@@ -807,16 +807,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         "search",
         help="full-text search of stored papers",
         description="Full-text search (SQLite FTS5, porter stemming) over title, abstract, Methods, funding, competing interests, "
-                    "affiliations and open-access body text. A plain multi-word query is searched as a PHRASE "
+                    "affiliations, open-access body text and the derived `mentions` column (entity names, matched aliases and "
+                    "ids of each paper's gazetteer mentions). A plain multi-word query is searched as a PHRASE "
                     "(\"liquid biopsy\" = those words adjacent, in order); anything using FTS5 syntax is passed through "
                     "as typed: methods:Xenium, \"exact phrase\", Xenium OR Visium, Xenium NOT Visium, NovaSeq*, NEAR(a b, 10), "
-                    "{methods coi}: Illumina. Note: matching is on stored text, so a product the gazetteer attributed through "
-                    "an alias is found by `litradar entity <id>`, not necessarily by its name here. Full syntax: docs/search.md.",
+                    "{methods coi}: Illumina. Results put research papers first (letters, editorials and dataset / software "
+                    "deposits follow, each tagged with why) and order each group by --sort: relevance (default; title and abstract "
+                    "weighted), score or date; rows that share a title fold into one unless --keep-duplicates. "
+                    "Note: a product the gazetteer attributed through an alias (\"Next GEM\" -> Chromium) "
+                    "is found by its canonical name through the mentions column; `--in mentions` restricts to attributed papers "
+                    "and `litradar entity <id>` gives the matcher's distinct-paper count. Full syntax: docs/search.md.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("query")
     p.add_argument("--since", type=Q.since_arg, help=since_help)
-    p.add_argument("--in", dest="in_sections", help="restrict to columns: title,abstract,methods,funding,coi,affiliations,body,mentions "
+    p.add_argument("--in", dest="in_sections", help=f"restrict to a comma-separated subset of the columns {', '.join(FTS_COLUMNS)} "
                                                     "(mentions = the gazetteer's attributions: entity names, matched aliases and ids, not paper text)")
     p.add_argument("--limit", type=_positive_int, default=50, help="rows to print (default 50)")
     p.add_argument("--sort", choices=SEARCH_SORTS, default="relevance",

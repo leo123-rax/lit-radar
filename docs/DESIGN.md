@@ -1,7 +1,8 @@
 # lit-radar: design
 
-*Architecture dossier. State of the code and of the research as of 2026-10-17. Every live-measured
-number carries that date unless another is given; prices are list prices read from the vendor's own
+*Architecture dossier. The research state is as of 2026-10-17; the statements about what is wired,
+shipped and persisted were brought level with the code on 2026-10-18 (the commit history carries the
+day-by-day record). Every live-measured number carries its date; prices are list prices read from the vendor's own
 pages on that date. Companion documents: `SOURCES.md` (per-adapter catalog), `SUBSCRIPTIONS.md`
 (what a reader might pay for), `RESEARCH.md` (how the evidence was produced and checked),
 `ROADMAP.md` (what comes next), `LEGAL.md` (storage and access policy).*
@@ -44,14 +45,15 @@ or "non-commercial" door is treated as closed by default (see `LEGAL.md`).
  │ papers & preprints                      │     │ JATS section parser: Methods, funding,  │
  │   bioRxiv/medRxiv API, Europe PMC REST, │     │   COI, acknowledgements, data           │
  │   Crossref by ISSN, OpenAlex (keyed),   │ ──> │   availability, authors, e-mails, body  │
- │   arXiv q-bio, journal/subject RSS      │     │ gazetteer matcher: instruments,         │
- │ archives (census)                       │     │   companies, context rules              │
- │   NCBI SRA, ENA; GEO, PRIDE,            │     │ archive-model map (controlled vocab,    │
- │   CELLxGENE (built, not wired)          │     │   no context rules)                     │
- │ news & filings                          │     │ company gazetteer over headlines        │
- │   RSS, press wires, SEC 8-K Atom,       │     │                                         │
- │   Google News (opt-in pending);         │     │                                         │
- │   CT.gov, NIH RePORTER, openFDA (built) │     │                                         │
+ │   arXiv q-bio, journal/subject RSS,     │     │ gazetteer matcher: instruments,         │
+ │   ChinaXiv, SciELO, KCI (J-STAGE opt-in)│     │   companies, context rules              │
+ │ archives (census)                       │     │ archive-model map (controlled vocab,    │
+ │   NCBI SRA, ENA, GEO, PRIDE, CELLxGENE, │     │   no context rules)                     │
+ │   NGDC GSA + GSA-Human                  │     │ company gazetteer over headlines        │
+ │ news, filings & signals                 │     │                                         │
+ │   GDELT, RSS, press wires, SEC 8-K Atom,│     │                                         │
+ │   Google News (opt-in, off by default); │     │                                         │
+ │   CT.gov, NIH RePORTER, openFDA         │     │                                         │
  └─────────────────────────────────────────┘     └─────────────────────────────────────────┘
                                                                      │
                                                                      v
@@ -62,8 +64,8 @@ or "non-commercial" door is treated as closed by default (see `LEGAL.md`).
  │   committed to git                      │ <── │ heuristic score 0-10 with reasons       │
  │ SQLite + FTS5: litradar search,         │     │ optional LLM rubric (Claude, Batches),  │
  │   litradar entity, litradar timeseries  │     │   blend 0.4 / 0.6                       │
- │ planned: dashboard, Parquet export,     │     │ citation enrichment (Semantic Scholar)  │
- │   DuckDB                                │     │ data policy: full / facts_only / none   │
+ │ static dashboard (GitHub Pages),        │     │ citation enrichment (Semantic Scholar)  │
+ │   Parquet export (DuckDB-ready)         │     │ data policy: full / facts_only / none   │
  └─────────────────────────────────────────┘     └─────────────────────────────────────────┘
 ```
 
@@ -72,10 +74,13 @@ objects and does no matching or scoring. Adapters share one HTTP client (`litrad
 carries an honest User-Agent with the operator's contact address, paces every host at or below its
 published limit, retries with exponential backoff, honours `Retry-After`, and stops calling a host
 for the rest of the run after two consecutive HTTP 429s (so one misbehaving loop cannot get the
-operator's address blocked). Nine adapters are wired into the weekly run today (bioRxiv/medRxiv,
-Europe PMC, Crossref, OpenAlex, arXiv, RSS, SRA, ENA, SEC 8-K via RSS); seven more are built, tested
-offline and documented but not yet wired (GEO, PRIDE, CELLxGENE, ClinicalTrials.gov, NIH RePORTER,
-openFDA, Semantic Scholar). Wiring them is the first roadmap item.
+operator's address blocked). Every adapter in `litradar/sources/` except J-STAGE runs in the weekly
+pass by default (`sources:` in `config/radar.yaml`; `litradar run --sources` lists the ids): papers
+from bioRxiv/medRxiv, Europe PMC, Crossref, OpenAlex, arXiv, RSS, ChinaXiv, SciELO and KCI; archive
+censuses from SRA, ENA, GEO, PRIDE, CELLxGENE, GSA and GSA-Human; signals from NIH RePORTER,
+ClinicalTrials.gov and openFDA; news from GDELT, RSS/press wires and SEC 8-K; citation enrichment
+from Semantic Scholar after the upserts and before ranking. J-STAGE is built and opt-in because of
+its API terms, Google News RSS because of its `robots.txt` (`LEGAL.md`).
 
 **Extract** pulls the sections that matter out of JATS XML (Methods, funding, competing interests,
 acknowledgements, data availability, authors with affiliations and e-mail addresses) and runs the
@@ -87,7 +92,8 @@ heuristic, optionally sends the shortlist to a language model with a fixed rubri
 output, and decides per record how much text may be kept (`policy.py`).
 
 **Deliver and search** renders the digest, sends it, commits it, and leaves everything in SQLite
-with an FTS5 index over title, abstract, Methods, funding, COI, affiliations and body.
+with an FTS5 index over title, abstract, Methods, funding, COI, affiliations, body and a derived
+`mentions` column (entity names, aliases and ids attributed by the gazetteer; `docs/store.md`).
 
 The pipeline is idempotent: re-running a window updates records in place, and each stage logs counts
 so the digest's coverage footer can say exactly what was pulled, what had full text, what was scored
@@ -117,9 +123,9 @@ is named.
 |---|---|---|---|---|---|
 | **NCBI SRA via E-utilities** `esearch db=sra …[PDAT]` → `esummary` (500/page) | experiment-level census: `ExpXml` carries `<Platform instrument_model="…">`, study, organism, library strategy, submitting centre | free; 3 req/s, **10 req/s with a free key** (one legal-note table said "3 with key"; wrong) | **121,381 experiments** released 2026-10-10..17 = ~243 `esummary` pages, ~190 MB, ~2.7 min | $0 | Same-day freshness. The instrument model **is** searchable server-side as `"instrument <model>"[Properties]` (e.g. `"instrument illumina novaseq x plus"[Properties]` → 372,570 all-time), which the time-series command uses; `[Platform]` indexes only the family. A parsing bug (double HTML-unescape) lost accession/study/strategy on 5,755 of 121,381 records (4.7%) in the first live run; fix specified. Parallel bursts above 3 req/s draw 429s and trip the circuit breaker, which would silently truncate the census, so SRA and GEO never run concurrently. |
 | **ENA Portal API** `/search?result=read_experiment&query=first_public>=…` and `/count?field=instrument_model` | ENA- and DDBJ-submitted experiments (ERX/DRX) with a clean controlled vocabulary; one-call distribution | free | 1,807 ERX/DRX experiments in the test week | $0 | **Not a steady "~10-day" mirror lag**: through early October ENA published NCBI-origin SRR runs 1–2 days after NCBI, then the SRR import stalled on 2026-10-07 while ERR/DRR kept flowing, so on the probe day the gap was 10 days and growing. Design: query NCBI directly for freshness, run ENA with a 14-day lag for the mirrored records, and de-duplicate on study accession. Vocabulary strings carry no vendor prefix (`Revio`, `PromethION`, `Element AVITI`, `UG 100`, `Onso`), and `Illumina NovaSeq X` and `Illumina NovaSeq X Plus` are two values of comparable size (373,566 vs 373,878 runs); the `controlledVocab` endpoint is stale. The upper date bound is exclusive in the current query; fix specified. `read_experiment` returns one row per run, so logged counts are inflated until de-duplicated. |
-| **NCBI GEO** (`db=gds`, `GSE[ETYP] AND …[PDAT]`, GPL title lookup) | study-level census: Series × Platform, platform title → instrument model | free; same E-utilities limits | 516 Series / 574 Series×Platform / 138 platforms in the test week; 9 requests | $0 | Built, not yet wired. GSE DocSums carry no platform title, so a batched GPL lookup is required (GPL uid = 100000000 + number, an observed convention with a fallback). GPL34284 is not the only human NovaSeq X Plus platform (GPL37515 duplicates it; mixed-organism GPLs exist); no GPL mentions Visium. GEO under-represents long-read usage (most genome data goes straight to SRA/ENA). A consortium can release a hundred Series in one day (104 of 154 PacBio Series in 2022 landed on 2022-12-04), so read release-day spread before calling a jump a trend. |
-| **PRIDE Archive v3** `/search/projects?filter=publicationDate==YYYY-MM-DD` and `/facet/projects` | proteomics datasets per declared mass spectrometer (PSI-MS CV terms) | free; no published limit | 513 datasets / 597 instrument declarations / 67 instrument names in 30 days; 7 requests per week | $0 | Built, not yet wired. Date ranges are not supported in the filter grammar (one request per day); `pageSize` capped at 100. 552 of 597 declarations mapped to a vendor with the current gazetteer (Thermo Fisher 413, Bruker 113, Danaher/SCIEX 21, Waters 5). ProteomeXchange's `GetDataset?action=list` dump (57,301 datasets across six repositories, ~35 MB, invalid UTF-8 bytes) is the cross-repository alternative. |
-| **CZ CELLxGENE Discover** `/curation/v1/datasets?visibility=PUBLIC` | single-cell and spatial **assay** (EFO term) behind curated datasets: Chromium chemistry versions, Visium, Slide-seq, Parse, BD Rhapsody, Curio | free; no published limit (client paces 1 s); one ~10 MB request | 2,243 public datasets all-time; 3–5 per week; 27 datasets / 44 assay rows in 60 days | $0 | Built, not yet wired. Records the assay, never the sequencer; curation lags papers by weeks to months, so the 60-day window is the useful cadence. Multi-assay datasets count once per assay (23% list more than one). |
+| **NCBI GEO** (`db=gds`, `GSE[ETYP] AND …[PDAT]`, GPL title lookup) | study-level census: Series × Platform, platform title → instrument model | free; same E-utilities limits | 516 Series / 574 Series×Platform / 138 platforms in the test week; 9 requests | $0 | Wired (`sources.geo`; rows labelled series × platform in the census table). GSE DocSums carry no platform title, so a batched GPL lookup is required (GPL uid = 100000000 + number, an observed convention with a fallback). GPL34284 is not the only human NovaSeq X Plus platform (GPL37515 duplicates it; mixed-organism GPLs exist); no GPL mentions Visium. GEO under-represents long-read usage (most genome data goes straight to SRA/ENA). A consortium can release a hundred Series in one day (104 of 154 PacBio Series in 2022 landed on 2022-12-04), so read release-day spread before calling a jump a trend. |
+| **PRIDE Archive v3** `/search/projects?filter=publicationDate==YYYY-MM-DD` and `/facet/projects` | proteomics datasets per declared mass spectrometer (PSI-MS CV terms) | free; no published limit | 513 datasets / 597 instrument declarations / 67 instrument names in 30 days; 7 requests per week | $0 | Wired (`sources.pride`; own sub-table in the digest). Date ranges are not supported in the filter grammar (one request per day); `pageSize` capped at 100. 552 of 597 declarations mapped to a vendor with the current gazetteer (Thermo Fisher 413, Bruker 113, Danaher/SCIEX 21, Waters 5). ProteomeXchange's `GetDataset?action=list` dump (57,301 datasets across six repositories, ~35 MB, invalid UTF-8 bytes) is the cross-repository alternative. |
+| **CZ CELLxGENE Discover** `/curation/v1/datasets?visibility=PUBLIC` | single-cell and spatial **assay** (EFO term) behind curated datasets: Chromium chemistry versions, Visium, Slide-seq, Parse, BD Rhapsody, Curio | free; no published limit (client paces 1 s); one ~10 MB request | 2,243 public datasets all-time; 3–5 per week; 27 datasets / 44 assay rows in 60 days | $0 | Wired (`sources.cellxgene`; own sub-table in the digest). Records the assay, never the sequencer; curation lags papers by weeks to months, so the 60-day window is the useful cadence. Multi-assay datasets count once per assay (23% list more than one). |
 | Planned: **DDBJ Search API** (`/search/api/facets/sra-experiment?…&facets=platform,instrumentModel`) | INSDC-wide census with a 1–4-day lag (99.6% of NCBI's count for a 10-day-old week) and China-vendor platform codes (`GENEMIND` 1,623 experiments 2026 YTD, `SALUS` 72) | free | — | $0 | Recommended replacement for ENA as the primary INSDC view; see ex-US research note. |
 
 ### 3.3 Researchers, grants, trials
@@ -128,9 +134,9 @@ is named.
 |---|---|---|---|
 | **OpenAlex authors/topics** | author ids, `counts_by_year`, `summary_stats`, topic membership; works by author/topic/keyword | free key | Only ~1 in 10 profiles carries an ORCID; split and merged profiles are common (one 38,629-work merged profile seen). `/autocomplete/authors` is a display-name prefix match and missed initial-bearing names; resolve by `filter=orcid:` or topic-filtered `/authors?search=`. |
 | **ORCID public API** | identity bridge; expanded search with `affiliation-org-name` | free; 12 req/s, 100k reads/day | `Fei Chen` + `Broad Institute` resolved to exactly one record; bare common CJK names return hundreds to thousands (4,254 "Wei Wang"). |
-| **NIH RePORTER v2** `POST /v2/projects/search` | S10 shared-instrumentation awards (installed-base signal), SBIR/STTR, keyword hits | free, no key; ≤1 req/s; limit 500, offset ≤14,999 | Built, not yet wired. Records are added in a Saturday weekly batch (three consecutive weeks observed; not officially stated). Camel-case criteria keys are silently dropped and the query becomes "everything". 10 of 57 S10 titles in a quarter named a gazetteer instrument. |
-| **ClinicalTrials.gov v2** `GET /api/v2/studies` with Essie filters | newly posted studies whose sponsor, collaborator or intervention names a watched company or assay | free, no key; no official rate limit (~50/min is third-party) | Built, not yet wired. Vendors rarely appear as sponsor or intervention in a two-week window (5 hits); free-text search doubles recall at the cost of precision. |
-| **Semantic Scholar Graph** `POST /paper/batch` (500 DOIs) | citation count, influential citations, TL;DR for stored papers | free key **required in practice** (keyless pool answered 429 on most calls) | Built, not yet wired. Positional batch mapping (merged preprint/journal records echo only one DOI). Fresh papers return 0 citations; the signal is velocity on papers weeks to months old. Licence for commercial use not read; check before relying on it. |
+| **NIH RePORTER v2** `POST /v2/projects/search` | S10 shared-instrumentation awards (installed-base signal), SBIR/STTR, keyword hits | free, no key; ≤1 req/s; limit 500, offset ≤14,999 | Wired (`sources.nih_reporter`; digest section "Grants, trials and clearances"). Records are added in a Saturday weekly batch (three consecutive weeks observed; not officially stated). Camel-case criteria keys are silently dropped and the query becomes "everything". 10 of 57 S10 titles in a quarter named a gazetteer instrument. |
+| **ClinicalTrials.gov v2** `GET /api/v2/studies` with Essie filters | newly posted studies whose sponsor, collaborator or intervention names a watched company or assay | free, no key; no official rate limit (~50/min is third-party) | Wired (`sources.clinicaltrials`). Vendors rarely appear as sponsor or intervention in a two-week window (5 hits); free-text search doubles recall at the cost of precision. |
+| **Semantic Scholar Graph** `POST /paper/batch` (500 DOIs) | citation count, influential citations, TL;DR for stored papers | free key **required in practice** (keyless pool answered 429 on most calls) | Wired (`sources.semantic_scholar`, after the upserts, 365-day look-back). Positional batch mapping (merged preprint/journal records echo only one DOI). Fresh papers return 0 citations; the signal is velocity on papers weeks to months old. Licence for commercial use not read; check before relying on it. |
 | Excluded: **Google Scholar** | — | — | `robots.txt` disallows `/scholar` and `/citations?`; Google's Terms forbid automated access that violates it. No code path. |
 
 ### 3.4 Companies, filings, regulatory
@@ -138,12 +144,12 @@ is named.
 | Source | Role | Access | Caveats |
 |---|---|---|---|
 | **Company gazetteer** (`config/companies.yaml`, 170 entries, 73 with `watch_news`) | the authority: canonical name, aliases, former names, parent, ticker, e-mail domains, type (tools / diagnostics / synthesis / ai_bio / pharma / cro / institute) | local | ROR and OpenAlex are recall engines, never the authority: ROR's affiliation matcher returned ITER, Illumina (Singapore) and UC San Diego for a textbook Illumina San Diego address, none `chosen`; NanoString's ROR record has no Bruker parent (last modified 2024-12-11); Cytiva has no ROR record; Thermo Fisher's ROR children are 14 country entities. |
-| **SEC EDGAR** 8-K Atom per CIK; `efts` full-text search | material events and press releases (8-K Exhibit 99.1) for listed names | free; contact in the User-Agent required; 10 req/s | **The current client's User-Agent (`lit-radar/0.1 (+url); mailto:x`) is rejected with 403**; EDGAR wants `Name email`. The feed path yielded 0 rows in the live run until that is fixed (fix specified; the run now skips SEC when no contact address is set). `efts` returns ticker-tagged hits for instrument terms (`"Xenium"` → 23 hits in 2026). 8-Ks cover material events only: 0 filings for 8 of 10 sample names in 30 days. |
-| **openFDA** `device/510k.json`, `device/pma.json` | 510(k) clearances, De Novo grants (rows of the 510k dataset with `DEN` numbers), PMA originals and supplements | free; 240 req/min; 1,000/day keyless, 120,000/day with a free key | Built, not yet wired. 510(k)/PMA refresh **monthly** (index 15 days to 6 weeks behind), so the look-back must be ≥45 days; event/recall/UDI refresh weekly. The weekly De Novo web database and the monthly bulk zips are fresher. |
+| **SEC EDGAR** 8-K Atom per CIK; `efts` full-text search | material events and press releases (8-K Exhibit 99.1) for listed names | free; contact in the User-Agent required; 10 req/s | The first client's User-Agent (`lit-radar/0.1 (+url); mailto:x`) was rejected with 403; EDGAR wants `Name email`, which `litradar/http.py` has sent as `<tool> <contact e-mail>` since 2026-10-17. The run skips SEC, and says so in the digest, when no contact address is set. `efts` returns ticker-tagged hits for instrument terms (`"Xenium"` → 23 hits in 2026). 8-Ks cover material events only: 0 filings for 8 of 10 sample names in 30 days. |
+| **openFDA** `device/510k.json`, `device/pma.json` | 510(k) clearances, De Novo grants (rows of the 510k dataset with `DEN` numbers), PMA originals and supplements | free; 240 req/min; 1,000/day keyless, 120,000/day with a free key | Wired (`sources.openfda`, 45-day look-back). 510(k)/PMA refresh **monthly** (index 15 days to 6 weeks behind), so the look-back must be ≥45 days; event/recall/UDI refresh weekly. The weekly De Novo web database and the monthly bulk zips are fresher. |
 | **Press wires** | PR Newswire health lists (biotechnology, medical equipment) | free RSS | Works (verified in the live run and the news-layer note; one company-mapping note had marked the biotechnology list URL "unconfirmed"). Each list holds ~20 items spanning 1–31 hours, so a weekly poll misses most of it; poll every 4–6 h on a second schedule. GlobeNewswire (Akamai) and the Business Wire portal answer 403; `feed.businesswire.com` custom feeds need a site-captured token. |
 | **Trade press RSS** | STAT, BioPharma Dive, MedTech Dive, GEN, Inside Precision Medicine, Labiotech, BioCentury headlines, Nature/Science news | free | GenomeWeb exposes a robots-permitted full-text feed at `/arc/outboundfeeds/rss/?outputType=xml` (100 items, median ~1,950 characters of body) and a news sitemap; its home paths answer 403. Fierce (Cloudflare), The Scientist and Drug Discovery News have no scriptable feed. 360Dx now redirects to GenomeWeb. |
-| **Google News RSS** `news.google.com/rss/search?q=…` | 12 of 17 configured feeds plus one query per watched company (~85 requests per run) | works technically (72 of 72 requests HTTP 200, no consent page, 100-item cap) | **Status: on by default in the current code; research verdict is "replace as primary, keep as off-by-default opt-in".** `news.google.com/robots.txt` (last modified 2026-10-06) disallows every path for generic agents except an allow-list that omits `/rss`, and Google's Terms (effective 2026-07-30) prohibit automated access in violation of robots.txt — the same footing on which Google Scholar was excluded. Results are relevance-ranked across years (28–53% from the last 7 days unless `when:7d` is inside `q`); the configured `site:endpts.com` query has been dead since the publisher moved to `endpoints.news`; per-company queries for listed names were 64% finance-aggregator recycling; link decoding now needs a ~0.6 MB page fetch plus an internal RPC, both disallowed, so encoded links are shown as-is. |
-| **GDELT 2.0 DOC API** | default company-news source (`litradar/sources/gdelt.py`); Google News is opt-in | free | Returned HTTP 429 ("one every 5 seconds") on 10 of 12 calls and persisted >10 minutes after a four-request burst; `domain:` queries for the trade outlets returned empty. Treated as unavailable until re-probed from another IP. |
+| **Google News RSS** `news.google.com/rss/search?q=…` | 12 of 17 configured feeds plus one query per watched company (~85 requests per run) | works technically (72 of 72 requests HTTP 200, no consent page, 100-item cap) | **Status: off by default since 2026-10-17 (`news.google_news: false`), which is the research verdict "replace as primary, keep as off-by-default opt-in"; GDELT is the per-company source.** `news.google.com/robots.txt` (last modified 2026-10-06) disallows every path for generic agents except an allow-list that omits `/rss`, and Google's Terms (effective 2026-07-30) prohibit automated access in violation of robots.txt — the same footing on which Google Scholar was excluded. Results are relevance-ranked across years (28–53% from the last 7 days unless `when:7d` is inside `q`); the configured `site:endpts.com` query has been dead since the publisher moved to `endpoints.news`; per-company queries for listed names were 64% finance-aggregator recycling; link decoding now needs a ~0.6 MB page fetch plus an internal RPC, both disallowed, so encoded links are shown as-is. |
+| **GDELT 2.0 DOC API** | default company-news source (`litradar/sources/gdelt.py`); Google News is opt-in | free | Returned HTTP 429 ("one every 5 seconds") on 10 of 12 calls and persisted >10 minutes after a four-request burst; `domain:` queries for the trade outlets returned empty. Wired as the default anyway, with 8 s pacing, batched company queries and a per-run circuit breaker (`litradar/http.py`); the digest lists the companies skipped when the host rate-limits. |
 | **Bing News RSS** | robots-clean fallback for Fierce, Endpoints, The Scientist, DDN | free | Works for `site:` queries; bare brand queries (`q=Illumina`) return 0 items. The Microsoft Services Agreement's "noncommercial, personal use" clause has not been ruled on. |
 | Planned: **CMS Coverage API**, **CLFS/PLA files**, **FDA CDx list**, **EUDAMED** | reimbursement and regulatory deltas | free | See `ROADMAP.md` and the FDA/CMS research note. |
 
@@ -391,16 +397,18 @@ off-the-hour minute (the `schedule` event is delayed at the top of the hour, run
 default branch, and is disabled on public repositories after 60 days without activity; the weekly
 commit is the activity).
 
-**Persistence is the known weak point.** The SQLite database (117.7 MB after one 7-day run, ~31 MB
-gzipped) lives only in the Actions cache, which GitHub evicts after 7 days without access, exactly
-the interval of a weekly job: one skipped Monday resets the time series. The database cannot be
-committed (GitHub blocks files over 100 MiB). The specified fix uploads a compressed copy as a 90-day
-workflow artifact every run and restores from the last successful artifact on a cache miss; a
-committed Parquet export is the longer-term answer (section 12). Related fixes: checkpoint and close
-the store before the cache is saved (a timed-out run otherwise saves a database missing its WAL),
-split the workflow into a read-only run job holding the API keys and a key-less publish job writing
-to a `digests` branch, SHA-pin actions, pass `workflow_dispatch` inputs through environment
-variables, and redact `api_key`/`mailto` parameters from logged URLs and exception text.
+**Persistence.** The database cannot be committed (GitHub blocks files over 100 MiB; 117.7 MB raw
+after one 7-day run, ~27 MB zstd, and the backfilled corpus is far larger), so it lives as a GitHub
+**release asset**: `weekly.yml` and `daily.yml` restore `radar.sqlite.zst` from the `db-latest`
+release, run, checkpoint and close the store (`PRAGMA wal_checkpoint(TRUNCATE)`, `VACUUM`,
+`integrity_check`), and upload the result back to `db-latest` and to a monthly `db-YYYY-MM` roll-back
+point; `pages.yml` builds the dashboard from the same asset (`docs/deploy.md`). The Actions cache now
+holds only the HTTP cache (`.cache/`, an optimisation that may be evicted). The weekly workflow is
+split into a read-only `radar` job holding the API keys and a key-less `publish` job; actions are
+SHA-pinned, `workflow_dispatch` inputs go through environment variables, and `api_key`/`mailto`
+parameters are redacted from logged URLs (`litradar/http.py`). The earlier design kept the database
+in the 7-day Actions cache, which one skipped Monday would have evicted; `SCALE.md` section 8 records
+the options that were weighed.
 
 ## 10. Data policy in one table
 
@@ -416,8 +424,10 @@ variables, and redact `api_key`/`mailto` parameters from logged URLs and excepti
 The review found that the first live run cached bioRxiv full text without a licence gate (four
 `cc_no` preprints with 54–133k characters of body each), that the Europe PMC ISSN pull had no
 `OPEN_ACCESS:y` filter (the server's HTTP 500 for non-OA PMCIDs was the only guard), and that
-`docs/LEGAL.md`, cited in four places, did not exist. The policy module landed; wiring it in front
-of every fetch, the OA filter, and the legal document are being done by the code and legal owners.
+`docs/LEGAL.md`, cited in four places, did not exist. All three have since landed:
+`Pipeline.fulltext_policy` / `apply_fulltext_policy` decide the storage level per record before any
+text is kept (counters `fulltext.policy_full|facts_only|none`), the Europe PMC ISSN pull carries
+`(OPEN_ACCESS:y)`, and `docs/LEGAL.md` exists (last reviewed 2026-10-18).
 
 ## 11. Security posture
 
@@ -436,43 +446,49 @@ views). The watchlist (`companies.yaml`, `subgroups.yaml`, `watchlist_terms`) is
 construction in a public fork; a private overlay directory is the specified mechanism for a personal
 list.
 
-## 12. The global-corpus path (planned and in progress)
+## 12. The global-corpus path (what has landed, what is next)
 
-The weekly digest is the first product; the corpus is the second. In order of readiness:
+The weekly digest is the first product; the corpus is the second. In order of readiness, with the
+state as of 2026-10-18:
 
-1. **Wire the built adapters** (GEO, PRIDE, CELLxGENE, ClinicalTrials.gov, NIH RePORTER, openFDA,
-   Semantic Scholar): each has a documented config block and pipeline patch in `docs/sources/`.
-   Keep GEO rows (studies) out of the SRA/ENA experiment totals.
-2. **Week-over-week deltas and trends.** A `weekly_entity_counts` table written at the end of each
-   run (archive models, vendors, literature instruments, companies) feeds "up/down vs last week" and
-   first-appearance flags; the `timeseries` command already backfills monthly SRA/ENA/Europe PMC
-   counts per model to 2019 (Revio: 2,068 requests for all PacBio models over 94 months, cached per
-   count so an interrupted backfill keeps what it fetched).
-3. **OpenAlex backfill and snapshot.** For history beyond the weekly window, the free key's $1/day
-   budget batches 100 DOIs per call; for the full corpus the OpenAlex snapshot (CC0) is the route,
-   loaded into Parquet rather than SQLite.
-4. **Parquet export, DuckDB escape hatch.** SQLite stays the store (upsert-heavy, transactional,
-   FTS5); a weekly `exports/papers_{YYYY-WW}.parquet` partitioned by month is the analytics
-   sidecar, 5–10× smaller than CSV; DuckDB reads both and has its own FTS. Migration pressure
-   realistically begins above 5–10M rows, years away for a weekly radar. FTS5 lookups by the
-   unindexed id column are currently full scans (upsert and rematch are O(N²)); keying the FTS table
-   by rowid is the fix.
-5. **Dashboard.** A static site rendered from the store, opt-in and off by default, showing ranked
-   items and public metadata only: GitHub Pages sites are public even for private repositories, so
-   the watchlist must never be rendered into it.
-6. **China via GSA and ChinaXiv; Japan; Korea; Latin America.** GSA (CNCB-NGDC) is not an INSDC
-   member, mirrors INSDC into itself (42.19M of 43.43M experiments), holds ~1.23M native experiments
-   and has no public API behind a script-blocking cookie gate: request sanctioned access, do not
-   script around it; the MGI-share miss is a 21–41% range, not a measurement. The practical adapter
-   is DDBJ Search (section 3.2). Nine Chinese-published English journals (Cell Research, Protein &
-   Cell, Science China Life Sciences, National Science Review, GPB, STTT, Cell Discovery, JGG, hLife)
-   are missing from the ISSN list; three deposit no Crossref abstracts and hLife is Crossref-only.
-   ChinaXiv's OAI endpoint is IP-allow-listed and has zero coverage in Europe PMC. Japan: J-STAGE
-   for DOI discovery only (24-hour machine-readable caching ban) plus CiNii for abstracts; Korea:
-   KCI Open API (free key, English abstracts and ORCIDs); Europe PMC already indexes SciELO
-   Preprints. Non-US funders with instrument-placement signal: UKRI Gateway to Research (open JSON,
-   infrastructure grant category), OpenAIRE Graph (register a client: 7,200 req/h), CORDIS monthly
-   dumps, ARC `lief-register`, Wellcome 360Giving.
+1. **Wire the built adapters** — done 2026-10-17. GEO, PRIDE, CELLxGENE, ClinicalTrials.gov, NIH
+   RePORTER, openFDA and Semantic Scholar run by default (`litradar/pipeline.py`; each adapter's note
+   in `docs/sources/` records the wiring as applied). The census table lists SRA/ENA/GEO/GSA rows
+   together and labels GEO rows as series × platform (studies, not experiments); PRIDE and CELLxGENE
+   have their own sub-tables.
+2. **Week-over-week deltas and trends** — done as `litradar/trends.py` (the "What changed" digest
+   section and `litradar trends`, computed from the stored papers, mentions and archive rows rather
+   than a `weekly_entity_counts` table; `docs/trends.md`). The `timeseries` command backfills monthly
+   SRA/ENA/Europe PMC counts per model (Revio: 2,068 requests for all PacBio models over 94 months,
+   cached per count so an interrupted backfill keeps what it fetched) and the weekly workflow
+   refreshes it after each run.
+3. **OpenAlex backfill and snapshot** — `litradar backfill --from YYYY-MM --to YYYY-MM` grows the
+   corpus from OpenAlex by topic and month (resumable). For the full corpus the OpenAlex snapshot
+   (CC0) remains the route, loaded into Parquet rather than SQLite.
+4. **Parquet export, DuckDB escape hatch** — `litradar export` ships the Parquet sidecar and the FTS
+   table is keyed by `papers.rowid` (`docs/store.md`); SQLite stays the store (upsert-heavy,
+   transactional, FTS5). DuckDB reads both and has its own FTS; migration pressure realistically
+   begins above 5–10M rows (`SCALE.md`).
+5. **Dashboard** — shipped: `litradar dashboard --out site/`, built by `pages.yml` from the
+   `db-latest` asset (`docs/deploy.md` §5). It renders ranked items and public metadata; GitHub Pages
+   sites are public even for private repositories, so personal lists belong in an overlay config
+   directory (`LEGAL.md` §7), never in the rendered site.
+6. **China via GSA and ChinaXiv; Japan; Korea; Latin America** — partly done 2026-10-17. GSA
+   (CNCB-NGDC) is not an INSDC member, mirrors INSDC into itself (42.19M of 43.43M experiments) and
+   holds ~1.23M native experiments; it publishes no API, but its search page and statistics JSON
+   answer scripts (`robots.txt` disallows only `/openlb/`), so `sources/gsa.py` reads native
+   experiments per release day from the server-rendered search page — the one declared exception to
+   the no-HTML rule (`LEGAL.md` §3) — while the browse pages behind the JavaScript cookie gate are
+   left alone; `sources/gsa_human.py` adds model-level platforms for GSA-Human. The MGI-share miss
+   that motivated this was a 21–41% range, not a measurement. ChinaXiv's main-site OAI is
+   IP-allow-listed, so the global aggregator's OAI-PMH is used; KCI OAI-PMH and SciELO ArticleMeta
+   are wired; J-STAGE is built and opt-in (24-hour machine-readable caching ban). Still open: the
+   nine Chinese-published English journals (Cell Research, Protein & Cell, Science China Life
+   Sciences, National Science Review, GPB, STTT, Cell Discovery, JGG, hLife; three deposit no
+   Crossref abstracts and hLife is Crossref-only), DDBJ Search (section 3.2), CiNii, and the non-US
+   funders with instrument-placement signal: UKRI Gateway to Research (open JSON, infrastructure
+   grant category), OpenAIRE Graph (register a client: 7,200 req/h), CORDIS monthly dumps, ARC
+   `lief-register`, Wellcome 360Giving.
 7. **Translation layer.** Measured non-English core-topic volume is ~3 abstracts per week (PubMed
    `chi[la]` proxy: 5 records in 17 days), so translation is a rounding error: even 500/week costs
    about $0.13 (Haiku 5.5) to $5.20 (Opus 5.5) per week at Batches prices. Translate only items that
@@ -508,7 +524,7 @@ The weekly digest is the first product; the corpus is the second. In order of re
 | GDELT DOC API | persistent 429 after a four-request burst from one residential IP; empty `domain:` results for trade outlets | wired as the default with 5 s pacing and a per-run circuit breaker; the digest reports how many company queries were skipped when the host rate-limits; re-probe from the CI runner's IP |
 | 10x Genomics, Illumina, Olink, PacBio, Oxford Nanopore publication pages | Vercel checkpoint (429) or JavaScript-only, no feed | Bruker Spatial Biology and Parse Biosciences WordPress REST `publication` endpoints are the only vendor feeds that answer |
 | Altmetric keyless `/v1/doi/{doi}` | 403 from this egress, same session in which other WAF-protected hosts also returned 403 | ambiguous (closed vs blocked IP); the free tier is for university scientometrics researchers only, so a commercial operator needs a contract or skips it |
-| GSA (CNCB-NGDC), ChinaXiv OAI, NMPA database | JavaScript cookie gate (host stopped answering after ~40 requests); IP allow-list; WAF 412 | request sanctioned access; do not script around |
+| GSA browse pages (CNCB-NGDC), ChinaXiv main-site OAI, NMPA database | JavaScript cookie gate (host stopped answering after ~40 requests); IP allow-list; WAF 412 | not circumvented: GSA is read from its search page and statistics JSON, ChinaXiv from the global aggregator's OAI-PMH (`docs/sources/china.md`, `LEGAL.md` §3); NMPA is not used |
 | Scopus, Web of Science, Dimensions, Lens | institution-licensed; free tiers exclude commercial and investment use; no self-serve price | not budgeted |
 
 ## 14. Open questions

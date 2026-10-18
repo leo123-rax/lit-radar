@@ -7,7 +7,7 @@ subgroups and journals, plus first appearances and preprint-to-journal conversio
 It is pure SQL + Python over tables the pipeline already writes (`papers`, `mentions`,
 `archive_records`, `tracked_author_hits`). **No external API is involved**, so there is nothing to
 verify live and nothing new to install; it runs the same against a laptop database or a snapshot
-restored from the GitHub Actions cache.
+restored from the `db-latest` release asset.
 
 ## Usage
 
@@ -188,7 +188,7 @@ subgroup rows add `tracked_author_papers`. Everything is JSON-serialisable.
 
 ## Rendered section
 
-`render_trends_markdown(trends, top_n=10, heading_level=2, window_note=None)` produces:
+`render_trends_markdown(trends, top_n=10, heading_level=2, window_note=None, conversions_note=None)` produces:
 
 * a header with the window, the amount of history available, the statement that weeks are
   seven-day buckets ending `until`, and the exact z / notable rule; then, when applicable, the
@@ -200,54 +200,48 @@ subgroup rows add `tracked_author_papers`. Everything is JSON-serialisable.
 * **New this week** (instruments, companies, journals, archive instrument models), or the
   cold-start note;
 * **Preprints that became journal articles** with posting / publication dates, lag and the
-  median lag.
+  median lag; or, when `conversions_note` is given, that one sentence in the table's place (what
+  the digest passes; see the wiring section).
 
-## Wiring into the digest
+## Wiring into the digest (as applied)
 
-`litradar/digest/render.py` is not modified by this change. To add the section after the top
-innovations block:
+`litradar/digest/render.py` renders the section itself: `_trends_section(store, until, dcfg, n_conversions)`
+is called from the derived-layers loop after the news block (before "Emerging concepts" and "Companies
+spotted (not yet tracked)") and does
 
 ```python
-# litradar/digest/render.py
-from .. import trends as trends_mod                         # near the other imports
-
-    # ---- what changed (after the "Top N innovations" loop, before "Instruments named in this week's papers")
-    tcfg = cfg.get("trends") or {}
-    trend_data = None
-    if tcfg.get("enabled", True):
-        trend_data = trends_mod.compute_trends(
-            store, until, weeks=int(tcfg.get("weeks", 13)), subgroups=trends_mod.load_subgroups(),
-            min_week_fraction=float(tcfg.get("min_week_fraction", 0.25)),
-        )
-        md.append(trends_mod.render_trends_markdown(
-            trend_data, top_n=int(tcfg.get("top_n", 10)), window_note=trends_mod.digest_window_note(since, until),
-        ))
+trends = compute_trends(store, until, weeks=int(dcfg.get("trend_weeks", 13)))
+return render_trends_markdown(trends, top_n=int(dcfg.get("trend_top_n", 10)), heading_level=2, conversions_note=note)
 ```
 
-The shipped digest renderer (`_trends_section` in `litradar/digest/render.py`) does this and also passes
-`conversions_note=...`: the digest prints its preprint-to-journal conversions once, under the top innovations
-(`Store.preprint_conversions`, which covers the `published_doi` pairs this module finds plus title matches), and the
-trends section prints that pointer instead of its own table, so one document never carries two answers. The
-standalone `litradar trends` output keeps the table.
+where `dcfg` is the **`digest:`** block of `config/radar.yaml` and `note` is one sentence giving the number of
+preprint-to-journal conversions in the digest's window: the digest prints those conversions once, under the
+top innovations (`Store.preprint_conversions`, which covers the `published_doi` pairs this module finds plus
+title matches), and the trends section prints that pointer instead of its own table, so one document never
+carries two answers. The standalone `litradar trends` output keeps the table. A failure inside the section is
+caught and rendered as `_section unavailable: …_`, so trends can never cost the digest. The knobs are
+therefore:
 
-and in the `summary = {...}` dict at the end of `render()` add
-`"trends": {"notable": trend_data["notable"], "new_entities": trend_data["new_entities"], "conversions": trend_data["conversions"], "totals": trend_data["totals"], "warnings": trend_data["warnings"]} if trend_data else None`.
+```yaml
+digest:
+  trend_weeks: 13           # baseline for the what-changed section (compute_trends weeks=)
+  trend_top_n: 10           # rows per table (render_trends_markdown top_n=)
+```
+
+There is no top-level `trends:` block in `radar.yaml`; keys placed there are not read by anything. Not
+configurable from YAML: `min_week_fraction` (the `compute_trends` default, 0.25), `min_source_coverage`
+(0.75), `min_baseline_weeks` (3) and switching the section off (`render()` always attempts it). The digest
+call passes neither `subgroups=` nor `window_note=`, so the subgroup table appears only in `litradar trends`
+output (the command loads `config/subgroups.yaml`), and the JSON summary carries no `trends` key
+(`litradar trends --json` is the structured route). To change any of that, extend `_trends_section`.
 
 **Counts differ from the digest tables.** The digest's own tables count the pipeline window
 (`pipeline.window(days=7)` gives 8 inclusive days, `since..until`), while the trends section
 counts the seven-day bucket `until − 6..until`. The same entity can therefore show, say, 46 papers
 in "Instruments named in this week's papers" and 40 in "What changed" in the same document. The
-`window_note` argument above prints the digest window and this caveat directly under the header.
-
-Optional `config/radar.yaml` block (defaults apply when absent):
-
-```yaml
-trends:
-  enabled: true
-  weeks: 13
-  top_n: 10
-  min_week_fraction: 0.25
-```
+renderer always states the bucket rule; the sentence reconciling it with the digest window
+(`digest_window_note(since, until)`) is printed only when passed as `window_note=`, which neither
+caller does today.
 
 ## Limitations
 

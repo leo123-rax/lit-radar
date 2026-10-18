@@ -123,14 +123,20 @@ browser:
   # user_data_dir: ~/.cache/lit-radar/browser-profile   # launch fallback only
 ```
 
-and make `Pipeline.__init__` build its client through `litradar.browser.make_http`, which returns a
-`BrowserHttp` when `browser.enabled` is true and a plain `Http` otherwise. The one-line change in
-`litradar/pipeline.py`:
+`Pipeline.__init__` builds its client through `litradar.browser.make_http`, which returns a `BrowserHttp`
+when `browser.enabled` is true and a plain `Http` otherwise; when the browser is requested but unavailable
+(`BrowserUnavailable`: Playwright not installed, no endpoint answering) the pipeline logs a warning and falls
+back to the plain client. The code as applied in `litradar/pipeline.py` (an `http=` argument passed to
+the constructor, as the tests do, bypasses this):
 
 ```python
-from .browser import make_http
-# ...
-self.http = http or make_http(settings, contact_email=settings.contact_email, cache_dir=settings.cache_dir, ncbi_api_key=settings.ncbi_api_key)
+from .browser import BrowserUnavailable, make_http
+
+try:
+    self.http = make_http(settings, **http_kwargs)  # BrowserHttp when radar.yaml browser.enabled is true
+except BrowserUnavailable as exc:
+    log.warning("browser fetcher requested but unavailable (%s); using the plain HTTP client", exc)
+    self.http = Http(**http_kwargs)
 ```
 
 Nothing else in the pipeline changes: `biorxiv.attach_fulltext` already calls `http.get(paper.fulltext_url, cache=True)`,

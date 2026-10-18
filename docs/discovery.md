@@ -95,16 +95,18 @@ most candidates are private and get no hint.
 last seen, one evidence snippet with a source link) and the commands to act on them. It reads only the
 candidate table, so `refresh` must have run for the window.
 
-Wiring (two one-line additions in files this module does not own):
+Wiring (as applied):
 
-* `litradar/pipeline.py`, end of `Pipeline.run()` after extraction and scoring are committed:
-  `from . import discovery; discovery.refresh(self.store, self.companies, since, until)`
-* `litradar/digest/render.py`, in `render()` after the "Companies in the literature" block:
-  `md.append(discovery.render_candidates_markdown(store, since, until, top=int(dcfg.get("candidates_n", 15))))`
-  and, for the JSON summary, `summary["candidates"] = discovery.list_candidates(store, since=since, min_score=2.0, limit=15)`.
-  Optional knob in `config/radar.yaml`: `digest.candidates_n`.
+* `litradar/pipeline.py`: `Pipeline.post_process()` runs `discovery.refresh(self.store, self.companies, since, until)`
+  at the end of every `run`, isolated so that a failure is reported in the run's error list (`discovery: …`) and
+  never costs the run; the count lands in `counts["candidates"]`.
+* `litradar/digest/render.py`: the derived-layers loop renders
+  `render_candidates_markdown(store, since, until, top=digest.candidates_n)` (default 15; `digest:` block of
+  `config/radar.yaml`) after "Emerging concepts". The JSON summary does not carry a `candidates` key;
+  `litradar candidates --json` is the machine-readable route.
 
-Until that is wired, `litradar candidates refresh` after each `litradar run` keeps the table current.
+`litradar candidates refresh` is still the way to rebuild the table after a `rematch` or a gazetteer change
+between runs.
 
 ## From candidate to profile
 

@@ -13,17 +13,24 @@ The first three are read-only and all three run the same FTS5 query language aga
 differ in one convenience: the **CLI** (and the watchlist) treats plain text as a phrase, the **API** and
 **Datasette** take the query exactly as written. See "Plain text versus FTS5 syntax" below.
 
-**What is searched is stored text, plus the gazetteer's attributions.** The matcher behind `litradar entity`,
-the digest and the `/entities` endpoint resolves aliases (a paper that says "Next GEM 5' reagent kit" is
-attributed to Chromium); what it attributed is indexed as the `mentions` column (section 1), so a search for
-an entity's name or id also finds papers whose text never spells it out, and such a hit says so
-(`section: mentions`, see section 2). Ask by entity id (`litradar entity txg-chromium`,
-`/entities/instrument/txg-chromium/papers`) when you want the matcher's view with sections and counts; search
-when you want the words.
+**What is searched: stored text plus the gazetteer's attributions.** The index has seven text columns (title,
+abstract, Methods, funding, competing interests, affiliations, open-access body) and one derived column,
+`mentions`, holding the entity name, the matched alias and the entity id of every gazetteer mention stored
+for the paper (`docs/store.md` section 2). The matcher behind `litradar entity`, the digest and the
+`/entities` endpoint resolves aliases (a paper that says "Next GEM 5' reagent kit" is attributed to
+Chromium), so a plain search for an entity's name or id also finds papers whose text never spells it out:
+`litradar search Chromium` returns that paper through the `mentions` column, and such a hit says so
+(`section: mentions`, see section 2). On the 2026-10-18 snapshot, 334 papers matched `Chromium`, 190 of them
+only there. `--in mentions` restricts a search to attributed papers;
+`--in title,abstract,methods,funding,coi,affiliations,body` restricts it to the words themselves. Ask by
+entity id (`litradar entity txg-chromium`, `/entities/instrument/txg-chromium/papers`) when you want the
+matcher's view, with the distinct-paper count and the per-section breakdown; search when you want the words.
 
 ## 1. What is indexed
 
-`papers_fts` (tokenizer `porter unicode61`) holds one row per paper with these searchable columns:
+`papers_fts` (tokenizer `porter unicode61`) holds one row per paper with these searchable columns (seven
+text columns and the derived `mentions` column; `store.FTS_COLUMNS` is the list the CLI and the API validate
+`--in` / `in=` against):
 
 | Column | Content | Typical use |
 |---|---|---|
@@ -34,7 +41,7 @@ when you want the words.
 | `coi` | competing-interests / disclosures | `coi:Illumina` - employees, consultants, equity |
 | `affiliations` | author affiliation strings | `affiliations:"Genomics Inc"` - industry authors |
 | `body` | the rest of the open-access full text | everything else |
-| `mentions` | **not paper text**: what the gazetteer attributed to the paper - every matched instrument and company as canonical name, matched alias and id, `;`-joined (`Chromium ; Next GEM ; txg-chromium`) | `mentions:txg-chromium`, `mentions:"Next GEM"` - the matcher's view, by id or alias |
+| `mentions` | **not paper text**: what the gazetteer attributed to the paper - every matched instrument and company as canonical name, matched alias and entity id, ` ; `-joined (`Chromium ; Next GEM ; txg-chromium`; derived from the `mentions` table, `docs/store.md` section 2) | `mentions:Chromium`, `mentions:"Next GEM"`, `mentions:txg-chromium` - papers *attributed* to an entity under any alias, by name, alias or id; `--in mentions` asks only the matcher |
 
 `mentions` is maintained from the mentions table whenever a paper is (re)matched, and it is searched by
 default like every other column: a plain `Chromium` finds a paper that only says "Next GEM", because the
@@ -66,6 +73,7 @@ Tokenizer facts that change how you write queries:
 | one column, phrase | `coi:"Oxford Nanopore"` | |
 | several columns | `{methods coi funding}: Illumina` | braces, space-separated column names |
 | several columns, whole expression | `{methods coi}: (Illumina OR "10x Genomics")` | |
+| attributed to an entity, any alias | `mentions:Chromium` or `mentions:txg-chromium` | the derived column of section 1; a plain query searches it too |
 | prefix | `NovaSeq*` | matches `novaseq`, `novaseqx`, ... ; stems still apply |
 | proximity | `NEAR("spatial transcriptomics" "single-cell", 10)` | phrases inside `NEAR(...)`, max token distance after the comma (default 10) |
 | term at start of a column | `^Xenium` | `title:^Xenium` = title begins with Xenium |
@@ -96,7 +104,8 @@ the returned rows only, after ranking and title folding, so a broad query costs 
 
 **Section filter versus column filter.** `--in methods,coi` (CLI) or `in=methods,coi` (API) wraps your
 whole query as `{methods coi}: (query)`; writing `methods:` inside the query does the same for one
-term. Combine them freely.
+term. Combine them freely. `mentions` is a valid section name in both places (`--in mentions`,
+`in=mentions`); an unknown name is a usage error (CLI) or a `400` (API) listing the valid ones.
 
 ### Plain text versus FTS5 syntax
 

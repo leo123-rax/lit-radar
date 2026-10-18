@@ -33,8 +33,9 @@ plus the FTS index itself (`papers_fts_data`, 14.8 MB). 12% of papers had open f
 | global life-science scope (OpenAlex-order coverage, all countries) | ~1 M | ~6.4 M | **~23 GB** |
 | global scope with full text for 30% of papers | ~1 M | ~6.4 M | ~35 GB |
 
-So the file passes the 10 GB GitHub Actions cache ceiling within two years at today's scope and
-within months at global scope. That, not query speed, is the first wall (section 8).
+So the raw file passes 10 GB within two years at today's scope and within months at global scope,
+and its zstd copy (roughly a quarter of the raw size, *estimate*) reaches the 2 GiB release-asset
+ceiling of section 8 on a similar timescale. That, not query speed, is the first wall (section 8).
 
 ## 2. Benchmark: what the current design costs
 
@@ -456,17 +457,18 @@ Three places to keep it, with the limits from GitHub's documentation:
 
 | option | limits (GitHub docs) | good for | not good for |
 |---|---|---|---|
-| **Actions cache** (`actions/cache`, what `weekly.yml` does today) | 10 GB per repository by default; entries not accessed for 7 days are evicted; oldest-by-last-access evicted first when the repository hits its limit; runs cannot restore caches from sibling branches (https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/caching-dependencies-to-speed-up-workflows) | the hot copy between weekly runs; zero setup | the only copy: one missed week (schedules are skipped on inactive repositories) and the entry is gone; no history; 10 GB ceiling |
+| **Actions cache** (`actions/cache`, what `weekly.yml` did until 2026-10-17; today it holds only the `.cache/` HTTP cache) | 10 GB per repository by default; entries not accessed for 7 days are evicted; oldest-by-last-access evicted first when the repository hits its limit; runs cannot restore caches from sibling branches (https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/caching-dependencies-to-speed-up-workflows) | the hot copy between weekly runs; zero setup | the only copy: one missed week (schedules are skipped on inactive repositories) and the entry is gone; no history; 10 GB ceiling |
 | **Committed compressed snapshot** (`data/radar.sqlite.zst` in git) | Git warns at 50 MiB and blocks files over 100 MiB; repositories should stay under 1 GB, 5 GB strongly recommended (https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github) | small forks (the real 117 MB file compresses to roughly 30-40 MB with zstd — *estimate*, text-heavy); point-in-time history for free | anything that grows: every weekly commit adds a full copy to history, and a 1 GB corpus is over the limit before compression |
-| **Release assets** (`gh release create snapshot-2026-10-17 radar.sqlite.zst exports/*.parquet`) | each file under 2 GiB; up to 1,000 assets per release; no limit on total release size or bandwidth (https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) | durable, versioned, downloadable without cloning, outside the repository size; Parquet exports alongside the file | files above 2 GiB need splitting (`split -b 1900m`) or must move to object storage |
+| **Release assets** (**what `weekly.yml` and `daily.yml` do today**: `db-latest` replaced on every successful run, `db-YYYY-MM` as a monthly roll-back point; `pages.yml` reads the same asset) | each file under 2 GiB; up to 1,000 assets per release; no limit on total release size or bandwidth (https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) | durable, versioned, downloadable without cloning, outside the repository size; Parquet exports alongside the file | files above 2 GiB need splitting (`split -b 1900m`) or must move to object storage |
 
-Recommended policy:
+Policy in place since 2026-10-17, and what remains:
 
-1. Keep the Actions cache as the hot copy (no change).
-2. After every successful run, upload `exports/` as a workflow artifact (90-day retention, free).
-3. Monthly, or when the file changes by more than 10%, publish a release `snapshot-YYYY-MM-DD`
-   with `radar.sqlite.zst` and the Parquet exports; keep the last 12 and prune older ones. The
-   restore step in `weekly.yml` falls back to the newest snapshot release when the cache misses.
+1. The release asset is the only copy of the database between runs: `db-latest` is replaced on
+   every successful run after `PRAGMA wal_checkpoint(TRUNCATE)`, `VACUUM` and `integrity_check`,
+   and `db-YYYY-MM` keeps one roll-back point per month (`docs/deploy.md`). The Actions cache keeps
+   only the HTTP cache, which may be evicted at any time without loss.
+2. Open: upload `exports/` (the Parquet files) next to the database asset after every run.
+3. Open: prune `db-YYYY-MM` releases beyond the last 12.
 4. Do not commit the database. The `.gitignore` already excludes `*.sqlite`; add `*.duckdb`,
    `*.parquet` and `exports/`.
 5. When the compressed snapshot passes ~1.5 GiB, move snapshots to object storage (S3, R2, GCS;
@@ -480,5 +482,6 @@ Recommended policy:
    window-first entity queries (3.2), `PRAGMA optimize` at the end of a run. Re-run the benchmark at N = 200 K before and after; the load curve should be flat.
 3. FTS date tokens and the trigram table plus a pre-segmented column (3.3, 3.4) when windowed
    search and Chinese search are needed; both are rebuilds, so batch them with step 2 if possible.
-4. Weekly workflow: export step, artifact upload, monthly snapshot release (7, 8).
+4. Weekly workflow: export step and Parquet upload next to the database asset (7, 8); the release
+   asset persistence and the monthly `db-YYYY-MM` roll-back point are in place.
 5. Postgres only when a second writer or a shared query endpoint exists (6).

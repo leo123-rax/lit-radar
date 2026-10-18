@@ -140,9 +140,10 @@ may be `Mention` objects or `mentions` rows; `subgroups` are the ids from `Pipel
 `priorities=settings.radar.get("priorities")`; without it the default `radar.yaml` is read (and re-read when
 it changes).
 
-### Wiring the hook into the pipeline (not done by this module)
+### Wiring the hook into the pipeline (as applied)
 
-`litradar/pipeline.py`, `Pipeline.rank()`, right after `heuristics.score_paper(...)`:
+`litradar/pipeline.py` imports `priority_multiplier` and `Pipeline.rank()` applies it right after
+`heuristics.score_paper(...)`, in this shape:
 
 ```python
 from .track import priority_multiplier
@@ -154,9 +155,10 @@ if mult != 1.0:
     reasons += f"; priority x{mult:g}"
 ```
 
-That single change covers all three uses: the heuristic (a), and, because the LLM shortlist is built from
-`h` and sorted by `-d["_h"]`, the LLM shortlist order (c). For the full-text fetch order (b), in
-`Pipeline.attach_fulltext()` change the end of the inner `priority()` function from `return -score` to
+That single change covers two of the three uses: the heuristic (a) and, because the LLM shortlist is built from
+`h` and sorted by `-d["_h"]`, the LLM shortlist order (c). The full-text fetch order (b) is **not** weighted
+today; to add it, in `Pipeline.attach_fulltext()` change the end of the inner `priority()` function from
+`return -score` to
 
 ```python
 return -score * priority_multiplier(p, self.instruments.find(p.abstract or "") + self.companies.find(p.abstract or ""), p.journal, self.assign_subgroups(p), priorities=self.cfg.get("priorities"))
@@ -196,11 +198,11 @@ the config. It reports:
 The window follows the digest: dated papers by `pub_date`, undated ones by `first_seen`. "Trailing 13 weeks"
 is the 91 days before `since`, divided by 13 to give a per-week rate.
 
-### Embedding in the digest (not done by this module)
+### Embedding in the digest (as applied)
 
 `litradar.coverage.render_coverage_markdown(store, since, until, settings)` returns the same Markdown as the
 command, starting with a `## Coverage: ...` heading. `render.render()` only receives `settings.radar`, so
-the simplest wiring is in `litradar/cli.py`, in both `cmd_run` and `cmd_digest`, before the Markdown is
+the section is appended in `litradar/cli.py`, in both `cmd_run` and `cmd_digest`, before the Markdown is
 written:
 
 ```python
@@ -210,9 +212,8 @@ out["markdown"] += "\n" + render_coverage_markdown(pipe.store, since, until, set
 out["markdown"] += "\n" + render_coverage_markdown(store, since, until, settings)        # cmd_digest
 ```
 
-Alternatively give `render.render()` a `settings` keyword and append the section after "Coverage and
-method". `coverage_report(store, since, until, settings)` returns the underlying dict if the JSON summary
-should carry it too.
+The JSON summary does not carry the report; `coverage_report(store, since, until, settings)` returns the
+underlying dict if it should.
 
 ## Limitations
 

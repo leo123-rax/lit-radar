@@ -115,7 +115,12 @@ in total).
 | `to_news_item(study)` / `study_summary(protocol_section)` | normalisation: `id='ctgov:<NCT>'`, `url=https://clinicaltrials.gov/study/<NCT>`, `published=<StudyFirstPostDate>`, summary = `Sponsor: … (class). Collaborators: … Interventions: <Type>: <name>; … Conditions: … Phase: … Enrollment: n (estimated/actual). Status: … Type: … Summary: <brief summary, truncated to a 1,500-character total>` |
 | `essie_term`, `essie_or`, `date_range_filter`, `phase_label` | query building helpers (multi-word or punctuated terms are double-quoted; `PHASE2`+`PHASE3` renders `Phase 2/3`) |
 
-## Wiring (not done by this adapter; see the pull request notes)
+## Wiring (as applied in `litradar/pipeline.py`, 2026-10-17)
+
+The `radar.yaml` block below is shipped (`sources.clinicaltrials`, on by default) and `Pipeline.fetch_signals()`
+calls `ctgov_src.new_studies(...)`, fills `companies` from the company gazetteer and upserts the items; they render
+in the digest's "Grants, trials and clearances" section together with NIH RePORTER awards and openFDA decisions
+(not in `fetch_news`, as first sketched). `--sources clinicaltrials` runs the stage alone.
 
 `config/radar.yaml`:
 
@@ -135,7 +140,6 @@ sources:
     page_size: 200
 ```
 
-`litradar/pipeline.py`: import `from .sources import clinicaltrials as ctgov_src`, give `fetch_news` an
-`until` argument, and after the RSS feed loop add a block that calls `ctgov_src.new_studies(...)`, runs
-`self.companies.find(f"{it.title} {it.summary}")` on each item to fill `it.companies`, and upserts with
-`self.store.upsert_news`. The digest already groups news items by company and shows `feed · published`.
+`litradar/pipeline.py` (as applied): `from .sources import clinicaltrials as ctgov_src`; `fetch_signals(since,
+until, only)` calls `ctgov_src.new_studies(...)`, runs `self.companies.find(f"{it.title} {it.summary}")` on each
+item to fill `it.companies`, and upserts with `self.store.upsert_news`.
