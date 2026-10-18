@@ -19,6 +19,14 @@ Definitions
   whose extra boundary day lands alone in an earlier bucket) and is excluded from the baseline as
   well; the excluded weeks are listed in ``history`` and in the rendered header.
   ``min_week_fraction=0`` disables the rule.
+* **Comparable week** (papers only): a baseline week whose *source mix* covers the current week's.
+  A source is represented in a baseline week when its share of that week's papers is at least
+  ``min_week_fraction`` of its share of the current week; the week is comparable when the sources
+  represented in it supply at least ``min_source_coverage`` (default 0.75) of the current week's
+  papers. A backfill is typically a capped, single-source sample by publication date while the live
+  week is multi-source, and a z-score against such weeks would measure the step in coverage, not a
+  change in the literature, so non-comparable weeks are left out of the paper baseline (listed in
+  ``history.paper_weeks_dropped_source_mix``). ``min_source_coverage=0`` disables the rule.
 * **mean / std** = arithmetic mean and sample standard deviation of the entity's weekly count
   over the baseline weeks (an entity absent in a baseline week counts as 0 there). ``std`` is
   ``None`` with fewer than two baseline weeks (undefined, rendered as ``n/a``).
@@ -38,7 +46,14 @@ Definitions
   version was published or first seen. A preprint row being re-upserted (new version, overlap
   day of consecutive pulls) does not re-report an old conversion; the flip side is that a
   ``published_doi`` back-filled onto a preprint whose journal version was already stored in an
-  earlier week is never reported.
+  earlier week is never reported. Inside the digest the conversions are printed once, under the
+  top list (``Store.preprint_conversions``, which also adds title matches); the digest passes
+  ``conversions_note`` to the renderer, which then prints that pointer instead of its own table.
+* **movers** (``top_movers``) are ranked by z. A row whose z is suppressed (its family has too few
+  comparable baseline weeks) is left out of the tables rather than ranked by its raw week-over-week
+  delta next to z-scored rows (a 10,000-experiment archive delta would outrank every paper z).
+  Only when no family has a z at all are the tables ranked by week-over-week change, and then only
+  for families whose 'last week' is a complete, comparable bucket.
 
 Week length versus the digest window
 ------------------------------------
@@ -84,6 +99,9 @@ MIN_BASELINE_WEEKS = 3
 STD_FLOOR = 1.0
 DEFAULT_WEEKS = 13
 MIN_WEEK_FRACTION = 0.25  # a baseline week below this fraction of the median weekly total is partial
+MIN_SOURCE_COVERAGE = 0.75  # a paper baseline week must be fed by sources supplying this share of the current week
+
+_SOURCE_LABEL = "CASE WHEN p.source LIKE 'rss:%' THEN 'rss' ELSE COALESCE(NULLIF(p.source, ''), 'unknown') END"
 
 ROLE_SECTIONS = {
     "as_author": ("affiliations",),
@@ -191,6 +209,58 @@ def _active_weeks(totals: Dict[int, int], weeks: int, min_week_fraction: float, 
     return active, dropped
 
 
+def _comparable_weeks(
+    by_source: Dict[int, Dict[str, int]], weeks: int, min_week_fraction: float, min_source_coverage: float, end: date
+) -> Tuple[List[int], List[Dict[str, Any]]]:
+    """Baseline weeks (1..weeks) with papers whose source mix covers the current week's.
+
+    A source is represented in a baseline week when its share of that week's papers is at least `min_week_fraction`
+    of its share of the current week (shares, not counts, so a uniformly small partial week is left to the
+    partial-week rule). The week is comparable when the sources represented in it supply at least
+    `min_source_coverage` of the current week's papers. Returns (comparable week indices, dropped weeks as
+    {week, start, end, total, covered_share, missing}); `missing` lists the current week's sources the week lacks,
+    largest first.
+    """
+    current = by_source.get(0) or {}
+    total0 = sum(current.values())
+    with_data = [w for w in range(1, weeks + 1) if sum((by_source.get(w) or {}).values()) > 0]
+    if min_source_coverage <= 0 or total0 <= 0:
+        return with_data, []
+    keep: List[int] = []
+    dropped: List[Dict[str, Any]] = []
+    for w in with_data:
+        wk = by_source.get(w) or {}
+        total_w = sum(wk.values())
+        covered = 0
+        missing: List[str] = []
+        for src, n0 in current.items():
+            share0 = n0 / total0
+            share_w = wk.get(src, 0) / total_w
+            if share_w > 0 and share_w >= min_week_fraction * share0:
+                covered += n0
+            else:
+                missing.append(src)
+        share = covered / total0
+        if share >= min_source_coverage:
+            keep.append(w)
+        else:
+            start, stop = _week_bounds(end, w)
+            dropped.append({"week": w, "start": start, "end": stop, "total": int(total_w), "covered_share": round(share, 3),
+                            "missing": sorted(missing, key=lambda s: (-current[s], s))})
+    return keep, dropped
+
+
+def _week_coverage(covered_from: Optional[str], prev_start: str, prev_end: str) -> Dict[str, Any]:
+    """How much of 'last week' the runs (and, for papers, a recorded backfill) that built this store fetched for."""
+    if covered_from is None or covered_from <= prev_start:
+        days = 7
+    elif covered_from > prev_end:
+        days = 0
+    else:
+        days = (_parse_date(prev_end) - _parse_date(covered_from)).days + 1
+    return {"covered_from": covered_from, "days_covered": days, "partial": days < 7}
+
+
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
@@ -273,6 +343,17 @@ def _weekly_totals(conn: sqlite3.Connection, params: Dict[str, Any], weeks: int)
         if _week_ok(wk, weeks):
             archive[wk] = int(n)
     return papers, archive
+
+
+def _source_weekly_counts(conn: sqlite3.Connection, params: Dict[str, Any], weeks: int) -> Dict[int, Dict[str, int]]:
+    """{week: {source: papers}} over the analysis window; RSS feeds are folded into one 'rss' source."""
+    out: Dict[int, Dict[str, int]] = {}
+    for wk, src, n in conn.execute(
+        _PW + f"SELECT pw.wk, {_SOURCE_LABEL}, COUNT(*) FROM papers p JOIN pw ON pw.id = p.id GROUP BY 1, 2", params
+    ):
+        if _week_ok(wk, weeks):
+            out.setdefault(wk, {})[str(src)] = int(n)
+    return out
 
 
 def _instrument_paper_rows(conn: sqlite3.Connection, params: Dict[str, Any]) -> List[Tuple]:
@@ -454,6 +535,7 @@ def compute_trends(
     notable_z: float = NOTABLE_Z,
     min_count: int = NOTABLE_MIN_COUNT,
     min_week_fraction: float = MIN_WEEK_FRACTION,
+    min_source_coverage: float = MIN_SOURCE_COVERAGE,
 ) -> Dict[str, Any]:
     """Structured week-over-week and week-vs-baseline deltas for every entity family.
 
@@ -461,12 +543,16 @@ def compute_trends(
     is the last day of the current week. `subgroups` is the list from config/subgroups.yaml (see
     `load_subgroups`); without it, subgroup trends use tracked-author hits only. Baseline weeks
     whose family total is below `min_week_fraction` of the median weekly total are treated as
-    partial and left out of the baseline (0 disables this).
+    partial and left out of the baseline (0 disables this); paper baseline weeks whose source mix
+    covers less than `min_source_coverage` of the current week's papers are not comparable and are
+    left out as well (0 disables this; see the module docstring).
     """
     if weeks < 1:
         raise ValueError("weeks must be >= 1")
     if not 0 <= min_week_fraction < 1:
         raise ValueError("min_week_fraction must be in [0, 1)")
+    if not 0 <= min_source_coverage <= 1:
+        raise ValueError("min_source_coverage must be in [0, 1]")
     end = _parse_date(until)
     until = _iso(end)
     week_start = _iso(end - timedelta(days=6))
@@ -477,7 +563,9 @@ def compute_trends(
     warnings: List[str] = []
 
     paper_totals, archive_totals = _weekly_totals(conn, params, weeks)
-    active_papers, dropped_papers = _active_weeks(paper_totals, weeks, min_week_fraction, end)
+    paper_sources = _source_weekly_counts(conn, params, weeks)
+    comparable, dropped_source_mix = _comparable_weeks(paper_sources, weeks, min_week_fraction, min_source_coverage, end)
+    active_papers, dropped_papers = _active_weeks({w: paper_totals.get(w, 0) for w in comparable}, weeks, min_week_fraction, end)
     active_archive, dropped_archive = _active_weeks(archive_totals, weeks, min_week_fraction, end)
 
     def delta(by_week: Dict[int, int], active: Sequence[int]) -> Dict[str, Any]:
@@ -541,6 +629,7 @@ def compute_trends(
 
     first_seen_min = conn.execute("SELECT MIN(substr(first_seen, 1, 10)) FROM papers").fetchone()[0]
     cold_start = first_seen_min is None or first_seen_min >= week_start
+    weeks_with_papers = sum(1 for w in range(1, weeks + 1) if paper_totals.get(w, 0) > 0)  # comparable or not
     # how much of 'last week' the runs that built this store actually covered: a corpus whose first run pulled
     # 2026-10-10..17 has one day of the 2026-10-04..10 bucket, and week-over-week movers against it are artefacts.
     # A recorded backfill (backfill_progress) extends the coverage back to its first month: its papers carry old
@@ -550,13 +639,10 @@ def compute_trends(
     covered_from = runs_since
     if backfill_from and (covered_from is None or backfill_from < covered_from):
         covered_from = backfill_from
-    if covered_from is None or covered_from <= prev_start:
-        prev_days_covered = 7
-    elif covered_from > prev_end:
-        prev_days_covered = 0
-    else:
-        prev_days_covered = (_parse_date(prev_end) - _parse_date(covered_from)).days + 1
-    previous_week_coverage = {"covered_from": covered_from, "days_covered": prev_days_covered, "partial": prev_days_covered < 7}
+    previous_week_coverage = _week_coverage(covered_from, prev_start, prev_end)
+    # archive records are fetched by the runs alone (a backfill writes papers), so their 'last week' is covered from
+    # the earliest run only: a store whose first run pulled 2 of the 7 days holds 2 days of archive 'last week'
+    previous_week_coverage_archive = _week_coverage(runs_since, prev_start, prev_end)
     new_entities = {
         "instrument": _new_mention_entities(conn, "instrument", week_start, until),
         "company": _new_mention_entities(conn, "company", week_start, until),
@@ -581,22 +667,29 @@ def compute_trends(
         "week_start": week_start,
         "previous_week": {"start": prev_start, "end": prev_end},
         "baseline": {"weeks": weeks, "since": since, "end": prev_end, "min_weeks_for_z": min_baseline_weeks,
-                     "min_week_fraction": min_week_fraction},
+                     "min_week_fraction": min_week_fraction, "min_source_coverage": min_source_coverage},
         "history": {
             "paper_weeks_with_data": len(active_papers),
+            "paper_weeks_holding_papers": weeks_with_papers,  # every baseline week with papers, before the partial and source-mix rules
             "archive_weeks_with_data": len(active_archive),
             "z_available_papers": len(active_papers) >= min_baseline_weeks,
             "z_available_archive": len(active_archive) >= min_baseline_weeks,
             "paper_weeks_dropped_partial": dropped_papers,
             "archive_weeks_dropped_partial": dropped_archive,
-            "previous_week_partial_papers": any(d["week"] == 1 for d in dropped_papers),
+            # paper weeks whose source mix does not cover the current week's (a single-source backfill under a
+            # multi-source live week); the current week's own mix is given so the renderer can name the step
+            "paper_weeks_dropped_source_mix": dropped_source_mix,
+            "current_week_sources": dict(sorted((paper_sources.get(0) or {}).items(), key=lambda kv: (-kv[1], kv[0]))),
+            # 'last week' is not a complete, comparable bucket for the family (partial, or a different source mix)
+            "previous_week_partial_papers": any(d["week"] == 1 for d in dropped_papers) or any(d["week"] == 1 for d in dropped_source_mix),
             "previous_week_partial_archive": any(d["week"] == 1 for d in dropped_archive),
             "previous_week_coverage": previous_week_coverage,
+            "previous_week_coverage_archive": previous_week_coverage_archive,
             # where the coverage came from: the earliest `runs.since` and the first backfilled month (None = none)
             "coverage_sources": {"runs_since": runs_since, "backfill_from": backfill_from},
             # every paper was ingested this week although earlier weeks hold publication-dated data (first run after
-            # a backfill): z-scores are fine, "new this week" is not
-            "ingested_this_week_only_with_history": bool(cold_start and len(active_papers) > 0),
+            # a backfill): the baseline statistics are by publication date, "new this week" is not meaningful
+            "ingested_this_week_only_with_history": bool(cold_start and weeks_with_papers > 0),
         },
         "thresholds": {"notable_z": notable_z, "min_count": min_count, "std_floor": STD_FLOOR},
         "cold_start": cold_start,
@@ -631,20 +724,44 @@ def _all_rows(trends: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-def top_movers(trends: Dict[str, Any], n: int = 10, min_count: Optional[int] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """(risers, fallers): ranked by z when a baseline exists, else by week-over-week change.
+def _family(group: str) -> str:
+    return "archive" if group == "instrument_experiments" else "papers"
 
-    Only entities with at least `min_count` counts this week, last week or on average are eligible,
-    so one-paper blips do not crowd out real movement.
+
+def week_over_week_comparable(trends: Dict[str, Any], family: str) -> bool:
+    """True when 'last week' is a complete, comparable bucket for the family ('papers' | 'archive'): fully covered
+    by the runs (or, for papers, a recorded backfill) and not dropped from the baseline as partial or for its
+    source mix. Only such families take part in the week-over-week fallback ranking of `top_movers`."""
+    hist = trends.get("history") or {}
+    if family == "archive":
+        cov = hist.get("previous_week_coverage_archive") or hist.get("previous_week_coverage") or {}
+        partial = bool(hist.get("previous_week_partial_archive"))
+    else:
+        cov = hist.get("previous_week_coverage") or {}
+        partial = bool(hist.get("previous_week_partial_papers"))
+    return not cov.get("partial") and not partial
+
+
+def top_movers(trends: Dict[str, Any], n: int = 10, min_count: Optional[int] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(risers, fallers): ranked by z; rows whose z is suppressed are left out.
+
+    z-scores and raw deltas are not one scale (an archive model's week-over-week delta is in thousands of
+    experiments, a paper z in units of standard deviation), so a family without a baseline is never ranked by delta
+    next to z-scored rows. Only when no family has a z at all are the tables ranked by week-over-week change, and
+    then only for families whose 'last week' is a complete, comparable bucket (`week_over_week_comparable`).
+    Entities need at least `min_count` counts this week, last week or on average, so one-paper blips do not crowd
+    out real movement.
     """
     mc = trends["thresholds"]["min_count"] if min_count is None else min_count
     rows = [r for r in _all_rows(trends) if max(r["current"], r["previous"], r["mean"] or 0) >= mc]
-
-    def score(r: Dict[str, Any]) -> float:
-        return r["z"] if r["z"] is not None else float(r["delta"])
-
-    risers = sorted([r for r in rows if score(r) > 0], key=lambda r: (-score(r), -r["delta"], -r["current"], str(r["id"])))
-    fallers = sorted([r for r in rows if score(r) < 0], key=lambda r: (score(r), r["delta"], -r["previous"], str(r["id"])))
+    scored = [r for r in rows if r["z"] is not None]
+    if scored:
+        risers = sorted([r for r in scored if r["z"] > 0], key=lambda r: (-r["z"], -r["delta"], -r["current"], str(r["id"])))
+        fallers = sorted([r for r in scored if r["z"] < 0], key=lambda r: (r["z"], r["delta"], -r["previous"], str(r["id"])))
+        return risers[:n], fallers[:n]
+    rows = [r for r in rows if week_over_week_comparable(trends, _family(r["group"]))]
+    risers = sorted([r for r in rows if r["delta"] > 0], key=lambda r: (-r["delta"], -r["current"], str(r["id"])))
+    fallers = sorted([r for r in rows if r["delta"] < 0], key=lambda r: (r["delta"], -r["previous"], str(r["id"])))
     return risers[:n], fallers[:n]
 
 
@@ -726,21 +843,73 @@ def _partial_note(label: str, dropped: List[Dict[str, Any]], unit: str) -> str:
     return f"{label}: " + "; ".join(parts)
 
 
+def _source_mix_note(trends: Dict[str, Any]) -> str:
+    """The coverage-step sentence: which baseline weeks were left out because their sources are not this week's."""
+    hist, base = trends["history"], trends["baseline"]
+    dropped = hist.get("paper_weeks_dropped_source_mix") or []
+    cur: Dict[str, int] = hist.get("current_week_sources") or {}
+    total0 = sum(cur.values()) or 1
+    missing = sorted({s for d in dropped for s in d.get("missing") or []}, key=lambda s: (-cur.get(s, 0), s))
+    present = [s for s in cur if s not in set(missing)]
+    present_share = sum(cur[s] for s in present) / total0
+    start, end = min(d["start"] for d in dropped), max(d["end"] for d in dropped)
+    if hist["z_available_papers"]:
+        z_part = (f"z-scores for the paper family are computed against the {_plural(hist['paper_weeks_with_data'], 'comparable week')} only.")
+    else:
+        z_part = (f"z-scores for the paper family are suppressed until {base['min_weeks_for_z']} comparable weeks exist: against those "
+                  "weeks they would measure the change in coverage, not in the literature.")
+    tail = " 'Last week' is one of them: read the 'Last week' column as a lower bound." if any(d["week"] == 1 for d in dropped) else ""
+    return (f"_Source mix: {_plural(len(dropped), 'baseline week')} ({start} to {end}) hold papers but their sources are not this week's "
+            f"({', '.join(present) or 'no source'} suppl{'ies' if len(present) == 1 else 'y'} {present_share:.0%} of this week's {total0:,} papers; "
+            f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} absent or far smaller there), so they are left out of the paper baseline "
+            f"(a week must be fed by sources supplying {base.get('min_source_coverage', MIN_SOURCE_COVERAGE):.0%} of this week's papers). {z_part}{tail}_\n")
+
+
+_FAMILY_LABEL = {"papers": "papers", "archive": "archive records"}
+
+
+def _wow_reason(trends: Dict[str, Any], family: str) -> Tuple[Tuple[Any, ...], str]:
+    """Why a family is left out of the week-over-week fallback ranking: (grouping key, phrase without the family
+    label), or ((), '') when it takes part."""
+    hist = trends["history"]
+    prev = trends["previous_week"]
+    cov = hist.get("previous_week_coverage_archive" if family == "archive" else "previous_week_coverage") or {}
+    if cov.get("partial"):
+        return (("runs", cov.get("covered_from"), cov.get("days_covered")),
+                f"the runs that built this store cover 'last week' ({prev['start']} to {prev['end']}) from {cov.get('covered_from')} only "
+                f"({cov.get('days_covered')} of 7 days)")
+    if hist.get("previous_week_partial_archive" if family == "archive" else "previous_week_partial_papers"):
+        return ("bucket",), f"'last week' ({prev['start']} to {prev['end']}) is a partial or non-comparable bucket (left out of the baseline above)"
+    return (), ""
+
+
+def _grouped(items: List[Tuple[Tuple[Any, ...], str, str]]) -> List[str]:
+    """[(key, phrase, family)] -> ['<phrase> for papers and archive records', ...], one entry per distinct phrase."""
+    out: Dict[Tuple[Any, ...], Tuple[str, List[str]]] = {}
+    for key, phrase, fam in items:
+        out.setdefault(key, (phrase, []))[1].append(_FAMILY_LABEL[fam])
+    return [f"{phrase} for {' and '.join(labels)}" for phrase, labels in out.values()]
+
+
 def render_trends_markdown(
-    trends: Dict[str, Any], top_n: int = 10, heading_level: int = 2, window_note: Optional[str] = None
+    trends: Dict[str, Any], top_n: int = 10, heading_level: int = 2, window_note: Optional[str] = None,
+    conversions_note: Optional[str] = None,
 ) -> str:
     """Compact "What changed" Markdown section from `compute_trends` output.
 
     `window_note` is an optional sentence printed under the header, meant for the digest renderer
-    to state its own (longer) window; see `digest_window_note`.
+    to state its own (longer) window; see `digest_window_note`. `conversions_note`, when given, replaces the
+    conversions table with that sentence: the digest prints its own, wider conversions list under the top
+    innovations and points here to it, so one document never carries two answers.
     """
     h = "#" * max(1, heading_level)
     hh = "#" * (max(1, heading_level) + 1)
     hist, thr, base = trends["history"], trends["thresholds"], trends["baseline"]
+    dropped_mix = hist.get("paper_weeks_dropped_source_mix") or []
     md: List[str] = [f"{h} What changed: {trends['week_start']} to {trends['until']}\n"]
     md.append(
         f"This week vs last week ({trends['previous_week']['start']} to {trends['previous_week']['end']}) vs the trailing "
-        f"{base['weeks']}-week baseline ({_plural(hist['paper_weeks_with_data'], 'week')} with paper data, "
+        f"{base['weeks']}-week baseline ({_plural(hist['paper_weeks_with_data'], 'comparable week' if dropped_mix else 'week')} with paper data, "
         f"{_plural(hist['archive_weeks_with_data'], 'week')} with archive data). "
         f"Weeks are seven-day buckets ending {trends['until']}. "
         f"z = (this week − baseline mean) / max(std, {thr['std_floor']:g}). **Bold** = notable: |z| ≥ {thr['notable_z']:g} with at least "
@@ -755,16 +924,21 @@ def render_trends_markdown(
             notes.append(_partial_note("papers", dropped_p, "papers"))
         if dropped_a:
             notes.append(_partial_note("archive", dropped_a, "experiments"))
-        tail = " 'Last week' above is one of them." if hist.get("previous_week_partial_papers") or hist.get("previous_week_partial_archive") else ""
+        partial_prev = any(d["week"] == 1 for d in dropped_p) or any(d["week"] == 1 for d in dropped_a)
+        tail = " 'Last week' above is one of them." if partial_prev else ""
         md.append(f"_Partial weeks excluded from the baseline (below {base.get('min_week_fraction', MIN_WEEK_FRACTION):.0%} of the median "
                   f"weekly total): " + " · ".join(notes) + f".{tail}_\n")
+    if dropped_mix:
+        md.append(_source_mix_note(trends))
     if trends.get("warnings"):
         md.append("_Warnings:_\n" + "\n".join(f"- {w}" for w in trends["warnings"]) + "\n")
+    comparable = "comparable " if dropped_mix else ""
     if not hist["z_available_papers"] and not hist["z_available_archive"]:
-        md.append(f"_Fewer than {base['min_weeks_for_z']} weeks of history: z-scores are suppressed and movers are ranked by week-over-week change._\n")
+        md.append(f"_Fewer than {base['min_weeks_for_z']} {comparable}weeks of history: z-scores are suppressed and movers are ranked by week-over-week change._\n")
     elif not hist["z_available_papers"] or not hist["z_available_archive"]:
         missing = "paper" if not hist["z_available_papers"] else "archive"
-        md.append(f"_Fewer than {base['min_weeks_for_z']} weeks of {missing} history: z-scores for that family are suppressed._\n")
+        md.append(f"_Fewer than {base['min_weeks_for_z']} {comparable if missing == 'paper' else ''}weeks of {missing} history: z-scores for that family "
+                  "are suppressed, and its rows are left out of the movers tables below (ranked by z)._\n")
     tot = trends["totals"]
     md.append(f"**Corpus:** {_fmt_total(tot['papers'])} papers · {_fmt_total(tot['archive_experiments'])} archive experiments.\n")
     notable = trends["notable"]
@@ -776,24 +950,30 @@ def render_trends_markdown(
 
     risers, fallers = top_movers(trends, n=top_n)
     headers = ["Entity", "Kind", "This week", "Last week", "Baseline mean ± std", "z", "Detail"]
-    cov = hist.get("previous_week_coverage") or {}
     wow_only = not hist["z_available_papers"] and not hist["z_available_archive"]
-    if cov.get("partial") and wow_only:
-        # the movers would be ranked by week-over-week change against a bucket the runs only partly covered:
-        # every "faller" would be an artefact of the missing days, so the tables wait for a full previous week
+    families_with_rows = {_family(r["group"]) for r in _all_rows(trends)} or {"papers"}
+    families = [f for f in ("papers", "archive") if f in families_with_rows]
+    excluded = [(f, *_wow_reason(trends, f)) for f in families if not week_over_week_comparable(trends, f)]
+    partly = []
+    for fam in families:
+        cov = hist.get("previous_week_coverage_archive" if fam == "archive" else "previous_week_coverage") or {}
+        if cov.get("partial"):
+            partly.append(((cov.get("covered_from"), cov.get("days_covered")),
+                           f"(from {cov.get('covered_from')}, {cov.get('days_covered')} of 7 days)", fam))
+    for phrase in _grouped(partly):
+        md.append(f"_'Last week' is only partly covered by the runs that built this store {phrase}; read the 'Last week' column as a lower bound._\n")
+    if wow_only and excluded and len(excluded) == len(families):
+        # with no baseline the movers would be ranked by week-over-week change against a bucket the runs only partly
+        # covered (or that is not comparable): every "faller" would be an artefact, so the tables wait
         md.append(f"{hh} Biggest risers and fallers\n")
         md.append(
-            f"_Suppressed: the runs that built this store cover 'last week' ({trends['previous_week']['start']} to "
-            f"{trends['previous_week']['end']}) from {cov.get('covered_from')} only ({cov.get('days_covered')} of 7 days), and with no "
-            f"baseline the movers would be ranked by week-over-week change against that partial bucket. They appear once a run has "
-            f"covered a full previous week._\n"
+            "_Suppressed: " + "; ".join(_grouped([(key, phrase, f) for f, key, phrase in excluded])) + ", and with no baseline the movers "
+            "would be ranked by week-over-week change against that partial bucket. They appear once a run has covered a full previous week._\n"
         )
     else:
-        if cov.get("partial"):
-            md.append(
-                f"_'Last week' is only partly covered by the runs that built this store (from {cov.get('covered_from')}, "
-                f"{cov.get('days_covered')} of 7 days); read the 'Last week' column as a lower bound._\n"
-            )
+        if wow_only and excluded:
+            md.append("_Ranked by week-over-week change (no baseline yet); " + "; ".join(
+                f"{'paper' if f == 'papers' else 'archive'} rows are left out because {phrase} for {_FAMILY_LABEL[f]}" for f, _key, phrase in excluded) + "._\n")
         md.append(f"{hh} Biggest risers\n")
         md.append(_table(headers, _mover_rows(risers)))
         md.append(f"{hh} Biggest fallers\n")
@@ -803,11 +983,12 @@ def render_trends_markdown(
     ne = trends["new_entities"]
     if trends["cold_start"] and hist.get("ingested_this_week_only_with_history"):
         md.append(
-            f"_Every paper in this corpus was ingested this week although {_plural(hist['paper_weeks_with_data'], 'earlier week')} hold "
+            f"_Every paper in this corpus was ingested this week although {_plural(hist.get('paper_weeks_holding_papers', hist['paper_weeks_with_data']), 'earlier week')} hold "
             "publication-dated papers (a first run after a backfill): 'new to the corpus' cannot yet be told apart from 'new to the "
             f"database', so the list is omitted ({len(ne['instrument'])} instruments, {len(ne['company'])} companies, {len(ne['journal'])} journals "
-            "would all count as new). The week-over-week and baseline statistics above are by publication date and are not affected; "
-            "this list becomes meaningful from the next weekly run._\n"
+            "would all count as new). The week-over-week and baseline statistics above are by publication date and are not affected by the "
+            "ingestion day" + ("; the source-mix note under the header says which backfilled weeks are comparable with this one" if dropped_mix else "")
+            + "; this list becomes meaningful from the next weekly run._\n"
         )
     elif trends["cold_start"]:
         md.append(
@@ -829,7 +1010,9 @@ def render_trends_markdown(
 
     md.append(f"{hh} Preprints that became journal articles\n")
     conv = trends["conversions"]
-    if not conv:
+    if conversions_note:
+        md.append(f"_{conversions_note.strip()}_\n")
+    elif not conv:
         md.append("_no preprint → journal conversions detected this week_\n")
     else:
         rows = []

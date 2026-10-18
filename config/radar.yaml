@@ -113,11 +113,12 @@ sources:
     max_pages: 10           # 100 records per page, about one request per second
 
   jstage:
-    enabled: false          # J-STAGE WebAPI (Japan). Live check 2026-10-17 PASSED (status 0, 466 hits for abst=genome, 2025-2026), but the
-                            # API terms forbid storing or caching the data in machine-readable form for 24 hours or more (Article 3(5))
-                            # and require a "Powered by J-STAGE" credit wherever it is displayed (Article 9), which the digest does not
-                            # render yet. Opt-in only: an explicit `enabled: true` after reading
-                            # https://www.jstage.jst.go.jp/static/pages/WebAPI/-char/ja, or `--sources jstage` for a one-off pull.
+    enabled: false          # J-STAGE WebAPI (Japan). Live check 2026-10-17 PASSED (status 0, 466 hits for abst=genome, 2025-2026). The digest
+                            # prints the "Powered by J-STAGE" credit with a link whenever a J-STAGE record falls in the window (Article 9;
+                            # SOURCE_CREDITS in litradar/digest/render.py), but the API terms also forbid storing or caching the data in
+                            # machine-readable form for 24 hours or more (Article 3(5)), which a persistent corpus does. Opt-in only: an
+                            # explicit `enabled: true` after reading https://www.jstage.jst.go.jp/static/pages/WebAPI/-char/ja, or
+                            # `--sources jstage` for a one-off pull.
     field: abst             # abst | text | article | keyword | author | affil
     terms: [genome, genomics, sequencing, single-cell, spatial transcriptomics, proteomics, CRISPR]
     journals: []            # J-STAGE journal codes (cdjournal), e.g. [plantbiotechnology, jsbbs]

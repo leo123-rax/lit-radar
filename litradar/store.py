@@ -43,7 +43,17 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .extract.gazetteer import family_label
-from .models import ArchiveRecord, Mention, NewsItem, Paper, normalize_doi
+from .models import (
+    ArchiveRecord,
+    Mention,
+    NewsItem,
+    Paper,
+    is_preprint_doi,
+    is_preprint_server,
+    normalize_doi,
+    preprint_posting_date,
+    preprint_server_from_doi,
+)
 from .policy import fulltext_storage_level
 from .rank.heuristics import PLATFORM_CATEGORIES
 
@@ -952,12 +962,82 @@ class Store:
         return _rows(cur)
 
     @staticmethod
-    def collapse_preprints(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def is_preprint_record(row: Dict[str, Any]) -> bool:
+        """True when a kind='preprint' row demonstrably comes from a preprint server.
+
+        OpenAlex (and the store's own upsert, which never flips a stored kind) label every repository deposit a
+        preprint: Figshare and Zenodo publisher deposits, wwPDB and EMPIAR entries, PubMed mirrors. Those must not
+        be paired with a journal article as 'the preprint of' it. Evidence accepted: a `published_doi` the server
+        itself supplied, a source that is a preprint server, a DOI minted by one, or a venue naming one."""
+        if (row.get("kind") or "article") != "preprint":
+            return False
+        if (row.get("published_doi") or "").strip():
+            return True
+        return (
+            is_preprint_server(row.get("source"))
+            or is_preprint_doi(row.get("doi"))
+            or is_preprint_server(row.get("journal"))
+        )
+
+    @staticmethod
+    def preprint_date(row: Dict[str, Any]) -> str:
+        """A preprint's posting date: the DOI-encoded first posting when it is earlier than the stored `pub_date`
+        (a weekly pull that only saw a revision stores the revision's date), else `pub_date`."""
+        stored = (row.get("pub_date") or "")[:10]
+        encoded = preprint_posting_date(row.get("doi"))
+        if encoded and (not stored or encoded < stored):
+            return encoded
+        return stored
+
+    @classmethod
+    def _conversion(cls, pre: Dict[str, Any], art: Dict[str, Any], how: str) -> Dict[str, Any]:
+        pre_date, art_date = cls.preprint_date(pre), (art.get("pub_date") or "")[:10]
+        lag: Optional[int] = None
+        if pre_date and art_date:
+            try:
+                lag = (date.fromisoformat(art_date) - date.fromisoformat(pre_date)).days
+            except ValueError:
+                lag = None
+        return {
+            "preprint_id": pre["id"], "preprint_date": pre_date, "preprint_url": pre.get("url") or "",
+            # the venue, else the server the DOI was minted by (OpenAlex leaves the venue blank for many deposits), else
+            # the source when it is itself a preprint server; never 'openalex'
+            "preprint_server": (pre.get("journal") or preprint_server_from_doi(pre.get("doi"))
+                                or (pre.get("source") if is_preprint_server(pre.get("source")) else "") or ""),
+            "article_id": art["id"], "article_title": art.get("title") or "", "journal": art.get("journal") or "",
+            "article_date": art_date, "article_url": art.get("url") or "", "matched_by": how, "lag_days": lag,
+        }
+
+    @classmethod
+    def _link_preprint(cls, pre: Dict[str, Any], by_id: Dict[str, Dict[str, Any]], by_doi: Dict[str, Dict[str, Any]],
+                       by_title: Dict[str, Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+        """The article a preprint row converts to, and how it was linked ('published_doi' | 'title' | '').
+
+        The server's own `published_doi` is taken as it stands. A title match needs the row to be a genuine preprint
+        record (`is_preprint_record`) and the preprint to be posted no later than the article was published: a
+        same-day publisher deposit with the article's title is not its preprint."""
+        pd = normalize_doi(pre.get("published_doi"))
+        if pd and (pd in by_doi or f"doi:{pd}" in by_id):
+            return by_doi.get(pd) or by_id.get(f"doi:{pd}"), "published_doi"
+        if not cls.is_preprint_record(pre):
+            return None, ""
+        t = _norm_title(pre.get("title"))
+        target = by_title.get(t) if len(t) >= 25 else None
+        if target is None:
+            return None, ""
+        pre_date, art_date = cls.preprint_date(pre), (target.get("pub_date") or "")[:10]
+        if pre_date and art_date and pre_date > art_date:
+            return None, ""
+        return target, "title"
+
+    @classmethod
+    def collapse_preprints(cls, rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Fold preprints whose journal version is in the same list into that article.
 
-        A preprint is linked to an article by `published_doi` or by an identical normalised title. The article row
-        gains `preprints` = [{id, pub_date, url, matched_by}] and the better of the two scores; the preprint row is
-        dropped. Returns (remaining rows, conversions)."""
+        A preprint is linked to an article by `published_doi` or, for a record that demonstrably comes from a
+        preprint server and was posted no later than the article, by an identical normalised title (see
+        `_link_preprint`). The article row gains `preprints` = [{id, pub_date, url, matched_by}] and the better of
+        the two scores; the preprint row is dropped. Returns (remaining rows, conversions)."""
         articles = [r for r in rows if (r.get("kind") or "article") != "preprint"]
         by_id = {r["id"]: r for r in articles}
         by_doi = {normalize_doi(r.get("doi")): r for r in articles if normalize_doi(r.get("doi"))}
@@ -971,30 +1051,62 @@ class Store:
         for r in rows:
             if (r.get("kind") or "article") != "preprint":
                 continue
-            target, how = None, ""
-            pd = normalize_doi(r.get("published_doi"))
-            if pd and (pd in by_doi or f"doi:{pd}" in by_id):
-                target, how = by_doi.get(pd) or by_id.get(f"doi:{pd}"), "published_doi"
-            else:
-                t = _norm_title(r.get("title"))
-                if len(t) >= 25 and t in by_title:
-                    target, how = by_title[t], "title"
+            target, how = cls._link_preprint(r, by_id, by_doi, by_title)
             if target is None or target["id"] == r["id"]:
                 continue
             drop.add(r["id"])
-            target.setdefault("preprints", []).append({"id": r["id"], "pub_date": r.get("pub_date") or "", "url": r.get("url") or "", "matched_by": how})
+            target.setdefault("preprints", []).append({"id": r["id"], "pub_date": cls.preprint_date(r), "url": r.get("url") or "", "matched_by": how})
             if r.get("final") is not None and (target.get("final") is None or r["final"] > target["final"]):
                 target["final"] = r["final"]
-            conversions.append({
-                "preprint_id": r["id"], "preprint_date": r.get("pub_date") or "", "preprint_url": r.get("url") or "",
-                "article_id": target["id"], "article_title": target.get("title") or "", "journal": target.get("journal") or "",
-                "article_date": target.get("pub_date") or "", "article_url": target.get("url") or "", "matched_by": how,
-            })
+            conversions.append(cls._conversion(r, target, how))
         return [r for r in rows if r["id"] not in drop], conversions
 
     def preprint_conversions(self, since: str, until: str) -> List[Dict[str, Any]]:
-        """Preprints in the window whose journal version is also in the window (by published_doi or title)."""
-        _, conversions = self.collapse_preprints(self.papers_in_window(since, until))
+        """Preprints whose journal version is in the window: the single list the digest prints.
+
+        Pairs with both legs in the window come from `collapse_preprints`; preprints posted before the window are
+        found by their `published_doi` pointing at an in-window article, or by an identical title (same guards as
+        the collapse). Each entry carries `matched_by`, `preprint_date` (first posting), `article_date`, `lag_days`
+        and `preprint_server`; sorted by article date, newest first."""
+        rows = self.papers_in_window(since, until)
+        _, conversions = self.collapse_preprints(rows)
+        seen = {(c["preprint_id"], c["article_id"]) for c in conversions}
+        articles = [r for r in rows if (r.get("kind") or "article") != "preprint"]
+        by_id = {r["id"]: r for r in articles}
+        by_doi = {normalize_doi(r.get("doi")): r for r in articles if normalize_doi(r.get("doi"))}
+        by_title: Dict[str, Dict[str, Any]] = {}
+        for r in articles:
+            t = _norm_title(r.get("title"))
+            if len(t) >= 25:
+                by_title.setdefault(t, r)
+        in_window = {r["id"] for r in rows}
+        candidates: Dict[str, Dict[str, Any]] = {}
+        dois = [d for d in by_doi if d]
+        for i in range(0, len(dois), 400):
+            chunk = dois[i : i + 400]
+            cur = self.conn.execute(
+                f"SELECT * FROM papers WHERE kind = 'preprint' AND lower(trim(published_doi)) IN ({','.join('?' * len(chunk))})", chunk
+            )
+            for r in _rows(cur):
+                candidates.setdefault(r["id"], r)
+        titles = sorted({(r.get("title") or "").strip().lower() for r in articles if len(_norm_title(r.get("title"))) >= 25})
+        titles = [t for t in titles if t]
+        for i in range(0, len(titles), 400):
+            chunk = titles[i : i + 400]
+            cur = self.conn.execute(
+                f"SELECT * FROM papers WHERE kind = 'preprint' AND lower(trim(title)) IN ({','.join('?' * len(chunk))})", chunk
+            )
+            for r in _rows(cur):
+                candidates.setdefault(r["id"], r)
+        for pre in candidates.values():
+            if pre["id"] in in_window:
+                continue  # both legs in the window: the collapse already decided
+            target, how = self._link_preprint(pre, by_id, by_doi, by_title)
+            if target is None or target["id"] == pre["id"] or (pre["id"], target["id"]) in seen:
+                continue
+            seen.add((pre["id"], target["id"]))
+            conversions.append(self._conversion(pre, target, how))
+        conversions.sort(key=lambda c: (c["article_date"] or "", c["article_id"]), reverse=True)
         return conversions
 
     def top_papers(self, since: str, until: str, limit: int = 25) -> List[Dict[str, Any]]:

@@ -82,7 +82,7 @@ Defaults live in `DEFAULT_WEIGHTS`; `ranking.weights` in config/radar.yaml overr
 | citations | age-aware, cap 2.0: within 90 days of publication +1.0 once cited and +0.5 at >= 1 citation/week; older than 90 days only +1.0 at >= 3 citations/month; +0.5 for an influential citation (`extra_json.semantic_scholar.influential_citation_count`) | `cited_by_count`, `pub_date`, Semantic Scholar | `already cited 3x in 14 days, 1 influential (+2.0)`, `cited 240x over 24 months (9.9/month) (+1.0)`, `cited 1x over 4 months (0.3/month), not scored (slow for its age)` |
 | preprint published | +1.0 | `published_doi` on a preprint | `preprint published as a journal article (Nature Methods) (+1.0)` |
 | news co-mention | +1.0 | this window's `news_items`: a company the paper is about or authored from (title, abstract, affiliations), the vendor of a platform it names, or a platform named in a headline; a supplier named only in Methods does not count | `in the news this window: 10x Genomics, Xenium (+1.0)` |
-| first concept | +1.0 | `concept_papers` / `concept_counts`: a concept whose first counted week is the current window, once the corpus holds `ranking.v2.concept_history_weeks` (4) earlier weeks of counts | `first corpus appearance: 'spatial proteomics' (+1.0)` |
+| first concept | +1.0 | `concept_papers` / `concept_counts`: a concept whose first counted week is the current window and that at least `FIRST_CONCEPT_MIN_PAPERS` (2) papers in the window's weeks carry (a singleton phrase — a river name, one lab's acronym — is one paper's wording, not a concept entering the corpus; live, 5,901 of 6,548 first-seen terms were singletons), once the corpus holds `ranking.v2.concept_history_weeks` (4) earlier weeks of counts | `first corpus appearance: 'spatial proteomics' (+1.0)` |
 | notice penalty | -4.0 | titles matching `NOTICE_RE` ("Author Correction:", "Erratum", "Retraction", ...) and preprints whose record type is `withdrawn` | `correction / retraction notice (−4.0)` |
 | full text | 0 | `fulltext_available` | (off by default: data availability is not quality) |
 
@@ -239,10 +239,20 @@ carries a role tag, e.g. `Profluent Bio (COI)`, so a disclosed equity stake neve
 ## 5. Preprint to publication
 
 When a preprint and its journal version are both in the digest window the digest shows **only the
-journal version**, marked `(also as preprint <date>)`, and gives it the better of the two scores. The
-link is made by the preprint's `published_doi` or, failing that, by an identical normalised title
-(25+ characters). `Store.preprint_conversions(since, until)` lists the pairs; the digest prints them under
-"Preprints that appeared as journal articles this window".
+journal version**, marked `(also as preprint <date>)` with the preprint's *first posting* date (a bioRxiv /
+medRxiv DOI encodes it, so a revision fetched this week is not dated after its own journal version), and
+gives it the better of the two scores. The link is made by the preprint's `published_doi` (the server's own
+statement, taken as it stands) or, failing that, by an identical normalised title (25+ characters) — but a
+title match needs a record that demonstrably comes from a preprint server (`Store.is_preprint_record`:
+a preprint-server source, a DOI minted by one, or a venue naming one; Figshare / Zenodo / wwPDB deposits
+that OpenAlex types as repository preprints are not) and a posting date no later than the article's.
+`Store.preprint_conversions(since, until)` lists the pairs for the window, including preprints posted in
+earlier weeks whose journal version is in the window (found from the article by `published_doi` or title),
+each with `matched_by`, `preprint_date`, `article_date`, `lag_days` and `preprint_server` (the venue, else the
+server the DOI was minted by). The digest prints them once, under "Preprints that appeared as journal articles
+this window", one line per article dated by its earliest preprint record (`+N further preprint records` when a
+paper has several); the "What changed" section points there instead of printing its own table, so one document
+never carries two answers.
 
 ## 6. Companies by type
 

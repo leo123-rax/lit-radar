@@ -26,13 +26,16 @@ Three channels run over `title + abstract (+ Methods when the full text was pars
 | channel | rule | examples |
 |---|---|---|
 | technical terms | runs of 2–4 tokens that are capitalised words, hyphenated terms, tokens with digits or Greek letters; stop words break the run; **title and abstract only** (Methods name reagents, buffers, statistics and software far more than ideas) | `CRISPR-Cas9 Base Editing`, `self-amplifying mRNA` |
-| acronym definitions | `long form (ACRONYM)`, resolved with a Schwartz–Hearst style backward match | `circulating tumor DNA (ctDNA)` |
+| acronym definitions | `long form (ACRONYM)`, resolved with a Schwartz–Hearst style backward match; **title and abstract only** (measured live, the definitions in Methods were lab boilerplate — bicinchoninic acid, polyvinylidene fluoride, column volumes, multiple cloning site — and, since Methods text exists only for papers whose full text was parsed, every one of them was a "first appearance") | `circulating tumor DNA (ctDNA)` |
 | seed anchors | a curated list of method/concept heads (`-seq`, `-omics`, editing, atlas, foundation model, perturbation, organoid, nanopore, cell-free, in situ, single-molecule, spatial, long-read, digital twin, agent, autonomous lab, LNP, mRNA, bispecific, ADC, CAR-T, TCR, base/prime editor, epigenetic clock, virtual cell) plus up to two preceding modifiers | `single-cell foundation model`, `patient-derived organoids` |
 
 Guards: Title Case titles and sentence-initial capitals are neutralised (otherwise every title would
 leak `Novel Approach`); pure numbers, units (`10 mM`, `37 °C`), statistics abbreviations and a list of
-boilerplate phrases (`confidence interval`, `machine learning`, `whole genome sequencing`, ...) are
-dropped; single generic words (`proteomics`, `sequencing`) never count on their own; and **every alias
+boilerplate phrases (`confidence interval`, `machine learning`, `whole genome sequencing`, lab consumables
+such as `Cell Counting Kit-8` or `polyvinylidene fluoride`, routine statistics such as `intraclass correlation
+coefficient` or `Mendelian randomization`, ...) are dropped — the list is compared in the extractor's own key
+space (`GENERIC_PHRASES` is rebuilt through `normalize_term`, so `hazard ratios` meets `hazard ratio`; variants
+that differ in a non-final token, `principal coordinates analysis`, `green fluorescence protein`, are listed as such); single generic words (`proteomics`, `sequencing`) never count on their own; and **every alias
 in `config/instruments.yaml` and `config/companies.yaml` is excluded, inside phrases too** — `Xenium In
 Situ` or `nanopore sequencing` (an Oxford Nanopore alias) are products, not concepts, and the instrument
 tables already count them.
@@ -144,7 +147,9 @@ without calling the model again.
 ## Caveats
 
 * A term is counted once per paper, however often it appears; abstracts contribute for every paper,
-  Methods only when open full text was parsed, so Methods-only vocabulary is under-counted.
+  Methods only when open full text was parsed (and only through the seed channel), so Methods-only
+  vocabulary is under-counted — deliberately: a phrase that exists only where Methods text exists is
+  "new" to the corpus by construction, not by the literature.
 * Disease names, anatomy, study populations and regulators are not concepts here: a built-in blocklist
   (`CLINICAL_PHRASES`: amyotrophic lateral sclerosis, autism spectrum disorder, Parkinson's disease,
   healthy controls, natural killer, drug administration, ...) plus a head-word rule (`CLINICAL_HEAD_WORDS`:

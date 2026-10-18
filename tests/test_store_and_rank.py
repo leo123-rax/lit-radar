@@ -259,7 +259,8 @@ def test_preprint_collapses_into_its_journal_version(tmp_path):
     ids = [t["id"] for t in top]
     assert pre.id not in ids and pre2.id not in ids and lone.id in ids and art.id in ids and art2.id in ids
     art_row = next(t for t in top if t["id"] == art.id)
-    assert art_row["preprints"] == [{"id": pre.id, "pub_date": "2026-10-11", "url": pre.url, "matched_by": "published_doi"}]
+    # the preprint's date is its first posting, which the bioRxiv DOI encodes (2026.01.01), not the stored revision date
+    assert art_row["preprints"] == [{"id": pre.id, "pub_date": "2026-01-01", "url": pre.url, "matched_by": "published_doi"}]
     assert art_row["final"] == 7.0  # the better of the two scores
     assert next(t for t in top if t["id"] == art2.id)["preprints"][0]["matched_by"] == "title"
     conv = st.preprint_conversions("2026-10-10", "2026-10-17")
@@ -635,3 +636,49 @@ def test_instrument_counts_roll_sibling_models_up_by_family(tmp_path):
     from litradar.extract.gazetteer import Gazetteer
     gz = Gazetteer.from_yaml(yaml.safe_load(open(DEFAULT_CONFIG_DIR / "instruments.yaml")), "instrument")
     assert [r["entity_id"] for r in st.instrument_counts(*w, families=gz.families)] == ["novaseq-x", "txg-xenium"]
+
+
+def test_preprint_links_need_a_real_preprint_record_posted_no_later_than_the_article(tmp_path):
+    """Seen live: four 'conversions' in one digest, every preprint dated at or after its article; two were same-day
+    Figshare publisher deposits with the article's title, one a plain-language summary. A title match now needs a record
+    that demonstrably comes from a preprint server and a posting date no later than the article's; the publisher's own
+    `published_doi` link is taken as it stands, and a preprint posted before the window is found from the article."""
+    st = Store(tmp_path / "links.sqlite")
+    art = _paper(1, id="doi:10.1080/17581966.2026.2743569", doi="10.1080/17581966.2026.2743569", kind="article", journal="Lung Cancer Management",
+                 pub_date="2026-10-12", title="Potential to improve early detection of lung cancer through expansion of screening")
+    deposit = _paper(2, id="doi:10.6084/m9.figshare.34408562", doi="10.6084/m9.figshare.34408562", kind="preprint", source="openalex", journal="Figshare",
+                     pub_date="2026-10-13", title=art.title)
+    art2 = _paper(3, id="doi:10.1002/prot.70189", doi="10.1002/prot.70189", kind="article", journal="Proteins", pub_date="2026-10-12",
+                  title="AlphaFold3 and intrinsically disordered proteins: reliable monomer predictions")
+    late = _paper(4, id="doi:10.1101/2026.10.14.100001", doi="10.1101/2026.10.14.100001", kind="preprint", journal="biorxiv", pub_date="2026-10-14", title=art2.title)
+    art3 = _paper(5, id="doi:10.1038/s41592-026-0100-1", doi="10.1038/s41592-026-0100-1", kind="article", journal="Nature Methods", pub_date="2026-10-15",
+                  title="A spatial method paper whose preprint was posted months earlier")
+    early = _paper(6, id="doi:10.1101/2026.06.01.200002", doi="10.1101/2026.06.01.200002", kind="preprint", journal="biorxiv", pub_date="2026-06-01", title=art3.title)
+    art4 = _paper(7, id="doi:10.1016/j.cell.2026.10.001", doi="10.1016/j.cell.2026.10.001", kind="article", journal="Cell", pub_date="2026-10-16",
+                  title="A completely different title chosen by the journal for this paper")
+    linked = _paper(8, id="doi:10.64898/2025.12.05.691730", doi="10.64898/2025.12.05.691730", kind="preprint", journal="biorxiv", pub_date="2026-10-13",
+                    published_doi="10.1016/j.cell.2026.10.001", title="Preprint title that the journal rewrote")
+    for p in (art, deposit, art2, late, art3, early, art4, linked):
+        st.upsert_paper(p)
+    st.commit()
+    assert Store.is_preprint_record(dict(kind="preprint", source="openalex", journal="Figshare", doi="10.6084/m9.figshare.1")) is False
+    assert Store.is_preprint_record(dict(kind="preprint", source="openalex", journal="bioRxiv (Cold Spring Harbor Laboratory)", doi="10.1101/2026.01.01.000001")) is True
+    assert Store.is_preprint_record(dict(kind="preprint", source="openalex", journal="", doi="10.21203/rs.3.rs-1")) is True
+    assert Store.is_preprint_record(dict(kind="preprint", source="europepmc", journal="Research Square", doi=None)) is True
+    assert Store.is_preprint_record(dict(kind="preprint", source="openalex", journal="Zenodo", doi="10.5281/zenodo.1", published_doi="10.1/x")) is True
+    assert Store.is_preprint_record(dict(kind="article", source="biorxiv", journal="biorxiv", doi="10.1101/2026.01.01.000001")) is False
+    assert Store.preprint_date({"doi": "10.64898/2025.12.05.691730", "pub_date": "2026-10-13"}) == "2025-12-05"
+    assert Store.preprint_date({"doi": "10.1101/2026.10.14.100001", "pub_date": "2026-10-01"}) == "2026-10-01"  # stored date already earlier
+    window = ("2026-10-10", "2026-10-17")
+    conv = {c["preprint_id"]: c for c in st.preprint_conversions(*window)}
+    assert set(conv) == {early.id, linked.id}
+    assert conv[early.id]["matched_by"] == "title" and conv[early.id]["article_id"] == art3.id and conv[early.id]["lag_days"] == 136
+    assert conv[early.id]["preprint_server"] == "biorxiv" and conv[early.id]["preprint_date"] == "2026-06-01"
+    assert conv[linked.id]["matched_by"] == "published_doi" and conv[linked.id]["preprint_date"] == "2025-12-05" and conv[linked.id]["lag_days"] == 315
+    assert [c["article_id"] for c in st.preprint_conversions(*window)] == [art4.id, art3.id]  # newest article first
+    # the deposit and the later-dated preprint stay separate rows in the window's list
+    rows, _ = Store.collapse_preprints(st.papers_in_window(*window))
+    ids = {r["id"] for r in rows}
+    assert {deposit.id, late.id, art.id, art2.id} <= ids and "preprints" not in next(r for r in rows if r["id"] == art.id)
+    assert next(r for r in rows if r["id"] == art4.id)["preprints"][0]["pub_date"] == "2025-12-05"
+    st.close()

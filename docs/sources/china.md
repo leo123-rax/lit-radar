@@ -379,8 +379,12 @@ chinaxiv:
 * Offline wiring tests: `tests/test_pipeline_offline.py` (`test_run_reaches_global_corpus_sources_with_configured_caps`,
   `test_global_corpus_toggles_are_respected_and_jstage_is_opt_in`, `test_global_corpus_source_failures_are_isolated`).
 
+* The digest's sequencing census (`SEQUENCING_ARCHIVES` / `SEQUENCING_ARCHIVE_LABELS` in `litradar/digest/render.py`)
+  includes both archives under their **stored** ids, `gsa` and `gsa-human` (hyphen, as the adapter writes it; the
+  source / counter name `gsa_human` is a label, not the stored id). A stored GSA-Human row therefore appears in the
+  census table with `gsa-human` in its Archive column and "GSA-Human" in the section heading
+  (`tests/test_digest_sections.py`).
+
 ### Still open after the wiring
 
-* The digest's sequencing census table (`SEQUENCING_ARCHIVES` in `litradar/digest/render.py`) does not include `gsa` /
-  `gsa-human` yet; the `New archive records` line does list them.
 * `litradar run --sources` help text in `litradar/cli.py` does not list the new ids yet (they work; only the help string lags).

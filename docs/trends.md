@@ -106,7 +106,36 @@ Two things do depend on how the rows arrived, and both are handled:
   earlier weeks nevertheless hold publication-dated papers the renderer prints a specific note ("every paper in this
   corpus was ingested this week although N earlier weeks hold publication-dated papers (a first run after a
   backfill) ...") instead of the first-week message; `history.ingested_this_week_only_with_history` carries the same
-  fact for JSON consumers. The z-scores and movers above that note are unaffected.
+  fact for JSON consumers. The z-scores and movers above that note are by publication date and unaffected by the
+  ingestion day — subject to the source-mix rule below.
+* **Source mix (comparable weeks).** A backfill is typically a capped, single-source sample (one OpenAlex topic
+  pull per month) while the live week is multi-source (bioRxiv, Crossref, Europe PMC, RSS, ...). Measured live on a
+  13-week OpenAlex-only backfill under a 4,099-paper multi-source week, the corpus line read `baseline 759 ± 239,
+  z +13.9` and 245 movers were "notable": every one of them the step in coverage, not a change in the literature.
+  A paper baseline week is therefore **comparable** only when its source mix covers the current week's: a source is
+  represented in the week when its share of that week's papers is at least `min_week_fraction` of its share of the
+  current week (shares, not counts, so a uniformly small partial week stays with the partial-week rule), and the week
+  is comparable when the sources represented in it supply at least `min_source_coverage` (default 0.75) of the
+  current week's papers. Non-comparable weeks are left out of the paper baseline and listed in
+  `history.paper_weeks_dropped_source_mix` (`{week, start, end, total, covered_share, missing}`), the current
+  week's own mix in `history.current_week_sources`; the renderer prints a "Source mix:" note naming the step. With
+  fewer than `min_baseline_weeks` comparable weeks the paper z-scores are suppressed (the header says "comparable
+  weeks"); once the live sources have fed three weeks, the z returns, computed against those weeks only. A minor
+  new source (below 25 % of the live week) never makes the baseline incomparable. `min_source_coverage=0` disables
+  the rule. Archive records are not affected: they are fetched by the runs alone, and their 'last week' coverage is
+  reported separately in `history.previous_week_coverage_archive` (from the earliest `runs.since`, never from the
+  paper backfill).
+
+## Movers: ranked by z, never by a mixed scale
+
+`top_movers` ranks by z and leaves out every row whose z is suppressed: an archive model's week-over-week delta is in
+thousands of experiments and a paper z in standard deviations, so a family without a baseline is never ranked by its
+raw delta next to z-scored rows (live, with one week of archive history, the risers and fallers tables were ten
+`n/a`-z archive rows each, ranked by delta, and no paper row could appear). Only when no family has a z at all are the
+tables ranked by week-over-week change, and then only for families whose 'last week' is a complete, comparable bucket
+(`week_over_week_comparable(trends, family)`: fully covered by the runs — or, for papers, by a recorded backfill —
+and not dropped from the baseline as partial or for its source mix). The renderer says which family is left out and
+why; when every family is incomplete the tables are suppressed with the reasons.
 
 ## Output structure (`compute_trends`)
 
@@ -114,10 +143,17 @@ Two things do depend on how the rows arrived, and both are handled:
 {
   "until": "2026-10-17", "week_start": "2026-10-11",
   "previous_week": {"start": "2026-10-04", "end": "2026-10-10"},
-  "baseline": {"weeks": 13, "since": "2026-07-12", "end": "2026-10-10", "min_weeks_for_z": 3, "min_week_fraction": 0.25},
-  "history": {"paper_weeks_with_data": 0, "archive_weeks_with_data": 0, "z_available_papers": false, "z_available_archive": false,
+  "baseline": {"weeks": 13, "since": "2026-07-12", "end": "2026-10-10", "min_weeks_for_z": 3, "min_week_fraction": 0.25, "min_source_coverage": 0.75},
+  "history": {"paper_weeks_with_data": 0, "paper_weeks_holding_papers": 1, "archive_weeks_with_data": 0, "z_available_papers": false, "z_available_archive": false,
               "paper_weeks_dropped_partial": [{"week": 1, "start": "2026-10-04", "end": "2026-10-10", "total": 282, "median": 3280.0}],
-              "archive_weeks_dropped_partial": [], "previous_week_partial_papers": true, "previous_week_partial_archive": false},
+              "archive_weeks_dropped_partial": [],
+              "paper_weeks_dropped_source_mix": [{"week": 2, "start": "2026-09-27", "end": "2026-10-03", "total": 975, "covered_share": 0.26, "missing": ["biorxiv", "crossref"]}],
+              "current_week_sources": {"biorxiv": 1254, "openalex": 1083},
+              "previous_week_partial_papers": true, "previous_week_partial_archive": false,
+              "previous_week_coverage": {"covered_from": "2024-01-01", "days_covered": 7, "partial": false},
+              "previous_week_coverage_archive": {"covered_from": "2026-10-10", "days_covered": 1, "partial": true},
+              "coverage_sources": {"runs_since": "2026-10-10", "backfill_from": "2024-01-01"},
+              "ingested_this_week_only_with_history": true},
   "thresholds": {"notable_z": 2.0, "min_count": 5, "std_floor": 1.0},
   "cold_start": true,
   "warnings": ["subgroup spatial: keyword query failed (...); keyword papers counted as 0"],
@@ -175,6 +211,12 @@ from .. import trends as trends_mod                         # near the other imp
         ))
 ```
 
+The shipped digest renderer (`_trends_section` in `litradar/digest/render.py`) does this and also passes
+`conversions_note=...`: the digest prints its preprint-to-journal conversions once, under the top innovations
+(`Store.preprint_conversions`, which covers the `published_doi` pairs this module finds plus title matches), and the
+trends section prints that pointer instead of its own table, so one document never carries two answers. The
+standalone `litradar trends` output keeps the table.
+
 and in the `summary = {...}` dict at the end of `render()` add
 `"trends": {"notable": trend_data["notable"], "new_entities": trend_data["new_entities"], "conversions": trend_data["conversions"], "totals": trend_data["totals"], "warnings": trend_data["warnings"]} if trend_data else None`.
 
@@ -208,14 +250,21 @@ trends:
   out of the baseline. A genuinely slow week is never that slow; but a corpus that is deliberately
   tiny (a handful of sources) with a bursty week can see the quiet weeks excluded. Set
   `min_week_fraction=0` to keep every week.
+* A paper baseline week whose source mix does not cover the current week's (see "Source mix") is left
+  out as well, so after a single-source backfill the paper z-scores are suppressed until the live
+  sources have fed `min_baseline_weeks` weeks; the archive family is unaffected. Set
+  `min_source_coverage=0` to compare against every week regardless of source.
+* Movers are ranked by z and rows whose z is suppressed are left out of the tables; in the no-z
+  fallback a family whose 'last week' is incomplete is left out, with the reason printed.
 * A `published_doi` back-filled onto a preprint whose journal version was already stored in an
   earlier week is not reported as a conversion (there is no persisted "already reported" state, so
   the alternative would be re-reporting old pairs every time a preprint is re-upserted).
 * `first_seen` is an ingestion timestamp, so "new this week" means new to *this* database, not new
   to the world; after a backfill the list is omitted with a note until the next weekly run (see "Backfills").
-* Conversions depend on sources that expose a `published_doi` (bioRxiv / medRxiv) and on the journal
-  version being in the store under its DOI id; conversions whose journal version was never ingested
-  are not visible.
+* Conversions in this module depend on sources that expose a `published_doi` (bioRxiv / medRxiv) and
+  on the journal version being in the store under its DOI id; conversions whose journal version was
+  never ingested are not visible. The digest's own list (`Store.preprint_conversions`) adds title
+  matches with a preprint-server and posting-date guard and is the one printed in the digest.
 * Anything that silently degraded during the computation (a subgroup keyword query that failed, so
   its keyword papers count 0) is listed in `warnings` and printed under the header, so a zero is
   never mistaken for a measurement.

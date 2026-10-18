@@ -17,6 +17,9 @@ from ..config import load_yaml, resolve_config_dir
 from .heuristics import RankContext
 
 CONCEPT_HISTORY_WEEKS = 4  # weeks of concept counts before the window needed before "first in corpus" is scored
+# papers (in the window's weeks) a first-seen term needs before it counts as a concept rather than a one-off phrase:
+# measured live, 5,901 of 6,548 terms first seen in one week were singletons (river names, one lab's acronyms)
+FIRST_CONCEPT_MIN_PAPERS = 2
 
 _WINDOW_P = "((p.pub_date >= :since AND p.pub_date <= :until) OR (p.pub_date = '' AND substr(p.first_seen,1,10) >= :since))"
 
@@ -71,10 +74,12 @@ def build_context(
     by_issn: Optional[Dict[str, str]] = None,
     as_of: Optional[str] = None,
     concept_history_weeks: int = CONCEPT_HISTORY_WEEKS,
+    first_concept_min_papers: int = FIRST_CONCEPT_MIN_PAPERS,
 ) -> RankContext:
     """Collect the window's news company ids and headlines, the concepts first seen in the window (when the corpus
-    holds at least `concept_history_weeks` earlier weeks of counts) and the journal version of every preprint in
-    the window that carries a `published_doi`. `as_of` (default `until`) anchors citation ages."""
+    holds at least `concept_history_weeks` earlier weeks of counts, and only terms carried by at least
+    `first_concept_min_papers` papers in the window's weeks) and the journal version of every preprint in the
+    window that carries a `published_doi`. `as_of` (default `until`) anchors citation ages."""
     conn: sqlite3.Connection = store.conn
     ctx = RankContext(as_of=str(as_of or until or ""))
     params = {"since": since, "until": until}
@@ -111,14 +116,18 @@ def build_context(
             ctx.concept_history_weeks = int(row[0] or 0) if row else 0
             ctx.concept_history_ok = ctx.concept_history_weeks >= int(concept_history_weeks)
             if ctx.concept_history_ok:
+                # a term first counted in the window's weeks, carried by at least `first_concept_min_papers` distinct
+                # papers there: a singleton phrase is one paper's wording, not a concept entering the corpus
                 cur = conn.execute(
                     """SELECT cp.paper_id, COALESCE(MAX(cc.display), cp.term)
                        FROM concept_papers cp
                        JOIN (SELECT term, MIN(week) AS first_week FROM concept_counts GROUP BY term) f ON f.term = cp.term
+                       JOIN (SELECT term, COUNT(DISTINCT paper_id) AS n FROM concept_papers WHERE week >= :wk0 GROUP BY term) w
+                         ON w.term = cp.term AND w.n >= :min_papers
                        LEFT JOIN concept_counts cc ON cc.term = cp.term AND cc.week = cp.week
                        WHERE cp.week >= :wk0 AND f.first_week >= :wk0
                        GROUP BY cp.paper_id, cp.term""",
-                    {"wk0": wk0},
+                    {"wk0": wk0, "min_papers": max(1, int(first_concept_min_papers))},
                 )
                 for pid, display in cur:
                     ctx.first_concepts.setdefault(str(pid), []).append(str(display))
