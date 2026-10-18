@@ -48,6 +48,8 @@ litradar read 10.1038/s41592-026-03265-w --no-store
 
 ## Troubleshooting
 
+- *Signed in, but a Nature Methods / Nature Biotechnology article still says paywalled*: a personal **Nature** subscription covers the flagship journal only; the Nature Research journals are separate subscriptions. The session probe therefore uses a Nature (flagship) article.
+
 - *"paywall markers present"*: the session is not live for that publisher. Run `litradar login <publisher>`
   again; if the window shows a CAPTCHA or consent banner, complete it; the command keeps polling for up to
   five minutes (`--wait`).

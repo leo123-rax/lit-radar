@@ -39,8 +39,9 @@ PUBLISHERS: Dict[str, Dict[str, Any]] = {
     "nature": {
         "hosts": ["www.nature.com", "nature.com"],
         "login_url": "https://idp.nature.com/auth/personal/springernature?redirect_uri=https%3A%2F%2Fwww.nature.com%2F",
-        # a known paywalled research article: the session is live only when its Methods come back without paywall markers
-        "probe_url": "https://www.nature.com/articles/s41592-026-03265-w",
+        # a paywalled article in the flagship journal (a personal Nature subscription covers Nature itself, not the
+        # Nature Research journals such as Nature Methods): the session is live when its Methods come back
+        "probe_url": "https://www.nature.com/articles/s41586-026-11143-w",
         "logged_in": lambda final_url, html_text: _has_full_text(html_text, "nature"),
         "doi_prefixes": ["10.1038/"],
         "article_url": lambda doi: f"https://www.nature.com/articles/{doi.split('/', 1)[1]}",
