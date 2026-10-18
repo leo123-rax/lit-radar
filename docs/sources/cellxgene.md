@@ -137,7 +137,7 @@ Three requests in total (`/datasets` twice, `/collections` once), 0 retries, 0 f
   `/datasets` is unavailable or malformed.
 * **Contact names** present in the collections payload are not stored anywhere.
 
-## Configuration (to add to `config/radar.yaml`)
+## Configuration (shipped in `config/radar.yaml`)
 
 ```yaml
   cellxgene:
@@ -147,7 +147,11 @@ Three requests in total (`/datasets` twice, `/collections` once), 0 retries, 0 f
     max_collection_details: 50  # fallback route only: cap on per-collection detail requests
 ```
 
-## Wiring (to add to `litradar/pipeline.py`)
+## Wiring (as applied in `litradar/pipeline.py`, 2026-10-17)
+
+`fetch_archives()` runs CELLxGENE after GEO and PRIDE exactly as below, `_store_archive()` keeps an adapter-supplied
+gazetteer id, and `--sources cellxgene` works. The digest renders the rows in their own sub-table, "Single-cell and
+spatial assays behind new datasets (CELLxGENE)".
 
 ```python
 from .sources import cellxgene as cellxgene_src
@@ -174,7 +178,5 @@ from .sources import cellxgene as cellxgene_src
                 r.entity_id, r.vendor, r.ticker = e.id, e.vendor, e.ticker
 ```
 
-`litradar/cli.py`: add `cellxgene` to the `--sources` help string. The digest's archive table picks the new
-rows up unchanged (they carry `platform` = `single-cell` / `spatial` and `archives` = `cellxgene` in the
-grouped query); a separate "assays behind newly public single-cell data" table can filter
-`archive_records.archive = 'cellxgene'` when wanted.
+The `run --sources` help in `litradar/cli.py` lists `cellxgene`. The rows carry `platform` = `single-cell` /
+`spatial` and `archive` = `cellxgene`, which is how the digest's separate sub-table selects them.

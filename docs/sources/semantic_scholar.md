@@ -162,7 +162,11 @@ the value is velocity on papers weeks to months old.
   for re-ranking older items, not for the week's newest preprints.
 * `tldr` is model-generated text from Semantic Scholar (tldr@v2.0.0), not the authors' abstract.
 
-## Wiring (not applied here; see `litradar/pipeline.py`)
+## Wiring (as applied in `litradar/pipeline.py`, 2026-10-17)
+
+`Pipeline.run` enriches after the upserts and before ranking, as below; `--sources semantic_scholar` runs the step
+alone; the counters `semantic_scholar.requested|matched|updated|failed_batches` land in the run report, and a run
+in which every batch failed and no DOI matched is reported in the error list. The `radar.yaml` block is shipped.
 
 ```python
 from .sources import semantic_scholar as s2_src

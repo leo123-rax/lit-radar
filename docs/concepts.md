@@ -82,10 +82,9 @@ counted week, so its true first appearance is unknown. The report carries the da
 `first_seen_label` per riser and per new term), so `--json` consumers can rebuild it.
 
 The column follows the mode automatically; `render_report_markdown(report, first_seen_column=True | False)` and
-`render_concepts_markdown(..., first_seen_column=...)` force it on or off in either mode. A `--since-baseline`
-command-line switch maps onto `first_seen_column=True`; the one-line wiring belongs in `litradar/commands/concepts.py`
-(`render_report_markdown(report, top=..., first_seen_column=bool(args.since_baseline))`) and is not part of this
-module.
+`render_concepts_markdown(..., first_seen_column=...)` force it on or off in either mode. The `--since-baseline`
+command-line switch (`litradar concepts --since-baseline`, wired in `litradar/commands/concepts.py`) maps onto
+`first_seen_column=True` and always adds the column; without it the column follows the mode.
 
 ## Output
 
@@ -97,13 +96,10 @@ full weekly series per term. The function `render_concepts_markdown(store, since
 the same thing as a digest section headed `## Emerging concepts` (the digest's one-week window is
 widened to at least 4 weeks; counts are computed incrementally on first use).
 
-Wiring into the weekly digest is one line in `litradar/digest/render.py`, before the
-`## Coverage and method` section:
-
-```python
-from ..concepts import render_concepts_markdown
-md.append(render_concepts_markdown(store, since, until, top=int(dcfg.get("concepts_n", 15))))
-```
+Wiring into the weekly digest (as applied): `litradar/digest/render.py` imports `render_concepts_markdown` and calls
+it from its derived-layers loop (after "What changed", before "Companies spotted" and "Coverage and method") with
+`top=digest.concepts_n` (default 15; `digest:` block of `config/radar.yaml`). An exception inside the section is
+rendered as `_section unavailable: …_` instead of failing the digest.
 
 ## Blocklist file (`config/concepts_blocklist.yaml`)
 

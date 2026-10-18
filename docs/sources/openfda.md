@@ -213,7 +213,12 @@ generator, 16 requests, 0 failures):
 A zero means openFDA answered HTTP 404 "No matches found!" for that applicant phrase inside the window, not
 that the search failed; a failed lookup is reported as `None`.
 
-## Wiring (not applied here; the pipeline and config files are owned by other work)
+## Wiring (as applied in `litradar/pipeline.py`, 2026-10-17)
+
+The `radar.yaml` block of step 2 is shipped (`sources.openfda`, on by default, 45-day look-back) and the pipeline
+runs openFDA in `Pipeline.fetch_signals()` next to NIH RePORTER and ClinicalTrials.gov rather than inside
+`fetch_news()`; the decisions render in the digest's "Grants, trials and clearances" section and `--sources openfda`
+runs the stage alone. Step 4 (the `docs/SOURCES.md` row) is done. The snippets below are the design record.
 
 1. `litradar/pipeline.py`: import `from .sources import openfda as openfda_src` and append to
    `fetch_news()` before `self.store.commit()`:

@@ -206,7 +206,14 @@ over time" question; GEO is the study-level complement.
 * `fetch(..., gpl_cache=dict)` lets a long run or a backfill reuse platform titles across windows
   (GPL metadata is stable).
 
-## Wiring (for the maintainer; nothing below is in this branch)
+## Wiring (as applied in `litradar/pipeline.py`, 2026-10-17)
+
+Steps 1–4 are in the code as written below (`fetch_archives()` runs GEO after ENA, `--sources geo` works, the
+`radar.yaml` block is shipped with `enabled: true`). Step 5 was carried out in `docs/SOURCES.md` on 2026-10-18.
+Steps 7–8 landed in a different shape: GEO rows sit in the digest's census table next to SRA/ENA
+(`SEQUENCING_ARCHIVES` in `litradar/digest/render.py`), labelled as series × platform, rather than in a separate
+table, and `Store.archive_instrument_counts` / `archive_strategy_counts` take an `archives=` filter. Step 6 needs
+no pipeline change. The text below is kept as the record of the design.
 
 1. `litradar/pipeline.py` — import next to the other source imports:
    ```python
@@ -242,7 +249,7 @@ over time" question; GEO is the study-level complement.
      max_records: 20000      # a week is ~500 series = 3 esummary pages + ~3 platform lookups (~8 requests, ~5 MB)
      sequencing_only: true   # adds "high-throughput sequencing"[PTYP] to the esearch; set false to include microarray / in-situ series
    ```
-5. `docs/SOURCES.md` — replace the `GEO (GPL platform ids) … not yet wired` cell with:
+5. `docs/SOURCES.md` — the status cell reads `wired` since 2026-10-18; the proposed caveat text was:
    ```
    | **NCBI GEO via E-utilities** (`esearch db=gds GSE[ETYP] AND <PDAT range>` -> paged `esummary` -> batched GPL `esummary`) | works; key lifts 3->10 req/s | one record per Series x Platform with the platform title folded to an instrument model, technology type, gdstype, release date; `sweep_error()` reports partial weeks | 516 series / 574 records / 138 platforms in the test week, 9 requests. GSE DocSums carry no platform title, so GPL lookups are required. See `docs/sources/geo.md`. |
    ```

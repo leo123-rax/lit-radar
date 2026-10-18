@@ -95,7 +95,7 @@ Quoted from the terms page (2026-10-17):
 * Article 2: non-commercial use needs no application; commercial use, paid or free, needs prior approval from JST.
 * Article 5: JST may limit access counts and times at any moment.
 
-A SQLite corpus kept for months on a hosted runner (the GitHub Actions cache) sits uneasily with Article 3(5).
+A SQLite corpus kept for months as a release asset restored on every hosted run sits uneasily with Article 3(5).
 The adapter is therefore meant to ship **disabled by default**; enable it after reading the terms, for example
 for laptop runs, for a pointer-only mode (keep DOI + URL and re-fetch titles on demand), or after asking JST.
 

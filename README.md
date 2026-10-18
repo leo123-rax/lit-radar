@@ -89,8 +89,10 @@ how the code enforces them are in `docs/LEGAL.md`; the short version is `docs/AC
   PCR, automation, imaging, cytometry, bioprocess) in a separate table so they do not crowd it.
 * **Instruments behind newly public sequencing data**: NCBI SRA + ENA experiments by declared
   instrument model, vendor share and library strategies. These count experiments, not machines,
-  and lag the experiment by months; study-level GEO, proteomics (PRIDE) and single-cell assay
-  (CELLxGENE) counterparts are built and being wired in.
+  and lag the experiment by months. The study-level GEO census (Series × platform) sits in the same
+  table, flagged as studies; proteomics datasets per declared mass spectrometer (PRIDE) and
+  single-cell / spatial assays (CELLxGENE) get their own sub-tables; native Chinese experiments from
+  NGDC GSA and GSA-Human join the census when the run pulled them.
 * **Companies in the literature**: how each company appears (as author, as funder or
   competing-interest disclosure, as subject, as supplier of a named instrument), typed so
   institutes and pharma disclosures are not read as vendors; first-time appearances.
@@ -117,7 +119,7 @@ Every command reads `config/` and `.env` from the repo root; `python -m litradar
 | `run --days 7 [--llm]` | full weekly pass: fetch, full text, extract, census, news, signals, rank, digest |
 | `update [--overlap-days 2]` | incremental daily pass from the last run's end (no digest); `status` reports freshness and exits non-zero when stale |
 | `digest --days 7` | re-render the digest from the database (all sections, no fetching) |
-| `search "query" [--since 90d] [--in methods,coi]` · `entity <id>` · `show <id|name>` · `watch add|run` | search and entity dossiers over the corpus. A multi-word query is an AND of stemmed terms; put the phrase in inner quotes for an exact phrase (`search '"minimal residual disease"'`). Syntax: `docs/search.md` |
+| `search "query" [--since 90d] [--in methods,coi,mentions] [--raw-fts]` · `entity <id>` · `show <id|name>` · `watch add|run` | search and entity dossiers over the corpus. A plain multi-word query is searched as one **phrase** (`search "minimal residual disease"` = those words adjacent, in order); `--raw-fts` sends the text to FTS5 as typed, so `search --raw-fts "minimal residual disease"` is the AND of three stemmed words, and FTS5 syntax (`methods:Xenium`, `Xenium OR Visium`, `NovaSeq*`) always passes through. A plain search also matches the `mentions` column: entities the gazetteer attributed to a paper under any alias. Syntax: `docs/search.md` |
 | `serve [--datasette]` | read-only JSON API + search page on localhost; or launch Datasette with the bundled metadata |
 | `add <doi|pmid|pmcid|arxiv|url> [--tag x]` · `tags` | add papers to the corpus by identifier |
 | `track company|instrument|author|topic|term ...` · `untrack` · `prioritize <kind> <target> --weight W` | edit what is tracked and weighted without hand-editing YAML |
