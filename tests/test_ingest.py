@@ -420,7 +420,12 @@ def test_refresh_without_fulltext_keeps_stored_text(tmp_path):
 
 def test_tracked_author_hit_recorded_once(tmp_path):
     pipe = _pipe(tmp_path, FakeHttp(journal_routes()))
-    tracked = next(a["name"] for g in pipe.subgroups for a in (g.get("tracked_authors") or []) if a.get("name"))
+    # a name-only match must be topically plausible, so the tracked person comes from a subgroup whose keywords
+    # occur in the record's title / abstract
+    rec = epmc_record()["resultList"]["result"][0]
+    text = (rec["title"] + " " + rec["abstractText"]).lower()
+    group = next(g for g in pipe.subgroups if (g.get("tracked_authors") or []) and any(k.lower() in text for k in g.get("keywords") or []))
+    tracked = next(a["name"] for a in group["tracked_authors"] if a.get("name"))
     routes = [(f'DOI:"{DOI}"', epmc_record(authorList={"author": [{"fullName": tracked}]}))]
     pipe = _pipe(tmp_path, FakeHttp(routes))
     r1 = ingest.add_papers(pipe, [DOI])[0]

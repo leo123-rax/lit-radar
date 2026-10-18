@@ -408,6 +408,8 @@ def test_name_matches_reject_initials_and_other_openalex_ids(tmp_path, monkeypat
                             "j. craig venter": [("J. Craig Venter", "synthesis")]}
     pipe.tracked_ids = {"A1": [("Feng Zhang", "gene_editing")]}
     pipe.tracked_id_for = {("Feng Zhang", "gene_editing"): "A1"}
+    pipe.tracked_orcid_for = {}
+    pipe.subgroups = []  # no configured subgroup here: the topical gate on name matches has its own test below
 
     def paper(i, *authors):
         return _preprint(id=f"doi:10.1101/n{i}", doi=f"10.1101/n{i}", title=f"Paper {i}", fulltext_url="", authors=list(authors))

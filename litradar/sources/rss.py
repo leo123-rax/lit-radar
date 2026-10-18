@@ -8,7 +8,7 @@ import hashlib
 import logging
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -24,13 +24,21 @@ def _local(tag: str) -> str:
 
 
 def _child_text(el: ET.Element, *names: str) -> str:
+    """Text of the first direct child whose local name is in `names`, including text nested in sub-elements:
+    Atypon feeds (JCO, the Science family) wrap the value, ``<dc:date><dc:date>2026-09-08T07:00:00Z</dc:date></dc:date>``,
+    so the outer element's own `.text` is whitespace and only `itertext()` sees the date."""
     for ch in el:
-        if _local(ch.tag) in names and (ch.text or "").strip():
-            return (ch.text or "").strip()
+        if _local(ch.tag) in names:
+            text = "".join(ch.itertext()).strip()
+            if text:
+                return text
     return ""
 
 
-def _parse_date(s: str) -> str:
+def _parse_date(s: str, today: Optional[date] = None) -> str:
+    """YYYY-MM-DD from RFC 2822, ISO 8601 or a bare date. A month-precision value (``2026-11``, what Elsevier puts
+    in ``dc:date`` / ``prism:publicationDate`` for in-press items) becomes the first of that month, capped at
+    `today`: the item is online now, the month names the issue it will appear in."""
     s = (s or "").strip()
     if not s:
         return ""
@@ -41,10 +49,30 @@ def _parse_date(s: str) -> str:
     m = re.match(r"(\d{4}-\d{2}-\d{2})", s)
     if m:
         return m.group(1)
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if m and 1 <= int(m.group(2)) <= 12:
+        first = f"{m.group(1)}-{m.group(2)}-01"
+        now = (today or datetime.now(timezone.utc).date()).isoformat()
+        return min(first, now)
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%Y-%m-%d")
     except ValueError:
         return ""
+
+
+# item date elements in preference order: the online / posting date first (RSS pubDate, dc:date, Atom published),
+# then PRISM's cover and publication dates (the issue date; Elsevier and Atypon feeds carry these when dc:date is
+# missing or month-precision)
+_ITEM_DATE_TAGS = ("pubDate", "date", "published", "updated", "coverDate", "publicationDate", "coverDisplayDate")
+
+
+def _item_date(el: ET.Element, tags: tuple = _ITEM_DATE_TAGS) -> str:
+    """The first element in `tags` order that parses to a date (a present-but-unparseable one does not stop the search)."""
+    for name in tags:
+        d = _parse_date(_child_text(el, name))
+        if d:
+            return d
+    return ""
 
 
 def _strip_html(s: str) -> str:
@@ -117,7 +145,7 @@ def parse_feed(text: str, feed_name: str = "", url: str = "") -> List[Dict[str, 
                 {
                     "title": _strip_html(_child_text(en, "title")),
                     "link": clean_link(link or _child_text(en, "id")),
-                    "date": _parse_date(_child_text(en, "published", "updated", "date")),
+                    "date": _item_date(en, ("published", "updated", "date", "coverDate", "publicationDate")),
                     "summary": _strip_html(_child_text(en, "summary", "content", "description")),
                     "authors": authors,
                     "doi": normalize_doi(_child_text(en, "doi", "identifier") or link),
@@ -142,7 +170,7 @@ def parse_feed(text: str, feed_name: str = "", url: str = "") -> List[Dict[str, 
             {
                 "title": _strip_html(_child_text(it, "title")),
                 "link": clean_link(link),
-                "date": _parse_date(_child_text(it, "pubDate", "date", "published", "updated")),
+                "date": _item_date(it),
                 "summary": _strip_html(_child_text(it, "description", "summary", "content", "encoded")),
                 "authors": authors,
                 "doi": normalize_doi(_child_text(it, "doi", "identifier") or link),

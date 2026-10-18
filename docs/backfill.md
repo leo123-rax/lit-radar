@@ -26,7 +26,8 @@ API key.
 ```
 GET https://api.openalex.org/works
     ?filter=primary_topic.id:T11289|T10222|T10621,
-            from_publication_date:2024-01-01,to_publication_date:2024-01-31
+            from_publication_date:2024-01-01,to_publication_date:2024-01-31,
+            type:article|preprint|review
             [,institutions.country_code:cn]
     &search.title_and_abstract="single-cell RNA" OR "scRNA-seq" OR "single-nucleus" ...     (omitted with --topics-only)
     &per-page=200&cursor=*
@@ -218,13 +219,14 @@ Every paper written by either route carries in `extra_json`:
 
 | Key | Meaning |
 |---|---|
-| `countries` | sorted ISO 3166-1 alpha-2 codes of all author institutions (`authorships[].institutions[].country_code` ∪ `authorships[].countries`) |
-| `first_author_countries` | the same for the first authorship |
+| `countries` | ISO 3166-1 alpha-2 codes of all author institutions (`authorships[].institutions[].country_code` ∪ `authorships[].countries`), the first author's countries first and then the rest (each part sorted), so `countries[0]` is the paper's primary country for the dashboard and `litradar tag --check` |
+| `first_author_countries` | the same for the first authorship (sorted) |
 | `language` | OpenAlex `language` (ISO 639-1, auto-detected from title/abstract; `zh` for Chinese-language metadata) |
+| `lang` | the key `litradar.i18n` reads and writes (docs/i18n.md): OpenAlex `language` when set, else the house detector (`i18n.paper_language`). A backfilled row therefore counts as tagged in `litradar tag --check`, the country dashboard and the trend queries without a separate `litradar tag` pass; `litradar tag` keeps a backfill row's `countries` when the stored author list carries no exact codes to recompute from |
 | `subgroups` | every subgroup that matched; merged across runs, since `upsert_paper` otherwise replaces `extra_json` |
 | `backfill_source` | `api` or `snapshot` |
 | `match` | `topic+keyword` (a subgroup keyword occurred in title/abstract) or `topic` (accepted on the OpenAlex topic alone); when both routes touch a paper the stronger `topic+keyword` is kept |
-| `work_type` | OpenAlex `type` (`article`, `preprint`, `review`, `dataset`, ...) |
+| `work_type` | OpenAlex `type`: only `article`, `preprint` and `review` are written. The API route sends `type:article|preprint|review` and the snapshot matcher applies the same gate, so datasets, supplementary materials, peer reviews, software, dissertations, errata and conference abstracts never enter `papers`; figure / table / data component records ("Figure S5 from <article>", "Data from <article>") are dropped by title whatever their type (`litradar.models.is_paper_record`, reported as `skipped_non_paper`). Rows written by earlier backfills without the gate can be found with `SELECT COUNT(*) FROM papers WHERE json_extract(extra_json, '$.work_type') NOT IN ('article', 'preprint', 'review')` |
 | `grants` / `sections.funding` | funder display names from `funders[]` (the replacement for the removed `grants`) |
 
 **Non-English metadata.** Many Chinese-journal / CNKI records carry Chinese-only titles and abstracts;
