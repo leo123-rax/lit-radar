@@ -33,7 +33,7 @@ copies the database and its sidecars to a temporary directory, reads the copy, a
 
 | Page | What it shows |
 |---|---|
-| `index.html` | papers per week; instruments named per week by vendor; archive experiments per week by vendor; top movers (instruments by papers, instruments by experiments, companies by mentions — ranked over **every** entity in the store, not only the carded ones); monthly series when the optional `timeseries` table exists |
+| `index.html` | papers per week; instruments named per week by vendor; archive experiments per week by vendor; top movers (instruments by papers, instruments by experiments, companies by mentions — ranked over **every** entity in the store, not only the carded ones, and shown only when both compared windows were ingested alike, see *Coverage*); monthly series when the optional `timeseries` table exists |
 | `instruments.html` | one card per instrument: papers naming it per week **and** archive experiments per week, in two separate charts, plus its most recent papers. Cards are the union of the 48 most-named instruments and the 48 with the most archive experiments, so a sequencer that archives see constantly but papers rarely name by model keeps its card; the lede states how many of the instruments with signal are shown |
 | `timeseries.html` | the archive time series (`litradar timeseries --all`): one chart per vendor with its instrument models as monthly series — SRA experiments by default, switchable to ENA runs or Europe PMC papers, linear or log axis — the last two months shaded as incomplete, a dashed vendor total, a 12-month table per vendor, and links to the committed CSV and to `data/timeseries.json`. Details below |
 | `companies.html` | one card per company: mentions per week split by role — author affiliation, funding / competing-interest statement, subject of the work — with the stored news count |
@@ -65,7 +65,20 @@ is written, so a broken store can never publish an all-zero site as if it were n
 
 **Week buckets** are ISO weeks keyed by the Monday, in UTC. A paper is bucketed by `pub_date`,
 falling back to the date part of `first_seen` for feeds that carry no publication date — the same
-rule the digest uses, so the two never disagree.
+rule the digest uses, so the two never disagree. One class of paper has **no publication week**:
+OpenAlex pads a month-precision date (`2026-10`) to `2026-10-01` and a year-precision one
+(`2026`) to `2026-01-01`, and exposes no precision flag, so a corpus backfilled from it carries
+several thousand papers "published" on the 1st of a month (one build held 6,655 such papers in
+a 52-week window against about 100 a day on other days, with 2,184 on 2026-01-01 alone).
+Charted as published they draw a sawtooth of month boundaries and a year-start spike. Every
+weekly series on the site — the headline chart, the vendor stacks, the entity cards, the movers,
+subgroups and countries — therefore counts only papers whose week is known: a paper from a
+source in `PADDED_DATE_SOURCES` (`openalex`) dated the 1st is left out, counted apart in
+`papers_per_week.first_of_month` (by the week its padded date falls in, so the table below the
+headline chart still accounts for it in a second column) and reported in the card's note. The
+few papers really published on the 1st cannot be told apart and go with them; lists — the recent
+papers on a card, the search index — keep every paper. The same date from a source that stores
+day precision (Crossref, the preprint servers) is an ordinary paper.
 
 **Top movers** compare the last four *complete* weeks against the four before them, and report the
 raw counts beside the change. The axis ends with the ISO week containing the build date; unless
@@ -74,7 +87,59 @@ says so ("The current, unfinished week is left out."). With fewer than eight com
 span shrinks (down to one week against one), and the table headers and the note always name the
 exact weeks compared. The ranking covers every instrument and company with any signal in the
 window, not only those with a card. A move from zero has no percentage: it is shown as `n/a`,
-never as an infinite or invented growth rate.
+never as an infinite or invented growth rate. A table is **shown only when both windows were
+ingested alike** (next section); otherwise it is suppressed and the note says which run, census
+or backfill starts or ends inside the compared weeks.
+
+### Coverage
+
+A weekly chart is only as honest as its knowledge of what was fetched for each week. The store
+records that in two places, and the build reads both (`collect()` → `coverage`, also written to
+`data/overview.json`):
+
+| Record | Layer | What it says |
+|---|---|---|
+| `runs.since` (earliest) | `runs_since` | from this publication date on, the weekly runs fetched every configured source — full text where available, so Methods-level mentions — and took the archive census |
+| `backfill_progress.month` (earliest, latest) | `backfill_from`, `backfill_to` | publication metadata only (title- and abstract-level mentions, no archive records) for those months |
+| derived | `archive_since` | the earlier of `runs_since` and the earliest `archive_records.first_public`: the census had not run before it |
+| derived | `papers_since` | the earlier of `runs_since` and `backfill_from`: no run fetched papers for the weeks before it |
+
+Three rules follow from them:
+
+1. **Weeks before the relevant start are `n/a`, never 0.** A week that ends before `archive_since`
+   (archive series) or `papers_since` (paper series) and holds nothing is `null` in the JSON,
+   `n/a` in every table and a gap in the chart, with the lead shaded; the card's note says how
+   many weeks that is and how many days of records the first covered week holds ("The archive
+   census in this store starts 2026-10-10: the 50 earlier weeks (shaded) were never fetched for,
+   and an empty one is shown as n/a, not as zero; the week of 2026-10-05 holds 2 days of
+   records."). A week before the start that *does* hold rows — records that reached the store by
+   another route — keeps its count: data is never hidden, only the absence of data is named. The
+   payload carries the facts as `archive_by_vendor.coverage` and `papers_per_week.coverage`
+   (`since`, `uncovered_weeks`, `first_week`, `first_week_days`), and the entity pages receive
+   the same blocks as `archive_coverage` / `papers_coverage`.
+2. **The ingestion boundary is marked.** When backfilled weeks precede the first weekly run inside
+   the axis, the papers chart draws a dashed line at the week the runs begin
+   (`papers_per_week.coverage.runs_week_index`), the tooltip says "backfilled metadata only" or
+   "weekly runs from <date>" for each week, and the note explains that a step there is a change
+   of ingestion, not of publishing. A corpus whose backfill holds ~600 papers a week next to
+   weekly runs holding ~3,500 would otherwise read as a six-fold surge.
+3. **Movers compare like with like.** For each table the layers that feed it — the weekly runs and
+   the backfill for the two paper tables, the archive census for the experiments table — must
+   relate to the recent window and the previous one *alike*, and either fully or not at all. A
+   layer that covers one window and not the other, or covers either only in part (a first weekly
+   run mid-window, a census that began last month, a backfill that stops between the windows),
+   suppresses the table: the rows would rank the discontinuity (a first build after a backfill
+   showed every instrument at +600 % to +5,900 % and every archive row with `previous = 0`). The
+   note names the layer and the day spans ("Instruments by papers: suppressed, because the weekly
+   runs (publication dates from 2026-10-10) cover the recent window (2026-09-21 through
+   2026-10-18) only in part and the previous one (2026-08-24 through 2026-09-20) not at all, so
+   the two were not ingested alike …"), the JSON carries it as
+   `movers_window.coverage[table] = {comparable, reason}`, and the table returns by itself once
+   the runs have covered eight complete weeks. A store that records no layer at all (one built
+   outside the pipeline) is zero-filled and compared as before.
+
+The trends report (`docs/trends.md`, *Coverage of "last week"*) reads the same two records for
+its own week-over-week flags, so the two surfaces never disagree about where coverage begins.
 
 **Vendor labels in the archive chart.** Records whose declared instrument model is not in the
 gazetteer carry no vendor, so the archive's own `instrument_platform` value stands in. Where that
@@ -242,12 +307,19 @@ Notes and limits:
 `tests/test_dashboard_offline.py` seeds a temporary SQLite store through the normal `Store` API and
 builds a site from it — no network, no live database. It covers a normal store, an empty one,
 malformed `extra_json` and `companies_json`, unparseable dates, a window containing nothing, the
-optional `timeseries` table, the series-folding rule, the instrument card cap (an archive-heavy
-instrument with no paper mentions keeps its card and its place in the movers), the complete-weeks
-rule for movers (Saturday versus Sunday builds), optional-versus-fatal database errors (a missing
-column is skipped and counted; a syntax error or a corrupt file raises and writes nothing),
-archive platform-code merging, subgroup folding, and a check that the source database is
-byte-identical after a build. `tests/test_dashboard_search.py` covers the search index the same way:
+optional `timeseries` table, the series-folding rule (including `n/a` weeks), the instrument card
+cap (an archive-heavy instrument with no paper mentions keeps its card and its place in the
+movers), the complete-weeks rule for movers (Saturday versus Sunday builds), optional-versus-fatal
+database errors (a missing column is skipped and counted; a syntax error or a corrupt file raises
+and writes nothing), archive platform-code merging, subgroup folding, a check that the source
+database is byte-identical after a build, and the coverage rules: weeks before the recorded
+census or run start are `null`/`n/a` and the page says so, records older than the first run
+extend the census start, movers are suppressed with the reason when a run, census or backfill
+starts or ends inside the compared weeks (and return when it covers both), a recorded backfill
+is read and marks the runs boundary on the papers chart, first-of-month dates from a padding
+source are kept out of every weekly series but not out of the search index, and the page script
+renders `n/a` cells, coverage shading and the suppression message. The seeded store records the
+run that built it, so its zero weeks are measured zeros. `tests/test_dashboard_search.py` covers the search index the same way:
 record fields and ordering, the data-policy gate on abstract excerpts (never full text, nothing at
 level `none`), markup stripping and escaping, the window, the record cap and byte budget, the
 vocabulary with card-aware links, JSON validity, the page shell, the build hook and the
