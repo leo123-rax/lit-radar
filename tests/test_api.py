@@ -357,6 +357,20 @@ def test_no_cors_header_by_default(served):
     assert "Access-Control-Allow-Origin" not in headers
 
 
+def _wait_for_log(caplog, needle, timeout=3.0):
+    """Return the first litradar.api log message containing `needle`, waiting for the server thread to emit it."""
+    import time as _time
+
+    deadline = _time.time() + timeout
+    while True:
+        for r in caplog.records:
+            if r.name == "litradar.api" and needle in r.getMessage():
+                return r.getMessage()
+        if _time.time() > deadline:
+            raise AssertionError(f"no litradar.api log line containing {needle!r} within {timeout}s")
+        _time.sleep(0.05)
+
+
 def test_log_line_redacts_emails(caplog, served):
     assert api.redact_path("/search?q=mail%20me%20at%20someone@example.org&since=7d") == "/search?q=mail me at [email]&since=7d"
     assert api.redact_path("/search?q=a%40b.co") == "/search?q=[email]"
@@ -365,12 +379,12 @@ def test_log_line_redacts_emails(caplog, served):
     with caplog.at_level("INFO", logger="litradar.api"):
         # quoted: '@' is not an FTS5 bareword character, so the unquoted form would be a (correct) 400
         _get(served["base"], "/search?q=Xenium%20%22someone@example.org%22")
-    line = next(r.getMessage() for r in caplog.records if r.name == "litradar.api" and "/search" in r.getMessage())
+        line = _wait_for_log(caplog, "/search")  # the server thread logs after the response is sent
     assert "@" not in line and "[email]" in line and " 200 " in line
     caplog.clear()
     with caplog.at_level("INFO", logger="litradar.api"):
         _get(served["base"], "/search?q=someone@example.org")  # rejected by FTS5, still masked in the log
-    line = next(r.getMessage() for r in caplog.records if r.name == "litradar.api" and "/search" in r.getMessage())
+        line = _wait_for_log(caplog, "/search")
     assert "@" not in line and " 400 " in line
 
 
