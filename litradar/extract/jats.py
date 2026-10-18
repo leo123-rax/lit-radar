@@ -1,7 +1,8 @@
 """Pull the sections we care about out of JATS XML (bioRxiv, Europe PMC / PMC full text).
 
-Returned dict keys: methods, funding, coi, ack, data_availability, plus authors (list of dicts),
-affiliations (list of str), emails (list of str) and body (all body text, for FTS).
+Returned dict keys: methods, funding, coi, ack, data_availability, abstract (the article's own
+<abstract>, for records whose metadata carried none), plus authors (list of dicts), affiliations
+(list of str), emails (list of str) and body (all body text, for FTS).
 """
 from __future__ import annotations
 
@@ -30,6 +31,29 @@ def _strip_ns(root: Any) -> None:
             el.tag = el.tag.split("}", 1)[1]
 
 
+_SKIPPED_ABSTRACT_TYPES = ("graphical", "teaser", "toc", "video", "web-summary", "key-points")
+_ABSTRACT_LEAD_RE = re.compile(r"^(abstract|summary)\s*[:.\-]?\s*", re.I)
+
+
+def extract_abstract(root: Any) -> str:
+    """The article's abstract as plain text: the first plain <abstract> in <front>/<article-meta> (graphical,
+    teaser and similar variants are skipped; sub-article abstracts are ignored), with a leading 'Abstract' label
+    removed and whitespace collapsed. '' when the document has none."""
+    meta = root.find("front/article-meta")
+    scope = meta if meta is not None else root
+    fallback = ""
+    for ab in scope.iter("abstract"):
+        atype = (ab.get("abstract-type") or "").lower()
+        txt = _ABSTRACT_LEAD_RE.sub("", _text(ab))
+        if not txt:
+            continue
+        if atype in _SKIPPED_ABSTRACT_TYPES:
+            fallback = fallback or txt
+            continue
+        return txt
+    return fallback
+
+
 def parse_jats(xml: bytes) -> Dict[str, Any]:
     parser = etree.XMLParser(recover=True, huge_tree=True, resolve_entities=False, no_network=True)
     try:
@@ -39,7 +63,8 @@ def parse_jats(xml: bytes) -> Dict[str, Any]:
     if root is None:
         return {}
     _strip_ns(root)
-    out: Dict[str, Any] = {"methods": "", "funding": "", "coi": "", "ack": "", "data_availability": "", "body": ""}
+    out: Dict[str, Any] = {"methods": "", "funding": "", "coi": "", "ack": "", "data_availability": "", "body": "", "abstract": ""}
+    out["abstract"] = extract_abstract(root)
 
     # ---- sections by title ----------------------------------------------------------------
     buckets: Dict[str, List[str]] = {"methods": [], "funding": [], "coi": [], "data_availability": [], "ack": []}

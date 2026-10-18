@@ -44,6 +44,15 @@ controlled vocabulary: `Revio`, `Sequel`, `MinION` map on their own even though 
 **Scoring.** `litradar/rank/heuristics.py` splits instrument mentions into *platforms* (weight 1.0 per distinct entity,
 cap 3) and *lab tools* (0.2, cap 3) by category prefix; see section 4.
 
+### Which alias matched
+
+`Gazetteer.find` returns `MatchedMention` objects (a `Mention` plus `alias`: the alias strings that actually
+matched, `; `-joined in match order). The store writes it to `mentions.alias` and indexes it, with the entity
+name and id, in the `mentions` full-text column (docs/store.md), so a paper that wrote "Next GEM" is found by
+`litradar search "Next GEM"` as well as by `search Chromium`. The alias also tells a reviewer what the digest's
+canonical label stands for when an entry bundles distinct product lines (a `Ceta` match shown under a different
+camera's name is visible as such in `mentions.alias`).
+
 ## 2. How to add an entry
 
 1. **Pick the gazetteer and the category/type** (section 4). Hardware goes in an instrument entry whose category

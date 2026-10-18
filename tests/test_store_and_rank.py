@@ -1,11 +1,12 @@
 import json
 import logging
+import sqlite3
 
 import pytest
 
 from litradar.models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from litradar.rank import heuristics
-from litradar.store import Store, archive_vendor_label
+from litradar.store import Store, archive_vendor_label, mentions_text
 
 
 def _paper(i: int, **kw) -> Paper:
@@ -319,3 +320,212 @@ def test_search_rejects_unknown_section(tmp_path):
     st = Store(tmp_path / "t.sqlite")
     with pytest.raises(ValueError):
         st.search("x", sections=["nope"])
+
+
+# ---- the `mentions` full-text column and matched aliases ------------------------------------------
+def test_mentions_column_makes_attributed_entities_searchable_and_aliases_are_stored(tmp_path):
+    from litradar.extract.gazetteer import Gazetteer
+
+    st = Store(tmp_path / "t.sqlite")
+    pid = "doi:10.1000/test70"
+    # the paper never says "Chromium": the gazetteer matched the alias "Next GEM"
+    text = "Single-cell libraries were made with the Next GEM 5' kit."
+    st.upsert_paper(_paper(70, title="Immune profiling of neonates", abstract=text, sections={}))
+    gz = Gazetteer.from_yaml({"entries": [{"id": "txg-chromium", "name": "Chromium", "vendor": "10x Genomics", "ticker": "TXG",
+                                           "category": "single_cell", "aliases": ["Next GEM", "Chromium X"]}]}, "instrument")
+    found = gz.find(text, section="abstract", paper_id=pid)
+    assert len(found) == 1 and found[0].count == 1 and found[0].alias == "Next GEM"
+    two = gz.find(text + " Libraries were run on a Chromium X.", section="abstract", paper_id=pid)
+    assert two[0].count == 2 and set(two[0].alias.split("; ")) == {"Next GEM", "Chromium X"}
+    st.replace_mentions(pid, found)
+    st.commit()
+    assert st.mentions_for(pid)[0]["alias"] == "Next GEM"
+    assert mentions_text([("Chromium", "Next GEM; Chromium X", "txg-chromium"), ("Chromium", "", "txg-chromium")]) == "Chromium ; Next GEM ; Chromium X ; txg-chromium"
+    assert [r["id"] for r in st.search("Chromium")] == [pid]  # canonical name, absent from the text
+    assert [r["id"] for r in st.search('"Next GEM"', sections=["mentions"])] == [pid]  # matched alias
+    assert [r["id"] for r in st.search('"txg-chromium"')] == [pid]  # gazetteer id
+    assert st.search("Chromium", sections=["title", "abstract"]) == []  # the text columns are untouched
+    st.replace_mentions(pid, [])  # removing the mention removes it from search
+    assert st.search("Chromium") == [] and st.fts_mentions_updated == 2
+
+
+def test_fts_row_is_rewritten_only_when_indexed_text_changes(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    p = _paper(71)
+    st.upsert_paper(p)
+    assert (st.fts_rows_written, st.fts_rows_unchanged) == (1, 0)
+    st.upsert_paper(_paper(71))  # identical re-ingest
+    assert (st.fts_rows_written, st.fts_rows_unchanged) == (1, 1)
+    # a metadata-only re-fetch: stored sections, body and abstract win, so nothing indexed changes
+    st.upsert_paper(_paper(71, sections={}, fulltext_available=False, cited_by_count=5, abstract=""))
+    assert (st.fts_rows_written, st.fts_rows_unchanged) == (1, 2)
+    assert st.get_paper(p.id)["cited_by_count"] == 5  # the papers row itself was still updated
+    assert st.body_for(p.id) == "full body text here" and st.search("Xenium")[0]["id"] == p.id
+    st.upsert_paper(_paper(71, abstract="A longer, different abstract about Xenium."))
+    assert st.fts_rows_written == 2
+    assert "longer" in st.search("longer")[0]["snippet"]
+    # a mentions change refreshes the mentions column once, and not again for the same mentions
+    m = Mention(p.id, "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "abstract", 1, "...")
+    st.replace_mentions(p.id, [m])
+    st.replace_mentions(p.id, [m])
+    assert st.fts_mentions_updated == 1 and st.fts_changes == 3
+    st.upsert_paper(_paper(71, abstract="A longer, different abstract about Xenium."))  # unchanged again; mentions text kept
+    assert st.fts_rows_written == 2 and [r["id"] for r in st.search("txg", sections=["mentions"])] == [p.id]
+    st.optimize()  # segment merge is safe at any time and keeps the index intact
+    assert st.search("Xenium")[0]["id"] == p.id
+
+
+def test_legacy_fts_without_mentions_column_is_migrated_once(tmp_path, caplog):
+    path = tmp_path / "t.sqlite"
+    st = Store(path)
+    st.upsert_paper(_paper(72))
+    st.upsert_paper(_paper(73, sections={"methods": "Sequenced on a Revio.", "body": "legacy body text"}))
+    st.replace_mentions("doi:10.1000/test73", [Mention("doi:10.1000/test73", "instrument", "pacb-revio", "Revio", "", "", "sequencer.long_read", "methods", 1, "")])
+    st.commit()
+    # recreate the pre-`mentions` layout: an 8-column FTS table with the same rows, and a mentions table without alias
+    st.conn.execute("CREATE TEMP TABLE keep AS SELECT rowid AS rid, id, title, abstract, methods, funding, coi, affiliations, body FROM papers_fts")
+    st.conn.execute("DROP TABLE papers_fts")
+    st.conn.execute("CREATE VIRTUAL TABLE papers_fts USING fts5(id UNINDEXED, title, abstract, methods, funding, coi, affiliations, body, tokenize='porter unicode61')")
+    st.conn.execute("INSERT INTO papers_fts(rowid, id, title, abstract, methods, funding, coi, affiliations, body) SELECT rid, id, title, abstract, methods, funding, coi, affiliations, body FROM keep")
+    st.conn.execute("ALTER TABLE mentions DROP COLUMN alias")
+    st.conn.commit()
+    st.close()
+    with caplog.at_level(logging.WARNING, logger="litradar.store"):
+        st2 = Store(path)
+    assert st2.fts_migrated is True and st2.fts_rebuilt == 0
+    assert any("lacks column(s) mentions" in r.message for r in caplog.records)
+    assert [r[1] for r in st2.conn.execute("PRAGMA table_info(papers_fts)")][-1] == "mentions"
+    assert "alias" in {r[1] for r in st2.conn.execute("PRAGMA table_info(mentions)")}
+    assert st2.body_for("doi:10.1000/test73") == "legacy body text"  # bodies survive the rebuild
+    assert [r["id"] for r in st2.search("Revio", sections=["mentions"])] == ["doi:10.1000/test73"]  # mentions text filled from the table
+    pairs = st2.conn.execute("SELECT f.rowid, p.rowid FROM papers_fts f JOIN papers p ON p.id = f.id").fetchall()
+    assert len(pairs) == 2 and all(a == b for a, b in pairs)
+    st2.close()
+    assert Store(path).fts_migrated is False  # only once
+
+
+def test_search_fallback_is_visible_or_raises(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    pid = "doi:10.1000/test74"
+    st.upsert_paper(_paper(74))
+    st.commit()
+    assert st.search("nosuchcol:Xenium") == []
+    assert st.last_search_fallback and "nosuchcol" in st.last_search_fallback  # the FTS5 message is kept for the caller
+    assert st.search("Xenium")[0]["id"] == pid and st.last_search_fallback is None  # reset by a clean search
+    rows = st.search("Xenium spatial(")  # bad syntax, but the phrase fallback does find the paper
+    assert [r["id"] for r in rows] == [pid] and st.last_search_fallback
+    with pytest.raises(sqlite3.OperationalError):
+        st.search("(Xenium OR", fallback=False)
+
+
+def test_instrument_counts_split_platforms_from_lab_tools_in_sql(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    pids = []
+    for i in range(3):
+        p = _paper(80 + i, sections={})
+        st.upsert_paper(p)
+        pids.append(p.id)
+    rows = []
+    for pid in pids:  # three consumables in every paper ...
+        rows += [
+            Mention(pid, "instrument", "qiagen-kits", "QIAGEN kits", "QIAGEN", "", "library_prep", "methods", 1, ""),
+            Mention(pid, "instrument", "nanodrop", "NanoDrop", "Thermo", "TMO", "qc", "methods", 1, ""),
+            Mention(pid, "instrument", "mystery-tool", "Mystery tool", "", "", "", "methods", 1, ""),
+            Mention(pid, "instrument", "fake-singlexcell", "Not a platform", "", "", "singleXcell", "methods", 1, ""),
+        ]
+    # ... and two platforms in one paper each
+    rows.append(Mention(pids[0], "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "methods", 1, ""))
+    rows.append(Mention(pids[1], "instrument", "ilmn-novaseq-x", "NovaSeq X", "Illumina", "ILMN", "sequencer.short_read", "methods", 1, ""))
+    rows.append(Mention(pids[1], "instrument", "txg-chromium", "Chromium", "10x Genomics", "TXG", "single_cell.3prime", "methods", 1, ""))
+    by_paper = {}
+    for m in rows:
+        by_paper.setdefault(m.paper_id, []).append(m)
+    for pid, ms in by_paper.items():
+        st.replace_mentions(pid, ms)
+    st.commit()
+    w = ("2026-10-10", "2026-10-17")
+    shared = st.instrument_counts(*w, limit=4)
+    assert not any(r["entity_id"] in ("txg-xenium", "ilmn-novaseq-x", "txg-chromium") for r in shared)  # the old shared budget drops every platform
+    plat = st.instrument_counts(*w, limit=4, platform_only=True)
+    assert {r["entity_id"] for r in plat} == {"txg-xenium", "ilmn-novaseq-x", "txg-chromium"}  # 'singleXcell' is not 'single_cell'
+    assert [r["entity_id"] for r in st.instrument_counts(*w, limit=2, platform_only=False)] == ["qiagen-kits", "nanodrop"] or \
+        len(st.instrument_counts(*w, limit=2, platform_only=False)) == 2
+    assert st.distinct_entities_in_window(*w, "instrument", platform_only=False) == 4
+    assert st.distinct_entities_in_window(*w, "instrument", platform_only=True) == 3
+    assert st.distinct_entities_in_window(*w, "instrument") == 7
+    assert [r["entity_id"] for r in st.instrument_counts(*w, categories=("spatial",))] == ["txg-xenium"]
+    assert {r["entity_id"] for r in st.instrument_counts(*w, categories=("single_cell", "sequencer"))} == {"txg-chromium", "ilmn-novaseq-x"}
+
+
+def test_entity_papers_distinct_mode_and_entity_names(tmp_path):
+    st = Store(tmp_path / "t.sqlite")
+    a, b = _paper(90, pub_date="2026-10-12", sections={}), _paper(91, pub_date="2026-10-14", sections={})
+    st.upsert_paper(a)
+    st.upsert_paper(b)
+    st.replace_mentions(a.id, [
+        Mention(a.id, "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "abstract", 1, "abstract snippet"),
+        Mention(a.id, "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "methods", 6, "methods snippet"),
+        Mention(a.id, "company", "10x-genomics", "10x Genomics", "", "TXG", "", "affiliations", 1, ""),
+    ])
+    st.replace_mentions(b.id, [Mention(b.id, "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "title", 1, "title snippet")])
+    st.commit()
+    assert len(st.entity_papers("txg-xenium")) == 3  # one row per (paper, section)
+    rows = st.entity_papers("txg-xenium", distinct=True)
+    assert [r["id"] for r in rows] == [b.id, a.id]  # one row per paper, newest first
+    r = rows[1]
+    assert r["sections"] == ["abstract", "methods"] and r["section"] == "abstract, methods" and r["mentions"] == 7
+    assert r["snippet"] == "methods snippet"  # the section with most occurrences
+    assert len(st.entity_papers("txg-xenium", distinct=True, limit=1)) == 1  # limit counts papers
+    assert [r["id"] for r in st.entity_papers("txg-xenium", distinct=True, since="2026-10-13")] == [b.id]
+    assert st.entity_names("instrument") == {"txg-xenium": "Xenium"}
+    assert st.entity_names() == {"txg-xenium": "Xenium", "10x-genomics": "10x Genomics"}
+
+
+def test_institutes_and_ai_tools_are_listed_but_not_scored():
+    paper = {"kind": "article", "title": "A paper", "abstract": "About things.", "cited_by_count": 0, "fulltext_available": True}
+    m = [
+        {"kind": "company", "entity_id": "broad", "section": "affiliations"},
+        {"kind": "company", "entity_id": "openai", "section": "ack"},
+        {"kind": "company", "entity_id": "illumina", "section": "methods"},
+    ]
+    types = {"broad": "institute", "openai": "software"}
+    with_types, reasons = heuristics.score_paper(paper, m, "A", [], False, company_types=types)
+    without, reasons0 = heuristics.score_paper(paper, m, "A", [], False)
+    assert with_types < without
+    assert "1 company mention(s)" in reasons and "1 institute mention(s), not scored" in reasons and "1 AI tool(s), not scored" in reasons
+    assert "company-affiliated author" not in reasons and "company-affiliated author" in reasons0 and "3 company mention(s)" in reasons0
+    only_institute, _ = heuristics.score_paper(paper, m[:1], "A", [], False, company_types=types)
+    nothing, _ = heuristics.score_paper(paper, [], "A", [], False)
+    assert only_institute == nothing
+    assert heuristics.company_role("broad", types) == "institute" and heuristics.company_role("openai", types) == "ai_tool"
+    assert heuristics.company_role("x", None) == "company" and heuristics.company_role("broad", {"broad": "Institute"}) == "institute"
+
+
+def test_http_host_accounting_and_400_body_warning(monkeypatch, caplog):
+    from litradar.http import Http
+
+    class R:
+        def __init__(self, code, text=""):
+            self.status_code, self.headers, self.content, self.url, self.text = code, {}, b"", "u", text
+
+    http = Http(max_retries=0)
+    monkeypatch.setattr("litradar.http.time.sleep", lambda s: None)
+    monkeypatch.setattr(http.session, "get", lambda url, **k: R(400, '{"error": "Invalid query parameters", "message": "grants is not a valid select field"}') if "dead" in url else R(200))
+    with caplog.at_level(logging.WARNING, logger="litradar.http"):
+        http.get("https://dead.example/a")
+        http.get("https://dead.example/b")
+        http.get("https://ok.example/c")
+    assert http.failures_by_host == {"dead.example": 2} and http.successes_by_host == {"ok.example": 1}
+    rep = http.host_report()
+    assert rep["failed_only_hosts"] == ["dead.example"] and rep["blocked_hosts"] == []
+    warned = [r for r in caplog.records if "400 bad request" in r.message]
+    assert len(warned) == 1 and "grants is not a valid select field" in warned[0].message  # once per host, with the body
+    # a host that trips the 429 breaker shows up blocked, with its skipped requests counted
+    monkeypatch.setattr(http.session, "get", lambda url, **k: R(429))
+    http.get("https://busy.example/a")
+    http.get("https://busy.example/b")
+    http.get("https://busy.example/c")
+    rep = http.host_report()
+    assert rep["blocked_hosts"] == ["busy.example"] and rep["blocked_skips_by_host"] == {"busy.example": 1}
+    assert rep["circuit_threshold"] == {"busy.example": 2} and "busy.example" not in rep["failed_only_hosts"]
+    assert http.stats["failures"] == 4 and http.stats["blocked_skips"] == 1

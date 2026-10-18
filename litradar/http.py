@@ -19,7 +19,14 @@ Rate limiting
 Logging
     Every URL that reaches a log line goes through :func:`_redact`, which blanks ``api_key``-style
     query values and e-mail addresses. A 403 is logged once per host at WARNING (with a hint for
-    EDGAR), then at INFO.
+    EDGAR), then at INFO. A 400 (the API rejected the request itself) is logged once per host at
+    WARNING with the first 200 characters of the body, then at INFO.
+
+Accounting
+    ``stats`` holds run-wide counters; ``failures_by_host``, ``successes_by_host`` and
+    ``blocked_skips_by_host`` break them down per host, and :meth:`Http.host_report` summarises them
+    (blocked hosts, hosts that never answered successfully) so a pipeline can put a silently dead
+    source into its error list.
 """
 from __future__ import annotations
 
@@ -118,9 +125,44 @@ class Http:
         self._last_call: Dict[str, float] = {}
         self._consecutive_429: Dict[str, int] = {}
         self._warned_403: set = set()
+        self._warned_400: set = set()
         self.blocked_hosts: set = set()  # hosts that hit their 429 threshold: skipped for the rest of the run
         self.max_backoff = 30.0
         self.stats = {"requests": 0, "cache_hits": 0, "retries": 0, "failures": 0, "blocked_skips": 0}
+        # per-host breakdown of the counters above (cache hits are not counted as successes)
+        self.failures_by_host: Dict[str, int] = {}
+        self.successes_by_host: Dict[str, int] = {}
+        self.blocked_skips_by_host: Dict[str, int] = {}
+
+    # -- accounting -----------------------------------------------------------------------
+    def _fail(self, host: str) -> None:
+        self.stats["failures"] += 1
+        self.failures_by_host[host] = self.failures_by_host.get(host, 0) + 1
+
+    def _ok(self, host: str) -> None:
+        self.successes_by_host[host] = self.successes_by_host.get(host, 0) + 1
+
+    def _skip_blocked(self, host: str) -> None:
+        self.stats["blocked_skips"] += 1
+        self.blocked_skips_by_host[host] = self.blocked_skips_by_host.get(host, 0) + 1
+
+    def host_report(self) -> Dict[str, Any]:
+        """What went wrong per host this run, for the pipeline's error list.
+
+        ``blocked_hosts``: hosts skipped after reaching their 429 threshold; ``failed_only_hosts``: hosts that were
+        asked at least once and never answered successfully (and are not blocked); plus the three per-host maps."""
+        failed_only = sorted(
+            h for h, n in self.failures_by_host.items()
+            if n > 0 and not self.successes_by_host.get(h) and h not in self.blocked_hosts
+        )
+        return {
+            "blocked_hosts": sorted(self.blocked_hosts),
+            "failed_only_hosts": failed_only,
+            "failures_by_host": dict(self.failures_by_host),
+            "successes_by_host": dict(self.successes_by_host),
+            "blocked_skips_by_host": dict(self.blocked_skips_by_host),
+            "circuit_threshold": {h: self._threshold(h) for h in sorted(self.blocked_hosts)},
+        }
 
     # -- pacing ---------------------------------------------------------------------------
     def _pace(self, url: str) -> None:
@@ -152,7 +194,7 @@ class Http:
         if n >= self._threshold(host):
             log.warning("%s answered 429 %d time(s) in a row; skipping this host for the rest of the run", host, n)
             self.blocked_hosts.add(host)
-            self.stats["failures"] += 1
+            self._fail(host)
             return True
         return False
 
@@ -165,6 +207,13 @@ class Http:
             if host.endswith("sec.gov"):
                 hint = " (EDGAR requires a User-Agent of the form '<tool> <contact e-mail>' with no URL in it; set LITRADAR_CONTACT_EMAIL)"
             log.warning("%s %s -> 403 forbidden%s; further 403s from %s are logged at INFO", method, shown, hint, host)
+            return
+        if resp.status_code == 400 and host not in self._warned_400:
+            # the API rejected the request itself (bad filter, retired field): that is a bug on our side or a
+            # changed API, so the body is worth one WARNING per host
+            self._warned_400.add(host)
+            body = re.sub(r"\s+", " ", (getattr(resp, "text", "") or ""))[:200]
+            log.warning("%s %s -> 400 bad request; body: %s; further 400s from %s are logged at INFO", method, shown, body or "(empty)", host)
             return
         log.info("%s %s -> %s (not retrying)", method, shown, resp.status_code)
 
@@ -206,7 +255,7 @@ class Http:
             return resp
         host = urlsplit(url).netloc
         if host in self.blocked_hosts:
-            self.stats["blocked_skips"] += 1
+            self._skip_blocked(host)
             return None
         attempts = (self.max_retries if retries is None else max(0, int(retries))) + 1
         backoff = 1.0
@@ -220,13 +269,15 @@ class Http:
                 resp = None
             if resp is not None and resp.status_code in ok_statuses:
                 self._consecutive_429[host] = 0
+                if resp.status_code < 400:
+                    self._ok(host)
                 if cpath:
                     cpath.parent.mkdir(parents=True, exist_ok=True)
                     cpath.write_bytes(resp.content)
                 return resp
             if resp is not None and resp.status_code in (400, 401, 403, 404, 410):
                 self._log_terminal("GET", resp, url)
-                self.stats["failures"] += 1
+                self._fail(host)
                 return resp
             if resp is not None and resp.status_code == 429 and self._note_429(host):
                 return resp
@@ -238,7 +289,7 @@ class Http:
             self.stats["retries"] += 1
             time.sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff)
-        self.stats["failures"] += 1
+        self._fail(host)
         log.warning("GET %s gave up after %d attempt(s)", _redact(url), attempts)
         return None
 
@@ -277,7 +328,7 @@ class Http:
         """
         host = urlsplit(url).netloc
         if host in self.blocked_hosts:
-            self.stats["blocked_skips"] += 1
+            self._skip_blocked(host)
             return None
         attempts = (self.max_retries if retries is None else max(0, int(retries))) + 1
         backoff = 1.0
@@ -291,6 +342,7 @@ class Http:
                 resp = None
             if resp is not None and resp.status_code in ok_statuses:
                 self._consecutive_429[host] = 0
+                self._ok(host)
                 try:
                     return resp.json()
                 except ValueError:
@@ -299,7 +351,7 @@ class Http:
             if resp is not None and resp.status_code in (400, 401, 403, 404, 410):
                 self._log_terminal("POST", resp, url)
                 log.info("POST %s body: %s", _redact(url), (resp.text or "")[:200])
-                self.stats["failures"] += 1
+                self._fail(host)
                 return None
             if resp is not None and resp.status_code == 429 and self._note_429(host):
                 return None
@@ -309,6 +361,6 @@ class Http:
             self.stats["retries"] += 1
             time.sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff)
-        self.stats["failures"] += 1
+        self._fail(host)
         log.warning("POST %s gave up after %d attempt(s)", _redact(url), attempts)
         return None

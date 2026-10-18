@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 from . import policy
 from .config import Settings
 from .extract.gazetteer import Gazetteer
+from .extract.jats import parse_jats
 from .http import Http
 from .models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from .rank import heuristics
@@ -46,16 +47,57 @@ ARCHIVE_SOURCES = ("sra", "ena", "geo", "pride", "cellxgene")
 SIGNAL_SOURCES = ("nih_reporter", "clinicaltrials", "openfda")
 SIGNAL_FEEDS = ("nih-reporter", "clinicaltrials", "fda-510k", "fda-pma", "fda-denovo")
 DEFAULT_NAME_MATCH_CAP = 5  # per run, per tracked name, when the match is by name only (common names)
+FTS_OPTIMIZE_MIN_CHANGES = 50  # FTS rows rewritten in one run before the segments are merged (radar.yaml: fts_optimize_after)
+
+# API hosts -> the source id a user would pass to `litradar run --sources`; used when a host is skipped
+# (429 circuit breaker) or never answered successfully, so the run's error list names the source
+HOST_SOURCES = {
+    "export.arxiv.org": "arxiv",
+    "api.biorxiv.org": "biorxiv",
+    "www.biorxiv.org": "biorxiv",
+    "www.medrxiv.org": "medrxiv",
+    "www.ebi.ac.uk": "europepmc",  # also ENA and PRIDE live there
+    "api.openalex.org": "openalex",
+    "api.crossref.org": "crossref",
+    "eutils.ncbi.nlm.nih.gov": "sra",  # NCBI E-utilities: SRA and GEO censuses
+    "api.semanticscholar.org": "semantic_scholar",
+    "clinicaltrials.gov": "clinicaltrials",
+    "api.reporter.nih.gov": "nih_reporter",
+    "api.fda.gov": "openfda",
+    "api.cellxgene.cziscience.com": "cellxgene",
+    "www.sec.gov": "sec",
+    "api.gdeltproject.org": "gdelt",
+    "news.google.com": "gnews",
+}
 
 
 def _norm_name(name: str) -> str:
-    s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
-    s = re.sub(r"[^a-z ]", " ", s.lower())
+    """Normalised 'given surname' key for name-only tracked-author matching.
+
+    'First M. Last', 'First Last' and 'Last, First M.' all reduce to 'first last' (the first given name and the
+    surname, ASCII-folded, lower-case). Forms that carry only an initial for either part ('F. Last', 'Last F',
+    'Last, F.', 'D. J. Anderson') return '' so they never match: a surname plus an initial is not evidence of
+    identity on a common name. A single token is returned as is."""
+    raw = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    raw = raw.replace("'", "")  # O'Brien / Pe'er: the curly apostrophe is already gone, drop the straight one too
+    if "," in raw:  # "Last, First M." -> "First M. Last"
+        last, _, given = raw.partition(",")
+        raw = f"{given} {last}"
+    s = re.sub(r"[^a-z ]", " ", raw.lower())
     parts = s.split()
     if not parts:
         return ""
-    # "First M. Last" and "Last, First" both reduce to "first last"
-    return f"{parts[0]} {parts[-1]}" if len(parts) > 1 else parts[0]
+    if len(parts) == 1:
+        return parts[0]
+    first, last = parts[0], parts[-1]
+    if len(first) == 1 or len(last) == 1:
+        return ""
+    return f"{first} {last}"
+
+
+def _display_key(name: str) -> str:
+    """Case- and whitespace-insensitive key for an exact display-name match ('Fei Chen' == 'fei  chen')."""
+    return re.sub(r"\s+", " ", (name or "").strip()).casefold()
 
 
 class Pipeline:
@@ -84,19 +126,30 @@ class Pipeline:
         self.feeds: List[Dict[str, Any]] = (settings.yaml("feeds") or {}).get("feeds", [])
         self.tier_by_journal: Dict[str, str] = {}
         self.tier_by_issn: Dict[str, str] = {}
+        self.journal_name_by_lower: Dict[str, str] = {}  # lower-cased name -> canonical name from journals.yaml
+        self.journal_name_by_issn: Dict[str, str] = {}
         for j in self.journals:
             self.tier_by_journal[j["name"].lower()] = j.get("tier", "")
+            self.journal_name_by_lower[j["name"].lower()] = j["name"]
             for issn in j.get("issn", []) or []:
                 self.tier_by_issn[issn] = j.get("tier", "")
+                self.journal_name_by_issn[issn] = j["name"]
         # a person may sit in several subgroups, so each key maps to a list of (display name, subgroup)
         self.tracked: Dict[str, List[Tuple[str, str]]] = {}  # normalized name -> [(display name, subgroup)]
+        self.tracked_display: Dict[str, List[Tuple[str, str]]] = {}  # exact display name (casefolded) -> [(display name, subgroup)]
         self.tracked_ids: Dict[str, List[Tuple[str, str]]] = {}  # openalex id -> [(display name, subgroup)]
+        self.tracked_id_for: Dict[Tuple[str, str], str] = {}  # (display name, subgroup) -> configured openalex id
         for g in self.subgroups:
             for a in g.get("tracked_authors", []) or []:
                 if a.get("name"):
-                    self.tracked.setdefault(_norm_name(a["name"]), []).append((a["name"], g["id"]))
+                    key = _norm_name(a["name"])
+                    if key:
+                        self.tracked.setdefault(key, []).append((a["name"], g["id"]))
+                    self.tracked_display.setdefault(_display_key(a["name"]), []).append((a["name"], g["id"]))
                 if a.get("openalex_id"):
                     self.tracked_ids.setdefault(str(a["openalex_id"]), []).append((a.get("name", a["openalex_id"]), g["id"]))
+                    if a.get("name"):
+                        self.tracked_id_for[(a["name"], g["id"])] = str(a["openalex_id"])
         self.counts: Counter = Counter()
         self.errors: List[str] = []
         self._name_hit_counts: Counter = Counter()  # (display name, subgroup) -> name-only hits this run
@@ -138,6 +191,19 @@ class Pipeline:
             if issn in self.tier_by_issn:
                 return self.tier_by_issn[issn]
         return ""
+
+    def canonical_journal(self, journal: str, issns: Sequence[str] = ()) -> str:
+        """The journals.yaml spelling of a journal name: sources disagree on casing ('Nature methods' vs 'Nature
+        Methods'), so a name that matches a configured journal case-insensitively is replaced by the configured
+        one, and an empty name is filled from a configured ISSN. Anything else is returned unchanged."""
+        j = (journal or "").strip()
+        if j and j.lower() in self.journal_name_by_lower:
+            return self.journal_name_by_lower[j.lower()]
+        if not j:
+            for issn in issns or []:
+                if issn in self.journal_name_by_issn:
+                    return self.journal_name_by_issn[issn]
+        return j
 
     @staticmethod
     def merge(existing: Paper, new: Paper) -> Paper:
@@ -240,6 +306,30 @@ class Pipeline:
             maxr = int(cfg.get("max_records_per_query", 2000))
             base = {"from_publication_date": since, "to_publication_date": until}
             mail, key = self.settings.contact_email, self.settings.openalex_api_key
+            # every query reports how it ended; failures are folded into self.errors per query group below,
+            # because an INFO-only "-> 400" in the log is how OpenAlex silently went dark in hosted runs
+            oa_total: Counter = Counter()
+            oa_failed: Counter = Counter()
+            oa_first_error: Dict[str, str] = {}
+
+            def oa_query(group: str, flt: Dict[str, str]) -> None:
+                state: Dict[str, Any] = {}
+                stats = getattr(self.http, "stats", None) or {}
+                failures_before = int(stats.get("failures", 0) or 0)
+                n = 0
+                for w in openalex_src.works(self.http, flt, mail, key, maxr, state=state):
+                    add(openalex_src.to_paper(w), f"openalex.{group}")
+                    n += 1
+                oa_total[group] += 1
+                failed_requests = int((getattr(self.http, "stats", None) or {}).get("failures", 0) or 0) - failures_before
+                err = state.get("error")
+                if not err and n == 0 and failed_requests > 0:
+                    err = f"{failed_requests} request(s) failed, no records"
+                if err:
+                    oa_failed[group] += 1
+                    oa_first_error.setdefault(group, str(err))
+                    log.warning("openalex %s query failed: %s (%d record(s) before the failure)", group, err, n)
+
             try:
                 if cfg.get("topics", True):
                     # one query per subgroup: its topics (primary + supporting) intersected with its keywords,
@@ -252,29 +342,26 @@ class Pipeline:
                         flt = dict(base, **{"primary_topic.id": openalex_src.or_join(topics)})
                         if kws:
                             flt["title_and_abstract.search"] = openalex_src.or_join(kws[:40])
-                        for w in openalex_src.works(self.http, flt, mail, key, maxr):
-                            add(openalex_src.to_paper(w), "openalex.topics")
+                        oa_query("topics", flt)
                 if cfg.get("company_authors", True):
                     kw = sorted({k for g in self.subgroups for k in (g.get("keywords") or [])})
                     # OpenAlex search filters accept OR via |; keep the query short
                     search = openalex_src.or_join(kw[:60])
-                    flt = dict(base, **{"authorships.institutions.type": "company", "title_and_abstract.search": search})
-                    for w in openalex_src.works(self.http, flt, mail, key, maxr):
-                        add(openalex_src.to_paper(w), "openalex.company_authors")
+                    oa_query("company_authors", dict(base, **{"authorships.institutions.type": "company", "title_and_abstract.search": search}))
                 if cfg.get("tracked_authors", True) and self.tracked_ids:
                     for chunk in epmc_src.chunked(list(self.tracked_ids), 25):
-                        flt = dict(base, **{"authorships.author.id": openalex_src.or_join(chunk)})
-                        for w in openalex_src.works(self.http, flt, mail, key, maxr):
-                            add(openalex_src.to_paper(w), "openalex.tracked_authors")
+                        oa_query("tracked_authors", dict(base, **{"authorships.author.id": openalex_src.or_join(chunk)}))
                 if cfg.get("journals", True):
                     issns = [i for j in self.journals for i in (j.get("issn") or [])]
                     for chunk in epmc_src.chunked(issns, 30):
-                        flt = dict(base, **{"primary_location.source.issn": openalex_src.or_join(chunk)})
-                        for w in openalex_src.works(self.http, flt, mail, key, maxr):
-                            add(openalex_src.to_paper(w), "openalex.journals")
+                        oa_query("journals", dict(base, **{"primary_location.source.issn": openalex_src.or_join(chunk)}))
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"openalex: {exc}")
                 log.exception("openalex failed")
+            for group, failed in sorted(oa_failed.items()):
+                msg = f"openalex: {group}: {failed} of {oa_total[group]} quer{'y' if oa_total[group] == 1 else 'ies'} failed ({oa_first_error[group]})"
+                self.errors.append(msg)
+                self.counts[f"openalex.{group}_failed_queries"] = failed
 
         # 4. Crossref per journal
         if self._enabled("crossref", only):
@@ -363,6 +450,7 @@ class Pipeline:
                 nb += 1
                 if biorxiv_src.attach_fulltext(self.http, p):
                     self.counts["fulltext.biorxiv"] += 1
+                    self._fill_abstract_from_jats(p, lambda p=p: getattr(self.http.get(p.fulltext_url, cache=True, retries=1), "content", None))
                 else:
                     self.counts["fulltext.biorxiv_failed"] += 1
                 continue
@@ -370,8 +458,30 @@ class Pipeline:
                 ne += 1
                 if epmc_src.attach_fulltext(self.http, p):
                     self.counts["fulltext.europepmc"] += 1
+                    self._fill_abstract_from_jats(p, lambda p=p: epmc_src.fulltext_xml(self.http, str(p.extra.get("pmcid")), retries=1))
                 else:
                     self.counts["fulltext.europepmc_failed"] += 1
+
+    def _fill_abstract_from_jats(self, p: Paper, fetch_xml: Any) -> bool:
+        """For a record whose metadata carried no abstract, take it from the <abstract> of the full-text XML that
+        was just parsed. `fetch_xml` returns the XML bytes (the client caches full-text fetches on disk, so this
+        is normally a cache hit, never a second request). Returns True when the abstract was filled."""
+        if (p.abstract or "").strip():
+            return False
+        try:
+            xml = fetch_xml()
+        except Exception as exc:  # noqa: BLE001 - an abstract is a nicety, never worth failing the paper
+            log.debug("%s: could not re-read the full-text XML for its abstract: %s", p.id, exc)
+            return False
+        if not xml:
+            return False
+        abstract = (parse_jats(xml).get("abstract") or "").strip()
+        if not abstract:
+            return False
+        p.abstract = abstract
+        p.extra["abstract_source"] = "fulltext_xml"
+        self.counts["fulltext.abstract_from_jats"] += 1
+        return True
 
     @staticmethod
     def fulltext_policy(p: Paper) -> str:
@@ -412,11 +522,12 @@ class Pipeline:
 
     # ------------------------------------------------------------------ tracked-author hits
     def _record_hits(self, paper_id: str, hits: Sequence[Tuple[str, str, str]]) -> int:
-        """Store tracked-author hits; name-only matches are capped per tracked name per run (common names)."""
+        """Store tracked-author hits; name-only matches (`matched_by` 'name' or 'name_no_ids') are capped per
+        tracked name per run (common names)."""
         cap = int((self.cfg.get("tracked_authors") or {}).get("name_match_cap", DEFAULT_NAME_MATCH_CAP))
         n = 0
         for name, grp, how in hits:
-            if how == "name":
+            if how.startswith("name"):
                 key = (name, grp)
                 self._name_hit_counts[key] += 1
                 if self._name_hit_counts[key] > cap:
@@ -463,15 +574,26 @@ class Pipeline:
                 merged[key].count += m.count
             else:
                 merged[key] = m
-        # tracked authors
+        # tracked authors: an OpenAlex id is exact; otherwise the full given name + surname (or the exact display
+        # name) must match, never a surname plus an initial. When the tracked person has an id configured and the
+        # record carries author ids, a different id means a different person and the name match is dropped.
         hits: List[Tuple[str, str, str]] = []
         for a in p.authors:
             if a.openalex_id and a.openalex_id in self.tracked_ids:
                 for name, grp in self.tracked_ids[a.openalex_id]:
                     hits.append((name, grp, "openalex_id"))
-            elif _norm_name(a.name) in self.tracked:
-                for name, grp in self.tracked[_norm_name(a.name)]:
-                    hits.append((name, grp, "name"))
+                continue
+            key = _norm_name(a.name)
+            candidates: List[Tuple[str, str]] = list(self.tracked.get(key, [])) if key else []
+            for cand in self.tracked_display.get(_display_key(a.name), []):
+                if cand not in candidates:
+                    candidates.append(cand)
+            for name, grp in candidates:
+                configured_id = self.tracked_id_for.get((name, grp))
+                if configured_id and a.openalex_id and a.openalex_id != configured_id:
+                    self.counts["tracked_hits.name_rejected_other_id"] += 1
+                    continue
+                hits.append((name, grp, "name_no_ids" if configured_id else "name"))
         return list(merged.values()), sorted(set(hits))
 
     def assign_subgroups(self, p: Paper) -> List[str]:
@@ -597,7 +719,8 @@ class Pipeline:
         raw_by_id = {x.get("id"): x for x in (self.settings.yaml("companies") or {}).get("entries", [])}
         sec_on = bool(self._src("sec").get("enabled", True))
         if sec_on and not self.settings.contact_email:
-            msg = "SEC 8-K feeds skipped: LITRADAR_CONTACT_EMAIL not set (EDGAR requires '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise)"
+            # prefixed with the source id so status / coverage tooling maps it to `--sources sec`
+            msg = "sec: SEC 8-K feeds skipped (LITRADAR_CONTACT_EMAIL not set; EDGAR requires '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise)"
             log.warning(msg)
             self.errors.append(msg)
             sec_on = False
@@ -775,6 +898,12 @@ class Pipeline:
             )
             for k in ("candidates", "requested", "matched", "updated", "unmatched", "failed_batches"):
                 self.counts[f"semantic_scholar.{k}"] = int(s2.get(k, 0) or 0)
+            failed = int(s2.get("failed_batches", 0) or 0)
+            if failed and not int(s2.get("matched", 0) or 0) and int(s2.get("candidates", 0) or 0):
+                msg = (f"semantic_scholar: {failed} batch(es) failed and no DOI was matched "
+                       f"({int(s2.get('requested', 0) or 0)} of {int(s2.get('candidates', 0) or 0)} candidate DOIs requested)")
+                log.warning(msg)
+                self.errors.append(msg)
             s2_src.apply_to_papers(papers.values(), s2.get("citations") or {})
         except Exception as exc:  # noqa: BLE001
             self.errors.append(f"semantic_scholar: {exc}")
@@ -799,7 +928,7 @@ class Pipeline:
             tracked = bool(self.store.conn.execute("SELECT 1 FROM tracked_author_hits WHERE paper_id=? LIMIT 1", (p.id,)).fetchone())
             h, reasons = heuristics.score_paper(
                 {"kind": p.kind, "title": p.title, "abstract": p.abstract, "cited_by_count": p.cited_by_count, "fulltext_available": p.fulltext_available},
-                mentions, self.journal_tier(p), wl, tracked, weights,
+                mentions, self.journal_tier(p), wl, tracked, weights, company_types=self.company_types,
             )
             if priorities:
                 mult = priority_multiplier(p, mentions, p.journal, self.assign_subgroups(p), priorities=priorities)
@@ -857,21 +986,39 @@ class Pipeline:
             topics=json.loads(row.get("topics_json") or "[]"), extra=json.loads(row.get("extra_json") or "{}"),
         )
 
+    @staticmethod
+    def underivable_sections(p: Paper) -> Tuple[str, ...]:
+        """Mention sections a re-extraction of `p` cannot rebuild because their source text is not stored:
+        every full-text section that is absent ('methods' counts as present when a body is stored, since the
+        extractor reads the body as Methods). Title, abstract and affiliations are always stored, so never listed."""
+        out = []
+        for sec in FULLTEXT_SECTIONS:
+            if sec == "methods":
+                if not (p.sections.get("methods") or p.sections.get("body")):
+                    out.append(sec)
+            elif not p.sections.get(sec):
+                out.append(sec)
+        return tuple(out)
+
     def _rematch_stream(self, since: Optional[str]) -> Iterator[Paper]:
         """Stream stored papers one batch at a time: re-extract, store mentions / hits, then hand the paper (without
-        its body) to rank(). Nothing holds more than one batch of rows in memory."""
+        its body) to rank(). Nothing holds more than one batch of rows in memory.
+
+        Mentions whose source text is not stored (facts-only papers, papers whose text was never kept) are not
+        re-derivable, so the stored rows for those sections are kept; only sections with stored text (title,
+        abstract, affiliations, and whichever full-text sections are present) are re-derived."""
         n = 0
         for row in self.store.iter_papers(since=since):
             p = self.paper_from_row(row)
             mentions, hits = self.extract(p)  # on whatever text is stored, BEFORE the policy strips it
-            keep: Tuple[str, ...] = ()
+            keep = set(self.underivable_sections(p))
             has_text = any(p.sections.get(k) for k in FULLTEXT_SECTIONS)
             level = self.store.stored_fulltext_level(p.license, p.extra or {}) if (has_text or (p.extra or {}).get("fulltext_policy")) else "full"
             if level != "full":
-                keep = FULLTEXT_SECTIONS  # the derived mentions stay; the text they came from does not
+                keep.update(FULLTEXT_SECTIONS)  # the derived mentions stay; the text they came from does not
                 if self.store.purge_paper_fulltext(p.id, level, rowid=row.get("_rowid")):
                     self.counts["fulltext.purged"] += 1
-            self.counts["mentions"] += self.store.replace_mentions(p.id, mentions, keep_sections=keep)
+            self.counts["mentions"] += self.store.replace_mentions(p.id, mentions, keep_sections=tuple(sorted(keep)))
             self.store.conn.execute("DELETE FROM tracked_author_hits WHERE paper_id=?", (p.id,))
             self.counts["tracked_hits"] += self._record_hits(p.id, hits)
             p.sections.pop("body", None)
@@ -890,8 +1037,20 @@ class Pipeline:
         self.counts["rematched"] = self.rank(self._rematch_stream(since), use_llm=False)
         self.counts["archive_models_remapped"] = self.remap_archive()
         self._log_name_overflow()
+        self._optimize_store_if_needed()
         self.store.checkpoint()
         return {"since": since, "counts": dict(self.counts)}
+
+    def _optimize_store_if_needed(self) -> None:
+        """Merge the FTS5 segments after a run that rewrote many full-text rows (see Store.optimize)."""
+        changes = int(getattr(self.store, "fts_changes", 0) or 0)
+        threshold = int(self.cfg.get("fts_optimize_after", FTS_OPTIMIZE_MIN_CHANGES))
+        self.counts["fts.rows_rewritten"] = changes
+        self.counts["fts.rows_unchanged"] = int(getattr(self.store, "fts_rows_unchanged", 0) or 0)
+        if changes >= threshold:
+            log.info("%d full-text rows rewritten this run; merging FTS5 segments", changes)
+            self.store.optimize()
+            self.counts["fts.optimized"] = 1
 
     def remap_archive(self) -> int:
         """Re-tag archive records with the current gazetteer (one UPDATE per distinct instrument_model)."""
@@ -917,6 +1076,7 @@ class Pipeline:
         mentions (keeping those whose source text is not stored) and record tracked-author hits. Returns new count."""
         new = 0
         for p in list(papers.values()):
+            p.journal = self.canonical_journal(p.journal, (p.extra or {}).get("issn") or [])
             mentions, hits = self.extract(p)
             keep = self.apply_fulltext_policy(p)
             if self.store.upsert_paper(p):
@@ -975,7 +1135,17 @@ class Pipeline:
                 self.enrich_citations(papers, since)
             self.rank(papers, use_llm=use_llm)
             self.post_process(since, until, started)
-            report = {"since": since, "until": until, "counts": dict(self.counts), "errors": self.errors, "http": dict(getattr(self.http, "stats", {}) or {})}
+            self._fold_http_errors()
+            self._optimize_store_if_needed()
+            http_stats = dict(getattr(self.http, "stats", {}) or {})
+            host_report = self._host_report()
+            if host_report:
+                http_stats["blocked_hosts"] = host_report.get("blocked_hosts") or []
+                http_stats["failures_by_host"] = host_report.get("failures_by_host") or {}
+            report = {
+                "since": since, "until": until, "started": started, "finished": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "counts": dict(self.counts), "errors": self.errors, "http": http_stats,
+            }
             self.store.record_run(started, since, until, report)
             return report
         finally:
@@ -983,6 +1153,44 @@ class Pipeline:
             # closing to whoever opened it (Store.close is idempotent)
             self._log_name_overflow()
             self.store.checkpoint()
+
+    def _host_report(self) -> Dict[str, Any]:
+        rep = getattr(self.http, "host_report", None)
+        if not callable(rep):
+            return {}
+        try:
+            return rep() or {}
+        except Exception:  # noqa: BLE001 - accounting must never fail the run
+            return {}
+
+    def _fold_http_errors(self) -> None:
+        """Put silently dead sources into the run's error list: a host the client skipped after repeated 429s, and
+        a host that was asked but never answered successfully. Skipped when the source already reported an error
+        of its own (gdelt and OpenAlex do), so nothing is listed twice."""
+        r = self._host_report()
+        if not r:
+            return
+        covered = {str(e).split(":", 1)[0].strip().lower() for e in self.errors}
+        for host in r.get("blocked_hosts") or []:
+            src = HOST_SOURCES.get(host, host)
+            if src in covered:
+                continue
+            skipped = int((r.get("blocked_skips_by_host") or {}).get(host, 0) or 0)
+            threshold = int((r.get("circuit_threshold") or {}).get(host, 0) or 0)
+            msg = (f"{src}: host {host} rate-limited (HTTP 429" + (f" {threshold} times in a row" if threshold else "") +
+                   f"); skipped for the rest of the run, {skipped} request(s) not sent")
+            log.warning(msg)
+            self.errors.append(msg)
+            covered.add(src)
+        for host in r.get("failed_only_hosts") or []:
+            src = HOST_SOURCES.get(host, host)
+            if src in covered:
+                continue
+            n = int((r.get("failures_by_host") or {}).get(host, 0) or 0)
+            msg = f"{src}: all {n} request(s) to {host} failed; no successful response this run"
+            log.warning(msg)
+            self.errors.append(msg)
+            covered.add(src)
 
 
 def window(days: int = 7, until: Optional[date] = None) -> Tuple[str, str]:
