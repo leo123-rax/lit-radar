@@ -10,11 +10,13 @@ import json
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ..concepts import render_concepts_markdown
 from ..discovery import render_candidates_markdown
 from ..rank.heuristics import company_role
+from ..rank.rerank import rerank_window
 from ..store import Store, _json_dict
 from ..trends import compute_trends, render_trends_markdown
 
@@ -158,6 +160,34 @@ def fallback_summary(store: Store, paper: Dict[str, Any], max_chars: int = SUMMA
     return "", ""
 
 
+def _ranking_method_line(info: Dict[str, Any]) -> str:
+    """One italic line under the top-list heading saying how the list was ranked and what the diversity caps did."""
+    ctx = info.get("context") or {}
+    caps = info.get("caps") or {}
+    notes: List[str] = []
+    if ctx.get("news_items"):
+        notes.append(f"{int(ctx['news_items'])} news items checked for co-mentions")
+    if not ctx.get("concept_history_ok"):
+        notes.append(f"first-in-corpus concepts not scored ({int(ctx.get('concept_history_weeks') or 0)} week(s) of concept history on record, 4 needed)")
+    if info.get("clustered"):
+        n = int(info["clustered"])
+        notes.append(f"{n} near-duplicate{'s' if n != 1 else ''} (same group, same venue, same day) folded into the better-scoring entry as '+N related'")
+    if caps.get("max_per_kind") or caps.get("max_per_subgroup"):
+        moved = [d for d in (info.get("deferred") or []) if not d.get("readmitted")]
+        kind_cap = caps.get("max_per_kind") or "no"
+        sub_cap = caps.get("max_per_subgroup") or "no"
+        text = f"soft diversity caps: {kind_cap} per kind (preprint / article), {sub_cap} per subgroup"
+        text += f"; {len(moved)} higher-scoring entr{'y' if len(moved) == 1 else 'ies'} deferred below the cut" if moved else "; nothing deferred"
+        notes.append(text)
+    head = (
+        f"Ranked by the v2 heuristic over {int(info.get('candidates') or 0)} papers in the window: venue prior, the first platform "
+        "and company named (further ones are listed, not scored), platform in title/abstract, watchlist terms, tracked authors, "
+        "novelty and new-platform cues, early citations, preprint-to-journal conversion, news co-mention, first-in-corpus concepts. "
+        "Every component and its points appear under each entry as Signals; the subgroup tag follows the score."
+    )
+    return "_" + head + ((" " + "; ".join(notes) + ".") if notes else "") + "_\n"
+
+
 def _company_tail(mentions: Sequence[Dict[str, Any]], company_types: Dict[str, str]) -> List[str]:
     """The per-paper 'Companies / Institutes / AI tools' fragments, with a role tag for entities that appear only in
     funding, competing-interest or acknowledgement text (so a disclosed equity stake does not read like a supplier)."""
@@ -192,25 +222,39 @@ def render(
     run_report: Optional[Dict[str, Any]] = None,
     company_types: Optional[Dict[str, str]] = None,
     company_names: Optional[Dict[str, str]] = None,
+    config_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Build the digest. `company_types` maps gazetteer company id -> type (tools, diagnostics, synthesis, ai_bio,
     pharma, cro, institute, software / ai_tool); the caller builds it from config/companies.yaml (see
     Pipeline.company_types). Without it every company lands in the main table. `company_names` (id -> display
     name) labels the news groups; ids without a name fall back to the mentions table, then to the id itself.
 
+    The top list is re-ranked at render time with the v2 heuristic (`rank.rerank.rerank_window`: full record,
+    window context, soft diversity caps; scores are written back unless `ranking.v2.persist` is false) when
+    `ranking.v2.enabled` is true (the default); with it off the stored scores are listed as before. `config_dir`
+    locates journals.yaml / subgroups.yaml for the re-ranker (default: the configured directory).
+
     Table budgets (cfg['digest']): `platforms_table_n` (default: `instruments_table_n`, 40) and `lab_tools_table_n`
     (25) are separate, so reagent and QC products never push a platform out of the platform table; a cut table
     says how many rows it dropped."""
     company_types = {k: (v or "").lower() for k, v in (company_types or {}).items()}
     dcfg = cfg.get("digest") or {}
+    rcfg = cfg.get("ranking") or {}
     top_n = int(dcfg.get("top_n", 25))
     news_n = int(dcfg.get("news_n", 40))
     signals_n = int(dcfg.get("signals_n", 15))
     platforms_n = int(dcfg.get("platforms_table_n", dcfg.get("instruments_table_n", 40)))
     tools_n = int(dcfg.get("lab_tools_table_n", 25))
     title = str(dcfg.get("title", "Science literature radar"))
+    show_why = bool(dcfg.get("why_it_matters", True))
+    show_subgroup = bool(dcfg.get("show_subgroup", True))
     rendered_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    top = store.top_papers(since, until, limit=top_n)
+    rank_info: Optional[Dict[str, Any]] = None
+    if (rcfg.get("v2") or {}).get("enabled", True):
+        rank_info = rerank_window(store, since, until, cfg, company_types=company_types, config_dir=config_dir, top_n=top_n)
+        top = rank_info["top"]
+    else:
+        top = store.top_papers(since, until, limit=top_n)
     conversions = store.preprint_conversions(since, until)
     platforms = store.instrument_counts(since, until, limit=platforms_n, platform_only=True)
     infra = store.instrument_counts(since, until, limit=tools_n, platform_only=False)
@@ -249,6 +293,8 @@ def render(
 
     # ---- top innovations
     md.append(f"## Top {len(top)} innovations\n")
+    if rank_info:
+        md.append(_ranking_method_line(rank_info))
     if not top:
         md.append("_no scored papers in this window_\n")
     for i, p in enumerate(top, 1):
@@ -266,7 +312,8 @@ def render(
             venue += f" (also as preprint {esc(pre.get('pub_date') or 'n.d.')})"
         score = p.get("final")
         score_s = f"{float(score):.1f}" if score is not None else "n/a"
-        md.append(f"**{i}. {_link(p['title'], p['url'])}**  \n_{venue}, {esc(p.get('pub_date') or 'n.d.')} · score {score_s}_  ")
+        tag = f" · {esc(p['subgroup'])}" if show_subgroup and p.get("subgroup") else ""
+        md.append(f"**{i}. {_link(p['title'], p['url'])}**  \n_{venue}, {esc(p.get('pub_date') or 'n.d.')} · score {score_s}{tag}_  ")
         if llm:
             md.append(f"\n{esc(llm.get('one_line', ''))}  \n*Why it matters:* {esc(llm.get('why_it_matters', ''))}  ")
             flags = (
@@ -283,12 +330,19 @@ def render(
                 abstract, label = fallback_summary(store, p)
             if abstract:
                 md.append(f"\n{esc(abstract)}" + (f" <sub>{label}</sub>" if label else "") + "  ")
+            if show_why and p.get("why"):
+                md.append(f"\n*Why it matters:* {esc(p['why'])} <sub>(from the score components; no LLM)</sub>  ")
         tail = []
         if inst:
             tail.append("Instruments: " + ", ".join(esc(x) for x in inst))
         tail.extend(_company_tail(p["mentions"], company_types))
         tail.append("Signals: " + esc(p.get("reasons") or ""))
         md.append("\n<sub>" + " · ".join(tail) + "</sub>\n")
+        related = p.get("related") or []
+        if related:
+            links = "; ".join(_link(x.get("title"), x.get("url"), max_len=90) for x in related[:3])
+            more = f" and {len(related) - 3} more" if len(related) > 3 else ""
+            md.append(f"<sub>+{len(related)} related from the same group, same venue, same day: {links}{more}</sub>\n")
     if conversions:
         md.append("### Preprints that appeared as journal articles this window\n")
         for c in conversions[:15]:
@@ -503,15 +557,20 @@ def render(
     else:
         md.append("\nNo pipeline run is recorded for this database yet.  ")
     md.append(f"\nDatabase totals: {counts['papers']} papers, {counts['mentions']} entity mentions, {counts['archive_records']} archive records, {counts['news_items']} news items. "
-              "Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. "
+              "Scores: a transparent heuristic (venue prior, the first platform and company named, watchlist terms, tracked authors, novelty and new-platform cues, "
+              "early citations, preprint-to-journal conversion, news co-mention, first-in-corpus concepts; see docs/ranking.md) optionally blended with an LLM rubric. "
               "Only metadata, abstracts and open-licensed full text are stored; for other full text only the derived facts (entity mentions with short snippets) are kept, and subscription content is linked, never copied.\n")
 
     summary = {
         "since": since, "until": until, "papers_in_window": len(in_window),
         "top": [{"id": p["id"], "title": p["title"], "url": p["url"], "journal": p.get("journal"), "score": p.get("final"),
+                 "kind": p.get("kind"), "subgroup": p.get("subgroup"), "reasons": p.get("reasons"), "why": p.get("why"),
+                 "components": p.get("components"), "related": p.get("related") or [],
                  "preprints": p.get("preprints") or [],
                  "instruments": sorted({m["entity_name"] for m in p["mentions"] if m["kind"] == "instrument"}),
                  "companies": sorted({m["entity_name"] for m in p["mentions"] if m["kind"] == "company"})} for p in top],
+        "ranking": ({k: rank_info.get(k) for k in ("candidates", "clustered", "pool", "caps", "deferred", "context", "persisted")} | {"method": "v2"})
+        if rank_info else {"method": "stored"},
         "preprint_conversions": conversions,
         "instruments": instruments, "platforms": platforms, "lab_tools": infra,
         "platforms_total": n_platforms, "lab_tools_total": n_infra,

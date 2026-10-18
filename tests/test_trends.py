@@ -446,3 +446,50 @@ def test_partial_coverage_with_a_baseline_keeps_the_tables_and_flags_last_week(s
     md = trends.render_trends_markdown(tr)
     assert "### Biggest risers" in md and "### Biggest fallers" in md
     assert "'Last week' is only partly covered by the runs that built this store (from 2026-10-08, 3 of 7 days)" in md
+
+
+def test_backfill_fills_the_baseline_by_pub_date_and_extends_coverage(tmp_path):
+    """A backfill writes papers with old publication dates but today's first_seen: z-scores must come from the
+    pub_date weeks, a recorded backfill must count as coverage of 'last week', and the new-entities list must say
+    why it is omitted instead of claiming a first week of data."""
+    st = Store(tmp_path / "bf.sqlite")
+    today = f"{_day(0)}T12:00:00Z"
+    for wk in (4, 3, 2, 1):  # baseline weeks by pub_date, 12 papers each naming the instrument ...
+        for i in range(12):
+            pid = f"doi:10.1000/bf-w{wk}-{i}"
+            st.upsert_paper(_paper(pid, _day(wk, i % 7), journal="Backfill Journal", source="openalex"))
+            st.replace_mentions(pid, [Mention(pid, "instrument", "bf-seq", "Backfilled Seq", "Vendor", "TCK", "sequencer", "methods", 1, "...")])
+            st.conn.execute("UPDATE papers SET first_seen=? WHERE id=?", (today, pid))  # ... all ingested today
+    _add_instrument_papers(st, "bf-seq", "Backfilled Seq", 0, 40, first_seen_day=_day(0))
+    st.record_run(f"{_day(0)}T00:00:00Z", _day(0, 6), _day(0), {})  # the live run covers the current week only
+    st.commit()
+    tr = trends.compute_trends(st, UNTIL, weeks=4)
+    row = {r["id"]: r for r in tr["instruments"]["papers"]}["bf-seq"]
+    assert row["series"] == [12, 12, 12, 12, 40] and row["mean"] == 12.0 and row["z"] == 28.0 and row["notable"] is True
+    hist = tr["history"]
+    assert hist["paper_weeks_with_data"] == 4 and hist["z_available_papers"] is True and hist["paper_weeks_dropped_partial"] == []
+    assert tr["cold_start"] is True and hist["ingested_this_week_only_with_history"] is True
+    # no backfill recorded yet: the runs table alone says 'last week' was never fetched for
+    assert hist["previous_week_coverage"]["partial"] is True and hist["coverage_sources"] == {"runs_since": _day(0, 6), "backfill_from": None}
+    md = trends.render_trends_markdown(tr)
+    assert "Every paper in this corpus was ingested this week although 4 earlier weeks hold publication-dated papers" in md
+    assert "First week of data in this corpus" not in md and "| **Backfilled Seq** | instrument · papers | 40 | 12 |" in md
+    assert "'Last week' is only partly covered" in md
+    # a recorded backfill extends the coverage back to its first month
+    st.conn.executescript(
+        "CREATE TABLE IF NOT EXISTS backfill_progress (subgroup TEXT NOT NULL, month TEXT NOT NULL, country TEXT NOT NULL DEFAULT '', "
+        "done_at TEXT, fetched INTEGER DEFAULT 0, cap INTEGER DEFAULT 0, PRIMARY KEY (subgroup, month, country));"
+    )
+    st.conn.execute("INSERT INTO backfill_progress (subgroup, month, country, done_at, fetched) VALUES ('spatial', '2026-08', '', 'now', 48)")
+    st.commit()
+    tr2 = trends.compute_trends(st, UNTIL, weeks=4)
+    cov = tr2["history"]["previous_week_coverage"]
+    assert cov == {"covered_from": "2026-08-01", "days_covered": 7, "partial": False}
+    assert tr2["history"]["coverage_sources"] == {"runs_since": _day(0, 6), "backfill_from": "2026-08-01"}
+    assert "'Last week' is only partly covered" not in trends.render_trends_markdown(tr2)
+    assert trends._backfill_start(st.conn) == "2026-08-01"
+    st.conn.execute("UPDATE backfill_progress SET month='garbage'")
+    st.commit()
+    assert trends._backfill_start(st.conn) is None  # an unusable month is ignored, not fatal
+    json.dumps(tr2)
+    st.close()
