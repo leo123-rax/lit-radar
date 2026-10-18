@@ -2,34 +2,43 @@
 
 *Ordered by readiness, not by ambition. Each item names the research note that motivates it
 (`RESEARCH.md` lists the notes) and the adapter note in `docs/sources/` where one exists. Status
-words: `built` = code and offline tests exist; `specified` = the change is written down with the
-exact patch; `researched` = sources probed live, no code.*
+words: `done` / `wired` = in the code and in the weekly run; `built` = code and offline tests exist;
+`specified` = the change is written down with the exact patch; `researched` = sources probed live,
+no code. Statuses were re-checked against the code on 2026-10-18.*
 
 ## Near term (next few weeks)
 
-1. **Wire the built adapters into the weekly run** — GEO, PRIDE, CELLxGENE, ClinicalTrials.gov,
-   NIH RePORTER, openFDA, Semantic Scholar. Each adapter's note carries the `radar.yaml` block and
-   the `pipeline.py` patch; keep GEO's study-level rows out of the SRA/ENA experiment totals and add
-   a "Platforms behind newly released GEO Series" table; run Semantic Scholar after the upserts with
-   a 365-day look-back. *Motivation:* `instrument_archives.md` (recommended weekly pipeline),
-   `researchers.md` (grants and trials as enrichment layers), `docs/sources/*.md`. Status: built.
+1. **Wire the built adapters into the weekly run** — **done 2026-10-17.** GEO, PRIDE, CELLxGENE,
+   ClinicalTrials.gov, NIH RePORTER, openFDA and Semantic Scholar run by default
+   (`litradar/pipeline.py`; `config/radar.yaml` `sources:`); Semantic Scholar runs after the upserts
+   with a 365-day look-back; GEO rows sit in the census table labelled as series × platform rather
+   than in a separate table, PRIDE and CELLxGENE have their own sub-tables. *Motivation:*
+   `instrument_archives.md` (recommended weekly pipeline), `researchers.md` (grants and trials as
+   enrichment layers), `docs/sources/*.md`. Status: wired.
 2. **Land the review fixes that change digits.** SRA double-unescape (4.7% of records lose
    fields); ENA exclusive upper bound (last day dropped); Crossref `from-created-date` (Cell Press
    and Lancet return nothing on day-range `from-pub-date`); OpenAlex `select` without `grants`; SEC
    User-Agent in EDGAR's `Name email` form; re-ingest no longer wiping stored Methods mentions;
    `rematch` re-tagging archive rows; FTS5 keyed by rowid. *Motivation:* `review_findings.json`
-   (api_contracts, robustness, performance). Status: specified.
+   (api_contracts, robustness, performance). Status: partly done — Crossref `from-created-date`
+   (`DATE_FILTERS` in `sources/crossref.py`), the SEC `<tool> <contact e-mail>` User-Agent
+   (`litradar/http.py`) and FTS5 keyed by rowid (`docs/store.md`) are in; check the commit history
+   for the rest before re-doing any of it.
 3. **Licence gate in front of every full-text fetch.** `policy.py` exists; apply it in
    `biorxiv.attach_fulltext` (block `cc_no`), add `OPEN_ACCESS:y` to the Europe PMC ISSN pull,
    default `biorxiv.fulltext: false` until the S3 route exists, store the licence level per record,
-   and publish `LEGAL.md`. *Motivation:* `legal_tos.md` §6.2, `preprints.md` §9. Status: specified
-   (owned by the code and legal owners).
+   and publish `LEGAL.md`. *Motivation:* `legal_tos.md` §6.2, `preprints.md` §9. Status: done —
+   `Pipeline.fulltext_policy` / `apply_fulltext_policy` gate every full-text fetch, the Europe PMC
+   pull carries `(OPEN_ACCESS:y)`, and `docs/LEGAL.md` is published.
 4. **Google News RSS to opt-in; GenomeWeb's own feed in.** Require `GOOGLE_NEWS_RSS_OPTIN=1`,
    add `when:7d` to any remaining query, show encoded links, delete the Google versions of Nature
    and Science news and the dead `site:endpts.com` query, add the GenomeWeb Arc feed and section
    feeds, GEN, Inside Precision Medicine, Labiotech, BioCentury headlines, and Bing News `site:`
    fallbacks; poll PR Newswire every 4–6 h on a second schedule. *Motivation:*
-   `gap-google-news-rss-news-layer.md`. Status: researched.
+   `gap-google-news-rss-news-layer.md`. Status: done in a different shape — Google News is off by
+   default through `news.google_news: false` in `radar.yaml` (not an environment variable), GDELT
+   is the per-company source and the GenomeWeb Arc feed is in `config/feeds.yaml`; the sub-daily
+   PR Newswire schedule and the Bing fallbacks remain open.
 5. **Feed-health footer.** Per-feed rolling baseline (items in 7 days, newest-item age) and the
    statuses DOWN / BLOCKED / MOVED / STALE / DECAYED / CHANGED printed in the digest; diff
    `news.google.com/robots.txt` each run. Silent feed decay is the failure mode that kills these
@@ -41,11 +50,16 @@ exact patch; `researched` = sources probed live, no code.*
    publish to a `digests` branch); SHA-pinned actions; inputs via environment variables; hash-pinned
    requirements; log redaction of `api_key`/`mailto`. *Motivation:*
    `gap-security-hygiene-public-repo.md`, `ranking_delivery.md` §7.1, `review_findings.json`
-   (performance, security). Status: specified.
+   (performance, security). Status: done — the database travels as the `db-latest` / `db-YYYY-MM`
+   release assets (not a 90-day artifact), checkpointed and integrity-checked before upload; the
+   two-job workflow, SHA-pinned actions, inputs via `env:` and URL redaction are in place
+   (`docs/deploy.md`, `SECURITY.md`).
 7. **Week-over-week deltas and first appearances.** A `weekly_entity_counts` table (archive
    models, vendors, literature instruments, companies) written at the end of each run; "up/down vs
    last week" in the tables; first-appearance flags gated on history. *Motivation:*
-   `review_findings.json` (digest_quality), `researchers.md` §13. Status: specified.
+   `review_findings.json` (digest_quality), `researchers.md` §13. Status: done as
+   `litradar/trends.py` (the "What changed" digest section and `litradar trends`; `docs/trends.md`),
+   computed from the stored rows without a `weekly_entity_counts` table.
 8. **Gazetteer precision pass.** Case-sensitive plus context terms for capitalised dictionary-word
    aliases (`Evident`, `ENrich`, `TransIT`, `Myriad`, `Recursion`, `Ginkgo`, `WuXi`, `the Broad`);
    FlowJo and Octet as their own entries; a Sequel I entry; Revio context terms; a stoplist in the
@@ -68,11 +82,13 @@ exact patch; `researched` = sources probed live, no code.*
 11. **Dashboard (opt-in).** A static site rendered from the store showing ranked items and public
     metadata only; off by default because GitHub Pages sites are public even for private
     repositories and the watchlist must not be rendered. *Motivation:* `ranking_delivery.md` §6.6.
-    Status: researched.
+    Status: shipped — `litradar dashboard --out site/`, built by `pages.yml` from the `db-latest`
+    asset (`docs/deploy.md` §5).
 12. **Monthly backfill of instrument time series** as a scheduled step after the weekly run
     (`litradar timeseries --vendor pacb --vendor nanopore --vendor ilmn --from 2019-01`); the cache
     makes the weekly cost a few dozen requests. *Motivation:* `docs/sources/timeseries.md`. Status:
-    built (command exists; scheduling not wired).
+    done — `weekly.yml` refreshes the archive time series for every entity after the radar run and
+    before the database is compressed, so the `timeseries` table travels in the release asset.
 
 ## Mid term (next quarter)
 
@@ -86,8 +102,12 @@ exact patch; `researched` = sources probed live, no code.*
     sweep for every China-vendor alias (where DNBSEQ, Stereo-seq, Singleron, GenoLab, Salus and
     QNome evidence lives — 90% of DNBSEQ-T7 Methods mentions are China-affiliated); KCI Open API
     (free key, English abstracts, ORCIDs); J-STAGE for DOI discovery only plus CiNii for abstracts.
-    GSA: statistics endpoint only and a request for sanctioned access; ChinaXiv skipped unless
-    allow-listed. *Motivation:* same note, §§1–3. Status: researched.
+    GSA: search page and statistics JSON (the browse pages behind the cookie gate are not touched;
+    `LEGAL.md` §3); ChinaXiv through the global aggregator's OAI-PMH, since the main-site OAI is
+    allow-listed. *Motivation:* same note, §§1–3. Status: partly done — GSA, GSA-Human, ChinaXiv,
+    KCI OAI-PMH and SciELO are wired and J-STAGE is built and opt-in (`docs/sources/china.md`,
+    `asia_latam.md`); the Chinese-published English journals by ISSN, the Europe PMC `METHODS:`
+    sweep and CiNii remain open.
 15. **Non-US funders.** OpenAIRE Graph (registered client, 7,200 req/h) and UKRI Gateway to Research
     as live adapters; CORDIS monthly zips, Wellcome 360Giving, ANR, ARC `lief-register`
     (equipment), CIHR/NSERC sheets at low frequency; KAKEN with an app id. Instrument-purchase
@@ -119,7 +139,9 @@ exact patch; `researched` = sources probed live, no code.*
     $1/day budget for history; the CC0 snapshot for the full corpus, loaded to Parquet; a weekly
     `exports/papers_{YYYY-WW}.parquet` partitioned by month; DuckDB documented as the escape hatch
     above 5–10M rows (reads SQLite and Parquet, has its own FTS). *Motivation:*
-    `ranking_delivery.md` §4.4, `researchers.md` §1. Status: researched.
+    `ranking_delivery.md` §4.4, `researchers.md` §1. Status: partly done — `litradar backfill`
+    (OpenAlex by topic and month, resumable) and `litradar export` (Parquet) exist; the CC0 snapshot
+    route and the DuckDB documentation beyond `docs/SCALE.md` remain.
 20. **Leading and rising researcher scores.** Senior-author output, subgroup share, preprint
     velocity, citation velocity (snapshotted `cited_by_count` per run, because `counts_by_year` is
     yearly), field-normalised impact, new grants, trials; z-scores within subgroups of ≥30 people,

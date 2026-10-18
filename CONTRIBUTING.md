@@ -54,7 +54,11 @@ ruff check litradar tests
    pattern.
 3. **New sources.** Add a module under `litradar/sources/` that yields `Paper`, `ArchiveRecord` or
    `NewsItem` objects, wire it into `litradar/pipeline.py`, add an offline test with a canned payload,
-   and add a note under `docs/sources/` with the source's terms and documented rate limit. Only
+   and add a note under `docs/sources/` with the source's terms and documented rate limit. In the
+   same change, add the source to the three policy documents and the catalog: a row in
+   `docs/LEGAL.md` sections 2 and 4 (what is stored; terms, documented limit, pacing), an entry in
+   `NOTICE` ("THIRD-PARTY DATA SOURCES", plus the attribution list when the source asks for credit),
+   the route in `docs/ACCEPTABLE_USE.md` item 3, and a status row in `docs/SOURCES.md`. Only
    documented API endpoints and RSS feeds that serve scripts are accepted (see the ground rules).
 4. **OpenAlex topic ids and author ids** in `config/subgroups.yaml`; these make researcher tracking exact.
 
@@ -65,11 +69,18 @@ ruff check litradar tests
   database, WAL/SHM file, `.zst` snapshot, `.cache/` or `.env*` file is tracked.
 * **No credentials in YAML, Markdown or digests**, and no slot for a publisher login anywhere: the
   pipeline does not log in (`SECURITY.md`, `docs/LEGAL.md`).
-* **No HTML scrapers.** Adapters call documented APIs or RSS feeds only. Pull requests that scrape
+* **No HTML scrapers.** Adapters call documented APIs or RSS feeds. Pull requests that scrape
   publisher pages, Google Scholar, or any site whose `robots.txt` or `/.well-known/tdmrep.json`
-  reserves rights will be closed. A feed that answers 403 is dropped, not worked around.
+  reserves rights will be closed. A feed that answers 403 is dropped, not worked around. The one
+  standing exception is the CNCB-NGDC archive pair (`litradar/sources/gsa.py`, `gsa_human.py`),
+  which reads server-rendered metadata pages because the archive publishes no API; `docs/LEGAL.md`
+  section 3 states the four conditions it meets (public data archive, archive metadata only, paths
+  allowed by `robots.txt`, paced and never circumventing a challenge). A new exception needs all
+  four, a paragraph in that section, and a reviewer's agreement.
 * **Keep adapters polite:** use the shared `Http` client so rate limits and User-Agent rules are
-  honoured, and add a `DEFAULT_MIN_INTERVAL` entry for any new host at or below its documented limit.
+  honoured, and add a `DEFAULT_MIN_INTERVAL` entry for any new host at or below its documented limit
+  (or register it from the adapter with `http.min_interval.setdefault(host, seconds)`, as the
+  regional and NGDC adapters do).
 * **Licence-aware storage:** anything that stores text must go through `litradar/policy.py` and keep
   the record's licence string.
 * **Workflow changes** keep every third-party action pinned to a full commit SHA with the tag in a

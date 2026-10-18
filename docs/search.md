@@ -13,15 +13,22 @@ The first three are read-only and all three run the same FTS5 query language aga
 differ in one convenience: the **CLI** (and the watchlist) treats plain text as a phrase, the **API** and
 **Datasette** take the query exactly as written. See "Plain text versus FTS5 syntax" below.
 
-**What is searched is stored text.** The gazetteer matcher behind `litradar entity`, the digest and the
-`/entities` endpoint also resolves aliases (a paper that says "Next GEM 5' reagent kit" is attributed to
-Chromium), so an entity can have mentions that no text search for its name will find. Ask by entity id
-(`litradar entity txg-chromium`, `/entities/instrument/txg-chromium/papers`) when you want the matcher's
-view; search when you want the words.
+**What is searched: stored text plus attributed mentions.** The index has seven text columns (title,
+abstract, Methods, funding, competing interests, affiliations, open-access body) and one derived column,
+`mentions`, holding the entity name, the matched alias and the entity id of every gazetteer mention stored
+for the paper (`docs/store.md` section 2). A plain search therefore also finds papers whose text never
+spells the name you typed: a paper that says "Next GEM 5' reagent kit" is attributed to Chromium by the
+matcher, and `litradar search Chromium` returns it through the `mentions` column (on the 2026-10-18
+snapshot, 334 papers match `Chromium`, 190 of them only there). `--in mentions` restricts a search to
+attributed papers; `--in title,abstract,methods,funding,coi,affiliations,body` restricts it to the words
+themselves. `litradar entity txg-chromium` (and `/entities/instrument/txg-chromium/papers`) gives the
+matcher's distinct-paper count with the per-section breakdown when that is the view you want.
 
 ## 1. What is indexed
 
-`papers_fts` (tokenizer `porter unicode61`) holds one row per paper with these searchable columns:
+`papers_fts` (tokenizer `porter unicode61`) holds one row per paper with these searchable columns (seven
+text columns and the derived `mentions` column; `store.FTS_COLUMNS` is the list the CLI and the API validate
+`--in` / `in=` against):
 
 | Column | Content | Typical use |
 |---|---|---|
@@ -32,6 +39,7 @@ view; search when you want the words.
 | `coi` | competing-interests / disclosures | `coi:Illumina` - employees, consultants, equity |
 | `affiliations` | author affiliation strings | `affiliations:"Genomics Inc"` - industry authors |
 | `body` | the rest of the open-access full text | everything else |
+| `mentions` | entity names, matched aliases and entity ids of the paper's stored gazetteer mentions, ` ; `-joined (derived from the `mentions` table; `docs/store.md` section 2) | `mentions:Chromium`, `--in mentions` - papers *attributed* to an entity under any alias; `mentions:txg-chromium` by id |
 
 Tokenizer facts that change how you write queries:
 
@@ -58,6 +66,7 @@ Tokenizer facts that change how you write queries:
 | one column, phrase | `coi:"Oxford Nanopore"` | |
 | several columns | `{methods coi funding}: Illumina` | braces, space-separated column names |
 | several columns, whole expression | `{methods coi}: (Illumina OR "10x Genomics")` | |
+| attributed to an entity, any alias | `mentions:Chromium` or `mentions:txg-chromium` | the derived column of section 1; a plain query searches it too |
 | prefix | `NovaSeq*` | matches `novaseq`, `novaseqx`, ... ; stems still apply |
 | proximity | `NEAR("spatial transcriptomics" "single-cell", 10)` | phrases inside `NEAR(...)`, max token distance after the comma (default 10) |
 | term at start of a column | `^Xenium` | `title:^Xenium` = title begins with Xenium |
@@ -70,7 +79,8 @@ Snippets mark matched tokens with `[` and `]`.
 
 **Section filter versus column filter.** `--in methods,coi` (CLI) or `in=methods,coi` (API) wraps your
 whole query as `{methods coi}: (query)`; writing `methods:` inside the query does the same for one
-term. Combine them freely.
+term. Combine them freely. `mentions` is a valid section name in both places (`--in mentions`,
+`in=mentions`); an unknown name is a usage error (CLI) or a `400` (API) listing the valid ones.
 
 ### Plain text versus FTS5 syntax
 

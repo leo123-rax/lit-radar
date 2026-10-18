@@ -1,7 +1,8 @@
 # Legal and data policy
 
-**Last reviewed: 2026-10-17.** Terms of service change; re-check the linked pages before relying on a
-row of the table below. This document is a plain-language statement of what the tool does with
+**Last reviewed: 2026-10-18** (first review 2026-10-17; the 2026-10-18 pass added the regional and
+Chinese sources and the NGDC exception to sections 2 to 6). Terms of service change; re-check the
+linked pages before relying on a row of the table below. This document is a plain-language statement of what the tool does with
 other people's content and why. It is not legal advice.
 
 ## 1. The rule in one paragraph
@@ -11,19 +12,20 @@ text-and-data-mining (TDM) licence**, running from a laptop or GitHub Actions wi
 It stores bibliographic **metadata and abstracts** from every source it queries, stores **full text
 only where the record's own licence allows it**, keeps **derived facts** (which instruments and
 companies a paper names) for text it was allowed to read, and **links** to everything else. It never
-logs in anywhere, never fetches paywalled text, never touches Google Scholar, and only uses
-documented machine routes (APIs and RSS feeds that serve scripts), paced at or below each source's
-published limit.
+logs in anywhere, never fetches paywalled text, never touches Google Scholar, and uses documented
+machine routes (APIs and RSS feeds that serve scripts), paced at or below each source's published
+limit — with one declared exception, the two CNCB-NGDC archive adapters that read server-rendered
+metadata pages because the archive publishes no API (section 3).
 
 ## 2. What is stored, and where
 
 | Data | Stored? | Where it ends up |
 |---|---|---|
 | Bibliographic metadata (title, authors, affiliations, venue, DOI, dates, identifiers, licence string, open-access flag) | always | `data/radar.sqlite`; titles and links in `digests/*.md` |
-| Abstracts | from sources whose terms allow it: bioRxiv/medRxiv API, Crossref, OpenAlex (reconstructed from the inverted index), Europe PMC, PubMed, arXiv, journal RSS | `data/radar.sqlite`; excerpts of at most 420 characters in `digests/*.md` |
+| Abstracts | from sources whose terms allow it: bioRxiv/medRxiv API, Crossref, OpenAlex (reconstructed from the inverted index), Europe PMC, PubMed, arXiv, journal RSS, ChinaXiv (global aggregator OAI-PMH), SciELO ArticleMeta, KCI OAI-PMH (see the KCI row in section 4); J-STAGE only when opted in | `data/radar.sqlite`; excerpts of at most 420 characters in `digests/*.md` |
 | Full text (Methods, funding, competing-interest sections, body) | only for open-licensed items: the PMC / Europe PMC open-access subset and preprints under CC0 or a CC BY licence (see section 6) | `data/radar.sqlite` (sections and a full-text search column); raw XML in `.cache/` |
 | Derived facts: gazetteer mentions with short snippets, scores, reasons | for every item whose text was read | `data/radar.sqlite`; entity names and counts in `digests/*.md` |
-| Archive and registry records (SRA/ENA experiments with the declared instrument model, GEO series, PRIDE projects, CELLxGENE datasets, 510(k)/PMA decisions, trials, grants) | always; these are public-domain or unrestricted metadata | `data/radar.sqlite`; counts in `digests/*.md` |
+| Archive and registry records (SRA/ENA experiments with the declared instrument model, GEO series, PRIDE projects, CELLxGENE datasets, NGDC GSA and GSA-Human experiments (metadata only; the controlled-access human reads are never requested), 510(k)/PMA decisions, trials, grants) | always; these are public-domain or unrestricted metadata | `data/radar.sqlite`; counts in `digests/*.md` |
 | Headlines and links from GDELT, RSS / press wires, SEC EDGAR (and Google News RSS if opted in) | always; headline, link, date and the matched company only | `data/radar.sqlite`; grouped headlines in `digests/*.md` |
 | Credentials | never | `.env` or GitHub Actions secrets only (see `SECURITY.md`) |
 
@@ -53,9 +55,19 @@ never sent to the LLM and never republished.
   for them falls back to the PMC author manuscript, the preprint version, archive metadata
   (SRA/GEO instrument model), or the abstract, in that order.
 * **No HTML scraping of publisher sites**, and no adapters for sites whose `robots.txt` or
-  `/.well-known/tdmrep.json` reserve rights. Only documented API endpoints and RSS feeds are used,
-  so crawler directives are respected by construction; a feed that answers 403 is dropped, not
-  worked around.
+  `/.well-known/tdmrep.json` reserve rights. Documented API endpoints and RSS feeds are the rule, so
+  crawler directives are respected by construction; a feed that answers 403 is dropped, not worked
+  around. **One declared exception: the CNCB-NGDC archives** (`litradar/sources/gsa.py`,
+  `gsa_human.py`). NGDC publishes no API for GSA; its search page (`/gsa/search`) and the GSA-Human
+  browse list (`/gsa-human/browse/`) are server-rendered HTML carrying the same metadata the site
+  shows every visitor, read with the same anonymous GET a browser sends. The exception stands
+  because all four of these hold, and a new one needs the same four plus a paragraph here
+  (`CONTRIBUTING.md`): (1) the site is a public data archive, not a publisher, and the pages carry
+  archive metadata (accessions, platform, strategy, release date), never anyone's article text;
+  (2) `ngdc.cncb.ac.cn/robots.txt` disallows only `/openlb/`, so the paths are open to crawlers;
+  (3) the host is paced at one request per second and a day's releases cost one or two requests;
+  (4) the pages that defend themselves (`/gsa/browse/**`, behind a JavaScript cookie challenge) are
+  not fetched, and a challenge page raises an error instead of being parsed around.
 * **No Google Scholar**, ever: its `robots.txt` disallows automated queries and Google's terms
   forbid them.
 * **Google News RSS only as an opt-in.** `news.google.com/robots.txt` disallows the `/rss/` path to
@@ -69,8 +81,10 @@ never sent to the LLM and never republished.
 ## 4. Per-source terms, rate limits and licence notes
 
 Verified against the sources' own pages on the review date. "Pacing" is the interval the shared
-HTTP client (`litradar/http.py`, `DEFAULT_MIN_INTERVAL`) enforces per host; it is at or below every
-documented limit. Where a source publishes no number, the pacing is a courtesy default.
+HTTP client (`litradar/http.py`, `DEFAULT_MIN_INTERVAL`) enforces per host; the regional and NGDC
+adapters register their host's interval on the client themselves (`http.min_interval.setdefault`)
+rather than in that table. It is at or below every documented limit. Where a source publishes no
+number, the pacing is a courtesy default.
 
 | Source | What is taken | Licence / terms note | Documented limit | Pacing |
 |---|---|---|---|---|
@@ -88,7 +102,12 @@ documented limit. Where a source publishes no number, the pacing is a courtesy d
 | NIH RePORTER | shared-instrumentation, SBIR/STTR and keyword awards | US Government work, public domain | one request per second | 1.0 s |
 | PRIDE Archive | projects by day with instrument names | EMBL-EBI Terms of Use | none published | shares `www.ebi.ac.uk` pacing |
 | CZ CELLxGENE Discover | public dataset index with assay terms (one request per run) | curation API; each collection carries its own licence | none published | 1.0 s |
-| GDELT DOC 2.0 API (`api.gdeltproject.org`) | one query per watched company: headlines, links, dates (no snippets) | GDELT terms: "unlimited and unrestricted use for any academic, commercial, or governmental use"; attribution requested | "please limit requests to one every 5 seconds" | 5.5 s; the host is skipped for the rest of the run after a persistent 429 and the skipped companies are listed in the digest's errors |
+| ChinaXiv, via the global aggregator's OAI-PMH (`global.chinaxiv.org`) | preprint metadata and abstracts (mostly Chinese), subjects, keywords, a derived DOI; life-science subjects only by default | OAI-PMH is a harvesting protocol by design; no terms page is reachable to a scripted client (the aggregator's help pages answer HTTP 500), so standard OAI etiquette applies: metadata only, link back to `chinaxiv.org`, re-harvest rather than mirror. The main site's own OAI endpoint is IP-allow-listed and is **not** used | none published | 1.0 s (set by the adapter) |
+| SciELO ArticleMeta (`articlemeta.scielo.org`) | article metadata and abstracts, affiliations, funding statements, by processing date; no full text | an open metadata API published by the SciELO programme; the articles are open access under their own CC licences and are only linked; no credit requirement is stated (a `Source: SciELO` line is courteous) | none published | 0.25 s (set by the adapter) |
+| KCI OAI-PMH (`open.kci.go.kr`) | journal-article metadata and abstracts (Korean and English) for keyword-matched records | **the two KCI pages disagree**: the OAI guide says attribution and *no commercial use* (「저작자표시-출처표시 ... 영리목적으로 사용불가능」) while the data-services page shows the KOGL type-1 badge (attribution; commercial use allowed); both re-read 2026-10-17. Under section 5 a fund or company is a commercial user, so for such an operator the stricter reading **conflicts with the shipped default-on setting**: set `sources.kci.enabled: false` unless you rely on the type-1 licence or have KCI's word. A source credit (`KCI (Korea Citation Index), National Research Foundation of Korea`, linked) is owed wherever the records are shown; the digest does not render one yet | none published | 1.0 s (set by the adapter) |
+| J-STAGE WebAPI (`api.jstage.jst.go.jp`) — **opt-in, off by default** | journal-article metadata and abstracts for term searches | API terms (read 2026-10-17): Article 3(5) forbids keeping API data **in machine-readable form on a server or cloud for 24 hours or more**, which a persistent corpus on a hosted runner does; Article 2 requires JST's prior approval for commercial use; Article 4(10) forbids mass mechanical download; Article 9 requires a "Powered by J-STAGE" credit with a link wherever the data is shown (not rendered by the digest yet). Hence `sources.jstage.enabled: false`; enable it only for laptop runs within the 24-hour rule, in a pointer-only mode, or after asking JST | JST may limit access counts at any time (Article 5); concurrent-access errors (`ERR_003`) observed | 1.0 s (set by the adapter) |
+| NGDC GSA and GSA-Human (`ngdc.cncb.ac.cn`) | native CRA/CRX experiments by release day (platform family, strategy, source, selection); GSA-Human studies and their runs (instrument model); optional cumulative statistics JSON | public archive metadata of CNCB-NGDC; the human reads are controlled-access and are never requested; `robots.txt` disallows `/openlb/` only; read from server-rendered pages under the exception in section 3 | none published | 1.0 s (set by the adapter); a day costs one or two requests, plus one JSON request per GSA-Human study |
+| GDELT DOC 2.0 API (`api.gdeltproject.org`) | one query per watched company: headlines, links, dates (no snippets) | GDELT terms: "unlimited and unrestricted use for any academic, commercial, or governmental use"; attribution requested | "please limit requests to one every 5 seconds" | 8 s between request starts (an answer takes 2–12 s, and company queries are batched so a ~70-company watchlist is ~10 requests); the host is skipped for the rest of the run after four consecutive 429s and the skipped companies are listed in the digest's errors |
 | Journal / publisher / press RSS | headlines, DOIs, links | publisher terms; feeds that refuse scripts are dropped | none | sequential |
 | Google News RSS | headlines per watched company, **only when `news.google_news: true`** | Google Terms of Service; `robots.txt` disallows `/rss/`; **opt-in only, off by default** | none | sequential |
 
@@ -121,6 +140,13 @@ projects), any paid aggregator.
 * **Abstracts** from Crossref and PubMed "may be subject to copyright". Storing them for the
   operator's own indexing is low-risk and common practice; republishing them in bulk is not. The
   digest keeps to 420-character excerpts and never ships the database as text.
+* **KCI's non-commercial clause and J-STAGE's approval clause.** The KCI row in section 4 quotes
+  the OAI guide page (no commercial use) and the data-services page (KOGL type 1, commercial use
+  allowed) for the same data; this document quotes the stricter page. The shipped default keeps
+  `sources.kci` on because the type-1 licence exists; a commercial operator who does not want to
+  rely on that reading disables it, and that is an operator decision this paragraph exists to make
+  visible. J-STAGE needs JST's prior approval for any commercial use and bans machine-readable
+  storage beyond 24 hours, so it is off by default and stays off unless the operator takes both on.
 
 ## 6. How the code enforces it
 
@@ -148,10 +174,11 @@ the permissive list, a stricter operator removes the NC variants. Each stored pa
 with `mailto:` when a contact is configured; per-host minimum intervals (`DEFAULT_MIN_INTERVAL`,
 tightened for NCBI when a key is present); exponential backoff capped at 30 s honouring
 `Retry-After`; no retry on 400/401/403/404/410; a host that answers 429 twice in a row is skipped for
-the rest of the run; nothing in the client ever raises into an adapter. Adapters only call documented
-endpoints, so `robots.txt` crawler rules are satisfied by never crawling. The client does not parse
-`robots.txt` itself; the policy that no HTML page is fetched is what keeps it compliant, and
-`CONTRIBUTING.md` makes that a review rule.
+the rest of the run; nothing in the client ever raises into an adapter. Adapters call documented
+endpoints — plus the two NGDC metadata pages of section 3 — so `robots.txt` crawler rules are
+satisfied by never crawling: every URL an adapter requests is listed in `SOURCES.md` and was checked
+against its host's `robots.txt`. The client does not parse `robots.txt` itself; the fixed list of
+routes is what keeps it compliant, and `CONTRIBUTING.md` makes that a review rule.
 
 **Digest (`litradar/digest/render.py`).** Abstract excerpts are cut at 420 characters; snippets of
 full text are not rendered; the footer states the storage policy in every digest.
@@ -160,12 +187,13 @@ full text are not rendered; the footer states the storage policy in every digest
 
 | Rule | Status |
 |---|---|
-| Storage levels and the licence allow-list | implemented and unit-tested in `litradar/policy.py`; the adapters' call into it is being wired (check `litradar/sources/biorxiv.py` and `litradar/sources/europepmc.py` for `fulltext_storage_level` in your checkout; until it is there, the Europe PMC server itself refuses non-open-access full text, and the bioRxiv web host rate-limits scripted full-text fetches) |
+| Storage levels and the licence allow-list | implemented and unit-tested in `litradar/policy.py`; applied per record by `Pipeline.fulltext_policy` / `apply_fulltext_policy` in `litradar/pipeline.py` before any text is stored (counters `fulltext.policy_full|facts_only|none` in the run report); the Europe PMC ISSN pull carries `(OPEN_ACCESS:y)` |
 | Pacing, backoff, host blocking, honest User-Agent | implemented in `litradar/http.py` |
 | SEC EDGAR skipped without a contact | implemented in `litradar/pipeline.py` |
-| No logins, no publisher HTML, no Google Scholar | no code path exists; review rule in `CONTRIBUTING.md` |
+| No logins, no publisher HTML, no Google Scholar | no code path exists; review rule in `CONTRIBUTING.md`. The NGDC archive pages are the one documented exception (section 3) |
+| KCI and J-STAGE terms | KCI is on by default with the licence conflict stated in sections 4 and 5; J-STAGE requires an explicit `enabled: true` (or `--sources jstage`) in `Pipeline._enabled`; neither source's credit line is rendered by the digest yet |
 | Google News opt-in | implemented: `news.google_news` in `config/radar.yaml` defaults to `false`; while it is off, the pipeline logs that the configured Google News feeds were skipped and `watch_news: true` companies get a GDELT query instead. Setting it to `true` is the operator's decision and risk |
-| GDELT as the per-company news source | implemented (`litradar/sources/gdelt.py`, `news.gdelt: true`); pacing 5.5 s per request, host skipped after a persistent 429 with the skipped companies reported in the digest's error list |
+| GDELT as the per-company news source | implemented (`litradar/sources/gdelt.py`, `news.gdelt: true`); pacing 8 s per request start with batched company queries, host skipped after four consecutive 429s with the skipped companies reported in the digest's error list |
 | Title/abstract-only payload to the LLM | implemented in `litradar/rank/llm.py` |
 
 ## 7. Changing the policy for your copy

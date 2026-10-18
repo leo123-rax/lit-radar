@@ -25,7 +25,8 @@ access to subscription content.
 
 THIRD-PARTY DATA SOURCES
 
-Terms as read on 2026-10-17; verify them before relying on this list. "Licence" below describes
+Terms as read on 2026-10-17 (regional and Chinese sources added 2026-10-18); verify them before
+relying on this list. "Licence" below describes
 the data, not this software. Rate limits are the documented ones; the HTTP client paces at or
 below them (litradar/http.py).
 
@@ -61,7 +62,8 @@ below them (litradar/http.py).
                                The per-company news source, on by default (news.gdelt in
                                config/radar.yaml); headlines, links, dates and the matched company
                                only. GDELT asks for one request every 5 seconds; the client paces
-                               at 5.5 s and skips the remaining companies after a persistent 429.
+                               at 8 s between request starts, batches the company queries, and
+                               skips the remaining companies after a persistent 429.
   SEC EDGAR                    US Government work, public domain. EDGAR fair-access policy: a
                                declared User-Agent with a contact address and at most
                                10 requests/s; the feeds are skipped when no contact is configured.
@@ -73,6 +75,31 @@ below them (litradar/http.py).
   PRIDE Archive (EMBL-EBI)     EMBL-EBI Terms of Use; project-level metadata and instrument names.
   CZ CELLxGENE Discover        Curation API; dataset metadata only. Each collection carries its
                                own licence and publication link.
+  ChinaXiv (global aggregator  OAI-PMH harvesting of preprint metadata and abstracts from
+  OAI-PMH)                     global.chinaxiv.org. No terms page is reachable to a scripted
+                               client, so standard OAI etiquette applies: metadata only, link back,
+                               re-harvest rather than mirror. The main site's own OAI endpoint is
+                               allow-listed and is not used.
+  SciELO ArticleMeta           Open metadata API of the SciELO programme; article metadata and
+                               abstracts only, articles linked to their open-access home. No credit
+                               requirement is stated; a "Source: SciELO" line is courteous.
+  KCI (Korea Citation Index)   OAI-PMH guide page: attribution required, no commercial use. KCI's
+                               data-services page licenses the same data under KOGL type 1
+                               (attribution; commercial use allowed). This project quotes the
+                               stricter page and leaves the decision to the operator
+                               (docs/LEGAL.md sections 4 and 5). A source credit with a link to
+                               kci.go.kr is owed wherever the records are shown.
+  J-STAGE WebAPI (JST)         OFF by default, opt-in only: the API terms forbid storing API data in
+                               machine-readable form on a server or cloud for 24 hours or more
+                               (Article 3(5)), require JST's prior approval for commercial use
+                               (Article 2) and a "Powered by J-STAGE" credit with a link wherever
+                               the data is shown (Article 9).
+  NGDC GSA and GSA-Human       Public archive metadata of the China National Center for
+  (CNCB-NGDC)                  Bioinformation, read from the site's server-rendered search page
+                               and browse list because the archive publishes no API (robots.txt
+                               disallows /openlb/ only; the pages behind its JavaScript challenge
+                               are not fetched). The controlled-access human reads are never
+                               requested. One request per second.
   Google News RSS              Google Terms of Service. news.google.com/robots.txt disallows the
                                /rss/ path to all agents, so this source is OFF by default and
                                opt-in only (news.google_news: false in config/radar.yaml; see
@@ -85,4 +112,6 @@ below them (litradar/http.py).
 
 Attribution requested by sources (keep it when redistributing derived tables): OpenAlex,
 Semantic Scholar (ODC-BY; cite the Semantic Scholar Open Research Corpus), NLM/PubMed
-("acknowledge NLM in a clear and conspicuous manner"), Europe PMC, GDELT.
+("acknowledge NLM in a clear and conspicuous manner"), Europe PMC, GDELT, KCI (a source credit
+linking to kci.go.kr), J-STAGE ("Powered by J-STAGE" with a link, when opted in). SciELO asks for
+nothing; a "Source: SciELO" line is courteous.
