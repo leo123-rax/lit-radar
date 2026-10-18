@@ -25,6 +25,8 @@ _IN_WINDOW = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND sub
 _IN_RANGE = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND substr(p.first_seen,1,10) >= ? AND substr(p.first_seen,1,10) <= ?))"
 
 PAPER_SOURCES = ("biorxiv", "europepmc", "openalex", "crossref", "arxiv", "rss")
+# errors whose text points at configuration, not at the remote source: a re-run changes nothing
+_CONFIG_ERROR_MARKERS = ("not set", "not configured", "api key", "api_key", "contact_email", "litradar_", "budget", "insufficient")
 
 
 def _trailing(since: str) -> Tuple[str, str]:
@@ -34,6 +36,24 @@ def _trailing(since: str) -> Tuple[str, str]:
 
 def _base_source(source: str) -> str:
     return (source or "").split(":", 1)[0].split(".", 1)[0] or "unknown"
+
+
+_SOURCE_LABEL_ALIASES = {"feed": "rss", "feeds": "rss", "subject": "rss", "news": "rss", "gnews": "rss"}
+
+
+def error_source_id(label: str) -> str:
+    """The source id behind a pipeline error label: 'SEC 8-K feeds skipped' -> 'sec', 'rss Nature Methods' -> 'rss',
+    'feed Example Feed' -> 'rss', 'europepmc' -> 'europepmc'. The same first-word rule `litradar status` uses, so
+    suggestions name a real `--sources` value instead of echoing the whole label."""
+    first = (label or "").strip().split()
+    key = (first[0].lower().split(":", 1)[0].split(".", 1)[0] if first else "") or "unknown"
+    return _SOURCE_LABEL_ALIASES.get(key, key)
+
+
+def is_config_error(text: str) -> bool:
+    """Does an error message describe a missing key/identity/budget rather than a source outage?"""
+    t = (text or "").lower()
+    return any(m in t for m in _CONFIG_ERROR_MARKERS)
 
 
 # ----------------------------------------------------------------------------- store queries
@@ -238,7 +258,10 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
     if not last:
         out.append("No pipeline run is recorded in this database yet: run `litradar run --days 7` before reading the rest.")
     for e in report.get("errored_sources") or []:
-        out.append(f"{e['source']} errored in the last run ({e['error'][:90]}): re-run it alone with `litradar run --sources {e['source']} -v`.")
+        if e.get("config"):
+            out.append(f"{e['source']} did not run in the last run because of configuration ({e['error'][:120]}): fix .env (see .env.example), then re-run.")
+        else:
+            out.append(f"{e['source']} errored in the last run ({e['error'][:90]}): re-run it alone with `litradar run --sources {e['source_id']} -v`.")
     if bool((src_cfg.get("openalex") or {}).get("enabled", True)) and not settings.openalex_api_key:
         out.append(
             "No OpenAlex key configured: OPENALEX_API_KEY is empty and anonymous OpenAlex traffic is metered per IP, so the topic, "
@@ -247,9 +270,14 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
     if not settings.contact_email:
         out.append("LITRADAR_CONTACT_EMAIL is empty: SEC 8-K feeds are skipped and Crossref/OpenAlex serve you from the slow anonymous pool.")
     present = {_base_source(s["source"]) for s in report.get("sources") or []}
+    pulled_last_run = {_base_source(str(k).split(".", 1)[1]) for k in ((last or {}).get("counts") or {}) if str(k).startswith("fetched.")}
     for name in PAPER_SOURCES:
         if bool((src_cfg.get(name) or {}).get("enabled", True)) and name not in present and last:
-            out.append(f"Source {name} is enabled but contributed 0 papers in the window: check it with `litradar run --sources {name} -v`.")
+            if pulled_last_run and name not in pulled_last_run:
+                out.append(f"Source {name} is enabled but contributed 0 papers in the window and was not pulled in the last run "
+                           f"(a `--sources` subset, or it failed before returning anything): `litradar run --sources {name} -v` pulls it alone.")
+            else:
+                out.append(f"Source {name} is enabled but contributed 0 papers in the window: check it with `litradar run --sources {name} -v`.")
     for s in report.get("sources") or []:
         if s["source"] in ("biorxiv", "medrxiv") and s["papers"] >= 20 and s["fulltext"] == 0:
             out.append(f"{s['source']}: {s['papers']} preprints but no parsed full text (the JATS host rate-limits scripts; see docs/SOURCES.md).")
@@ -258,10 +286,15 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
     if no_issn:
         out.append("Journals with neither ISSN nor RSS, so nothing can pull them: " + ", ".join(no_issn[:8]) + ".")
     never = [j for j in jz if j["issn"] and j["last_seen"] is None]
-    if never:
+    if never and _journal_pull_was_complete(last):
         out.append(
             "ISSN pull returned 0 for journals never seen in the store: check the ISSN for "
             + ", ".join(f"{j['name']} ({j['issn'][0]})" for j in never[:6]) + ("..." if len(never) > 6 else "") + "."
+        )
+    elif never:
+        out.append(
+            f"{len(never)} configured journals have never been seen in the store, but the last run did not pull the ISSN sources "
+            "over a full week (a `--sources` subset or a short window), so their ISSNs cannot be judged yet."
         )
     stale = [j for j in jz if j["issn"] and j["last_seen"] is not None and j["trailing_13w_avg"] == 0]
     if stale:
@@ -271,8 +304,9 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
     no_alias = [c for c in cz if c["aliases"] == 0 and c["news_items"] == 0 and c["trailing_13w_avg"] == 0]
     if no_alias:
         out.append(
-            "Watched companies with no mentions, no news and no aliases configured: add an alias for "
-            + ", ".join(c["name"] for c in no_alias[:8]) + " (`litradar track company \"<name>\" --alias ...` after `untrack`, or edit the entry)."
+            "Watched companies with no paper mentions, no news and no aliases configured: add an alias for "
+            + ", ".join(c["name"] for c in no_alias[:8])
+            + " by editing the entry's `aliases:` list in companies.yaml (keeps ticker/type/watch_news), then `litradar rematch`."
         )
     silent = [c for c in cz if c["aliases"] > 0 and c["trailing_13w_avg"] == 0 and c["news_items"] == 0]
     if silent:
@@ -296,13 +330,31 @@ def _suggestions(report: Dict[str, Any], settings: Settings) -> List[str]:
 
 
 # ----------------------------------------------------------------------------- public API
+def _journal_pull_was_complete(last: Optional[Dict[str, Any]]) -> bool:
+    """Did the last run pull the ISSN-driven sources over at least a week? Only then is a silent ISSN suspicious."""
+    if not last:
+        return False
+    try:
+        days = (date.fromisoformat(str(last.get("until"))) - date.fromisoformat(str(last.get("since")))).days
+    except (TypeError, ValueError):
+        return False
+    counts = last.get("counts") or {}
+    pulled = any(str(k).startswith(("fetched.europepmc", "fetched.crossref")) for k in counts)
+    return days >= 7 and pulled
+
+
 def coverage_report(store: Store, since: str, until: str, settings: Settings) -> Dict[str, Any]:
-    """Everything `litradar coverage` prints, as a JSON-serialisable dict."""
+    """Everything `litradar coverage` prints, as a JSON-serialisable dict.
+
+    `last_run` and `errored_sources` describe the most recent pipeline run only (its counters are not a
+    window aggregate); the Markdown says so next to the numbers.
+    """
     last = _last_run(store)
     errored = []
     for msg in (last or {}).get("errors") or []:
         src, _, rest = str(msg).partition(":")
-        errored.append({"source": src.strip() or "unknown", "error": rest.strip() or str(msg)})
+        label = src.strip() or "unknown"
+        errored.append({"source": label, "source_id": error_source_id(label), "error": rest.strip() or str(msg), "config": is_config_error(str(msg))})
     journals = list((settings.yaml("journals") or {}).get("journals") or [])
     n_window = store.conn.execute(f"SELECT COUNT(*) FROM papers p WHERE {_IN_WINDOW}", (since, until, since)).fetchone()[0]
     report: Dict[str, Any] = {
@@ -342,7 +394,9 @@ def render_coverage_markdown(store: Store, since: str, until: str, settings: Set
     last = r.get("last_run")
     head = f"{r['papers_in_window']} papers in the window from {len(r['sources'])} source(s)"
     if last:
-        head += f"; last run {str(last.get('finished') or last.get('started') or '')[:16]} (window {last.get('since')}..{last.get('until')}) with {len(r['errored_sources'])} source error(s)"
+        head += (f"; last run {str(last.get('finished') or last.get('started') or '')[:16]} (window {last.get('since')}..{last.get('until')}) "
+                 f"with {len(r['errored_sources'])} source error(s). Run counters below ('Pulled in last run', 'Sources that errored') describe "
+                 "that run only, not every run behind the window")
     else:
         head += "; no pipeline run recorded"
     md.append(head + ".\n")
@@ -366,13 +420,16 @@ def render_coverage_markdown(store: Store, since: str, until: str, settings: Set
         md.append(f"_... and {len(jz) - MAX_LISTED} more (see --json)_\n")
 
     w = r["watched"]
-    md.append("### Watched entities with zero mentions in the window\n")
+    md.append("### Watched entities with zero paper mentions in the window\n")
     cz = w["companies"]["zero"]
-    md.append(f"**Companies with watch_news** ({len(cz)} of {w['companies']['total']} silent)\n")
+    with_news = sum(1 for c in cz if c["news_items"])
+    md.append(f"**Companies with watch_news** ({len(cz)} of {w['companies']['total']} with no paper mention"
+              + (f"; {with_news} of them had news items in the window, listed first" if with_news else "") + ")\n")
+    ordered = sorted(cz, key=lambda c: (-int(c["news_items"] or 0), str(c["name"])))
     md.append(_table(
         ["Company", "Ticker", "News items", f"Trailing {TRAILING_WEEKS}-wk avg papers/wk", "Aliases"],
-        [[c["name"], c["ticker"], c["news_items"], c["trailing_13w_avg"], c["aliases"]] for c in cz[:MAX_LISTED]],
-        empty="_every watched company was mentioned at least once_",
+        [[c["name"], c["ticker"], c["news_items"], c["trailing_13w_avg"], c["aliases"]] for c in ordered[:MAX_LISTED]],
+        empty="_every watched company was mentioned in at least one paper_",
     ))
     pz = w["platforms"]["zero"]
     md.append(f"**Instrument platforms** ({len(pz)} of {w['platforms']['total']} with no paper mention and no archive deposit)\n")
@@ -395,7 +452,8 @@ def render_coverage_markdown(store: Store, since: str, until: str, settings: Set
     md.append("### Sources that errored in the last run\n")
     if r["errored_sources"]:
         for e in r["errored_sources"]:
-            md.append(f"- **{e['source']}**: {e['error'][:200]}")
+            tag = " _(configuration, not an outage)_" if e.get("config") else ""
+            md.append(f"- **{e['source']}**: {e['error'][:200]}{tag}")
         md.append("")
     else:
         md.append("_none_\n" if last else "_no run recorded_\n")

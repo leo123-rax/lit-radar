@@ -31,21 +31,28 @@ datasette -i data/radar.sqlite -m datasette/metadata.yaml --setting sql_time_lim
 
 ## Full-text search
 
-`papers_fts` is an FTS5 table keyed by the text column `id`, not by `rowid`, so Datasette's
-table-level `fts_table` integration (which joins on rowid) does not apply. The **search** canned
-query performs the join and accepts raw FTS5 syntax:
+`papers_fts` is a standalone FTS5 table (it stores its own copy of the text in the usual shadow
+tables) that carries the paper id as an `UNINDEXED` column. Its rowids are kept equal to
+`papers.rowid` by the store, but the canned queries join on the `id` column, which is what the
+metadata documents and what survives a rebuild. Datasette's table-level `fts_table` integration is not
+switched on because the search here needs the join to `papers` for dates, journals and URLs anyway;
+the **search** canned query performs that join and accepts raw FTS5 syntax:
 
 ```
 /radar/search?query=methods:Xenium
-/radar/search?query="spatial transcriptomics" AND NOT Visium&since=2026-10-01
+/radar/search?query="spatial transcriptomics" NOT Visium&since=2026-10-01
 /radar/search?query={methods coi}: Illumina
 /radar/search?query=NovaSeq*
 /radar/search?query=NEAR("spatial transcriptomics" "single-cell", 10)
 ```
 
-Append `.json` to any page for the data (`?_shape=array` gives a plain list of objects). Hyphenated
-terms must be quoted (`"single-cell"`): FTS5 reads an unquoted `-cell` as a negated column filter and
-Datasette shows the resulting "no such column" error. The full syntax cheat-sheet is in `docs/search.md`.
+FTS5 rules that bite here: `NOT` is binary (`a NOT b`; there is no `AND NOT`, FTS5 answers `syntax
+error near "NOT"`), operators are upper-case, and hyphenated terms must be quoted (`"single-cell"`):
+FTS5 reads an unquoted `-cell` as a negated column filter and Datasette shows the resulting "no such
+column" error. Datasette shows every FTS5 error as-is, which is the point of trying a query here first.
+`since` and `until` parameters are calendar dates (`YYYY-MM-DD`); the `Nd` shorthand the CLI and the
+JSON API accept is not understood by SQL and would match nothing. Append `.json` to any page for the
+data (`?_shape=array` gives a plain list of objects). The full syntax cheat-sheet is in `docs/search.md`.
 
 ## Canned queries
 
@@ -61,20 +68,24 @@ Datasette shows the resulting "no such column" error. The full syntax cheat-shee
 | `top_scored_papers` | `since`, `until` | highest final scores with the signals behind them |
 | `unlisted_company_institutions` | `since` | corporate-looking affiliations not matched by the company gazetteer (candidates for `companies.yaml`) |
 
-Blank parameters mean "no filter" everywhere. Each query also has a JSON form:
+Blank parameters mean "no filter" everywhere (a blank `since` or `until` is an open bound; dates are
+`YYYY-MM-DD`). Each query also has a JSON form:
 
 ```bash
 curl 'http://127.0.0.1:8001/radar/companies_by_role.json?since=2026-10-10&until=2026-10-17&_shape=array'
+curl 'http://127.0.0.1:8001/radar/companies_by_role.json?_shape=array'      # same query, no date bound
 ```
 
 ## Tables, facets, descriptions
 
 `papers` is faceted by `journal`, `kind` and `source`, sorted newest first; `archive_records` by
 `archive`, `platform`, `library_strategy` and `vendor`; `mentions` by `kind`, `section` and `vendor`;
-`news_items` by `feed`; `tracked_author_hits` by `subgroup`. Every column has a description that
-Datasette shows on the table page. The FTS shadow tables are hidden from the index. A `timeseries`
-entry is included for the optional monthly-counts table that `litradar timeseries` creates; it is
-ignored when the table does not exist.
+`news_items` by `feed`; `tracked_author_hits` by `subgroup`. Every column of the core tables has a
+description that Datasette shows on the table page. The FTS shadow tables are hidden from the index.
+Entries are also included for tables that optional commands create and that may therefore be absent:
+`timeseries` (`litradar timeseries`), `concepts`, `concept_counts` and `concept_papers`
+(`litradar concepts`; the per-paper table is hidden because it is large and only useful as a join), and
+`candidate_companies` (`litradar candidates`). Datasette ignores metadata for a table that does not exist.
 
 ## Publishing a public copy
 

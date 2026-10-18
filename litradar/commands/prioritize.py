@@ -97,7 +97,7 @@ def cmd_prioritize(args) -> int:
 
 def register(sub) -> None:
     p = sub.add_parser("prioritize", help="weight a subgroup, company, instrument category, journal or source in ranking and fetch order")
-    p.add_argument("kind", choices=["subgroup", "company", "instrument-category", "instrument_category", "journal", "source", "list"])
+    p.add_argument("kind", type=lambda s: s.replace("_", "-"), choices=["subgroup", "company", "instrument-category", "journal", "source", "list"])
     p.add_argument("target", nargs="?", help="id or name (company: id, name, alias or ticker)")
     p.add_argument("--weight", type=float, help=f"multiplier between {T.PRIORITY_MIN:g} and {T.PRIORITY_MAX:g}; 1.0 is neutral")
     p.add_argument("--clear", action="store_true", help="remove the priority (back to 1.0)")

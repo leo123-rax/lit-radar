@@ -15,6 +15,11 @@ command-line tool.
 `--raw` wraps the HTTP client in `RecordingHttp`, which hands every response body to the writer as it
 arrives. That gives the API's own payload for every source, including adapters that build records
 inline, without duplicating any request logic.
+
+Exit codes: 0 with records; 2 for a usage problem (unknown source, missing option, bad date); 1 when the
+source failed hard: zero records after failed requests (HTTP 4xx/5xx exhausted, an OpenAlex budget
+refusal), a host skipped for the rest of the run after repeated 429s, or an adapter exception. A hard
+failure is never reported as "0 records, exit 0".
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ from itertools import islice
 from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, TextIO, Tuple
 
+from . import query as Q
 from .config import Settings
 from .http import DEFAULT_MIN_INTERVAL, Http
 from .models import Paper
@@ -185,7 +191,12 @@ def _europepmc(http: Http, req: FetchRequest) -> Iterator[Any]:
     elif section and terms:
         q = europepmc.section_query(section.upper(), terms, req.since, req.until, open_access_only=not req.opt("all_access"))
     else:
-        raise UsageError("europepmc needs --query, --issn, or --section FIELD --terms A,B")
+        raise UsageError(
+            "europepmc needs --query, --issn, or --section FIELD --terms A,B; one of:\n"
+            "  --query 'TITLE:\"spatial\" AND OPEN_ACCESS:y'      a verbatim Europe PMC query\n"
+            "  --issn 1548-7091,0028-0836                       journal ISSNs (repeatable or comma-separated)\n"
+            "  --section METHODS --terms \"NovaSeq X,Xenium\"      phrases inside one section (METHODS, BODY, COMP_INT, ACK_FUND, AFF, ABSTRACT)"
+        )
     log.info("europepmc query: %s", q)
     kw: Dict[str, Any] = {}
     if req.max_records:
@@ -226,8 +237,12 @@ def _openalex(http: Http, req: FetchRequest) -> Iterator[Any]:
     kw: Dict[str, Any] = {"mailto": req.settings.contact_email, "api_key": req.settings.openalex_api_key}
     if req.max_records:
         kw["max_records"] = req.max_records
-    for work in openalex.works(http, filters, **kw):
+    state: Dict[str, Any] = {}
+    for work in openalex.works(http, filters, state=state, **kw):
         yield openalex.to_paper(work)
+    if state.get("error"):
+        # the pager stopped early (HTTP 4xx/5xx, exhausted anonymous budget, transport failure): say so, exit 1
+        raise RuntimeError(f"OpenAlex stopped early: {state['error']}" + ("" if req.settings.openalex_api_key else " (no OPENALEX_API_KEY configured)"))
 
 
 def _arxiv(http: Http, req: FetchRequest) -> Iterator[Any]:
@@ -581,8 +596,18 @@ def run_fetch(
 
 
 def _resolve_window(opts: argparse.Namespace) -> Tuple[str, str]:
-    since, until, days = getattr(opts, "since", None), getattr(opts, "until", None), getattr(opts, "days", None)
+    """--since/--until (YYYY-MM-DD or Nd) and --days -> an inclusive ISO window; bad input is a UsageError."""
+    try:
+        since = Q.parse_date(getattr(opts, "since", None), "--since")
+        until = Q.parse_date(getattr(opts, "until", None), "--until")
+    except ValueError as exc:
+        raise UsageError(str(exc)) from None
+    days = getattr(opts, "days", None)
+    if days is not None and days < 1:
+        raise UsageError(f"--days must be at least 1, got {days}")
     if since and until:
+        if since > until:
+            raise UsageError(f"--since {since} is after --until {until}")
         return since, until
     if since:
         return since, datetime.now(timezone.utc).date().isoformat()
@@ -705,11 +730,32 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         if callable(close):
             close()
     what = "responses" if args.raw else spec.record + " records"
-    print(f"litradar fetch {spec.name}: {n:,} {what} -> {out_path if out_path != '-' else 'stdout'}; http {dict(http.stats)}", file=sys.stderr)
+    stats = dict(getattr(http, "stats", {}) or {})
+    print(f"litradar fetch {spec.name}: {n:,} {what} -> {out_path if out_path != '-' else 'stdout'}; http {stats}", file=sys.stderr)
+    return fetch_exit_code(spec.name, n, stats, getattr(http, "blocked_hosts", None))
+
+
+def fetch_exit_code(source: str, n: int, stats: Dict[str, Any], blocked_hosts: Any = None) -> int:
+    """0 for a healthy fetch; 1, with a one-line reason on stderr, when the source failed hard.
+
+    Hard failure = a host skipped for the rest of the run (repeated 429s; the output is incomplete), or
+    zero records while at least one request failed (HTTP 4xx/5xx after retries, rejected key, budget).
+    A genuinely empty window with no failed request is still exit 0.
+    """
+    blocked = sorted(str(h) for h in (blocked_hosts or ()))
+    failures = int(stats.get("failures", 0) or 0)
+    if blocked:
+        print(f"litradar fetch {source}: FAILED: host(s) skipped for the rest of the run after repeated 429s: {', '.join(blocked)}; "
+              f"{n:,} record(s) were written before that, the output is incomplete", file=sys.stderr)
+        return 1
+    if n == 0 and failures:
+        print(f"litradar fetch {source}: FAILED: 0 records and {failures} failed request(s): the source answered with errors "
+              "(see the WARNING/INFO lines above for the HTTP status; check the API key, identity and window for this source)", file=sys.stderr)
+        return 1
     return 0
 
 
 __all__ = [
     "REGISTRY", "BY_NAME", "SourceSpec", "FetchRequest", "RecordingHttp", "UsageError",
-    "get", "records", "run_fetch", "describe", "format_list", "add_fetch_parser", "cmd_fetch", "make_http", "window", "Paper",
+    "get", "records", "run_fetch", "describe", "format_list", "add_fetch_parser", "cmd_fetch", "fetch_exit_code", "make_http", "window", "Paper",
 ]

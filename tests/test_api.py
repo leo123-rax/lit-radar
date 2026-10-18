@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date
 from pathlib import Path
@@ -20,9 +21,9 @@ def _paper(i: int, **kw) -> Paper:
     base = dict(
         id=f"doi:10.1000/test{i}", source="biorxiv", kind="preprint", title=f"Paper {i} about Xenium spatial profiling",
         doi=f"10.1000/test{i}", abstract="We present a novel spatial transcriptomics method using Xenium.", journal="biorxiv",
-        pub_date="2026-10-12", url=f"https://example.org/{i}", authors=[Author(name="A. Author", affiliation="Example Genomics Inc")],
-        affiliations=["Example Genomics Inc, Somewhere"], sections={"methods": "Sequenced on NovaSeq X Plus.", "body": "full body text"},
-        fulltext_available=True,
+        pub_date="2026-10-12", url=f"https://example.org/{i}", authors=[Author(name="A. Author", affiliation="Example Genomics Inc", email="a.author@example.org")],
+        affiliations=["Example Genomics Inc, Somewhere"], sections={"methods": "Sequenced on NovaSeq X Plus.", "body": "full body text", "funding": "Grant 1", "coi": "none"},
+        fulltext_available=True, extra={"emails": ["a.author@example.org"], "version": "1"},
     )
     base.update(kw)
     return Paper(**base)
@@ -124,6 +125,10 @@ def test_search_since_and_sections(served):
     assert data["count"] == 0
     _, data = _json(served["base"], "/search?q=Xenium&mentions=0")
     assert "instruments" not in data["results"][0]
+    _, data = _json(served["base"], "/search?q=Xenium&mentions=false")  # common falsy spellings are honoured too
+    assert "instruments" not in data["results"][0]
+    status, data = _json(served["base"], "/search?q=Xenium&mentions=maybe")
+    assert status == 400
 
 
 def test_search_parameter_bounds(served):
@@ -144,8 +149,15 @@ def test_search_parameter_bounds(served):
     assert status == 400 and "nope" in data["error"]
     status, data = _json(base, "/search?q=" + "x" * (api.MAX_QUERY_LEN + 1))
     assert status == 400
-    status, data = _json(base, "/search?q=weird-query:with(chars")  # phrase fallback, not a 500
-    assert status == 200 and data["count"] == 0
+    # FTS5 syntax errors are a 400 carrying SQLite's message, never a silent phrase fallback with 0 results
+    status, data = _json(base, "/search?q=weird-query:with(chars")
+    assert status == 400 and data["error"].startswith("query not understood by FTS5") and "no such column: query" in data["error"]
+    status, data = _json(base, "/search?q=nosuchcol:Xenium")
+    assert status == 400 and "no such column: nosuchcol" in data["error"]
+    status, data = _json(base, "/search?q=" + urllib.parse.quote("(Xenium OR"))
+    assert status == 400 and "syntax error" in data["error"]
+    status, data = _json(base, "/search?q=Xenium&in=methods&limit=5")  # the section wrapper is checked with the query
+    assert status == 200
 
 
 # ---- /papers/{id} ----------------------------------------------------------------------
@@ -155,6 +167,10 @@ def test_paper_detail(served):
     assert data["id"] == "doi:10.1000/test1" and data["fulltext_available"] is True
     assert data["authors"][0]["name"] == "A. Author" and data["sections"]["methods"].startswith("Sequenced")
     assert "authors_json" not in data and "body" not in data["sections"]
+    assert "email" not in data["authors"][0] and "emails" not in data["extra"] and data["extra"]["version"] == "1"  # privacy
+    assert "_rowid" not in data  # SQLite internals stay internal
+    raw = _get(served["base"], "/papers/doi%3A10.1000%2Ftest1")[2].decode("utf-8")
+    assert "@example.org" not in raw
     assert {m["entity_id"] for m in data["mentions"]} == {"txg-xenium", "ilmn-novaseq-x", "10x-genomics"}
     assert data["score"]["final"] == 6.5 and data["score"]["llm"] == {"novelty": 4}
     assert data["tracked_authors"] == [{"author_name": "A. Author", "subgroup": "spatial", "matched_by": "name"}]
@@ -175,10 +191,12 @@ def test_entity_papers(served):
     assert sorted(data["results"][0]["sections"]) == ["abstract", "title"] and data["results"][0]["mentions"] == 2
     _, data = _json(served["base"], "/entities/instrument/txg-xenium/papers?since=90d&limit=1")
     assert data["count"] == 1 and data["limit"] == 1 and data["results"][0]["id"] == "doi:10.1000/test1"
-    _, data = _json(served["base"], "/entities/company/txg-xenium/papers")  # wrong kind: empty, not an error
-    assert data["entity"] is None and data["count"] == 0
-    status, data = _json(served["base"], "/entities/vendor/x/papers")
-    assert status == 404
+    status, data = _json(served["base"], "/entities/company/txg-xenium/papers")  # wrong kind: 404 with a hint, not an empty 200
+    assert status == 404 and "unknown company id 'txg-xenium'" in data["error"] and "exists as a instrument" in data["error"]
+    status, data = _json(served["base"], "/entities/instrument/no-such-thing/papers")
+    assert status == 404 and "unknown instrument id 'no-such-thing'" in data["error"]
+    status, data = _json(served["base"], "/entities/vendor/x/papers")  # bad input is a 400, as documented
+    assert status == 400 and "kind must be one of" in data["error"]
     status, data = _json(served["base"], "/entities/instrument/bad%20id!/papers")
     assert status == 400
     status, data = _json(served["base"], "/entities/instrument/txg-xenium/papers?limit=5000")
@@ -209,8 +227,16 @@ def test_archive_top_news_stats(served):
     assert data["results"][0]["instrument_model"] == "Illumina NovaSeq X Plus" and data["results"][0]["experiments"] == 3
     assert data["results"][0]["archives"] == ["sra"]
     _, data = _json(served["base"], "/top?since=2026-10-10&until=2026-10-17&limit=1")
-    assert data["count"] == 1 and data["results"][0]["id"] == "doi:10.1000/test1" and data["results"][0]["final"] == 6.5
-    assert data["results"][0]["mentions"] and data["results"][0]["authors"][0]["name"] == "A. Author"
+    assert data["count"] == 1 and data["full"] is False and data["results"][0]["id"] == "doi:10.1000/test1" and data["results"][0]["final"] == 6.5
+    top = data["results"][0]
+    # a shortlist: entity chips and the short disclosure sections only; no mention rows, no Methods text, no e-mails
+    assert "mentions" not in top and top["mention_rows"] == 4
+    assert {c["entity_id"] for c in top["instruments"]} == {"txg-xenium", "ilmn-novaseq-x"} and top["companies"][0]["entity_id"] == "10x-genomics"
+    assert set(top["sections"]) == {"funding", "coi"} and top["authors"][0]["name"] == "A. Author" and "email" not in top["authors"][0]
+    assert "_rowid" not in top
+    _, data = _json(served["base"], "/top?since=2026-10-10&until=2026-10-17&limit=1&full=1")
+    assert data["full"] is True and len(data["results"][0]["mentions"]) == 4 and "methods" in data["results"][0]["sections"]
+    assert "email" not in data["results"][0]["authors"][0]
     status, data = _json(served["base"], "/top?limit=100000")
     assert status == 200 and data["limit"] == api.MAX_LIMIT
     _, data = _json(served["base"], "/news?since=2026-10-10")
@@ -274,6 +300,42 @@ def test_missing_database_fails_fast(tmp_path):
         api.RadarAPI(tmp_path / "missing.sqlite")
 
 
+def test_non_sqlite_file_fails_at_startup_not_per_request(tmp_path, capsys):
+    bogus = tmp_path / "README.md"
+    bogus.write_text("# not a database\n", encoding="utf-8")
+    with pytest.raises(sqlite3.DatabaseError, match="not a readable radar database"):
+        api.RadarAPI(bogus)
+    import argparse
+
+    from litradar.commands import serve as serve_cmd
+
+    parser = argparse.ArgumentParser()
+    serve_cmd.register(parser.add_subparsers(dest="cmd"))
+    args = parser.parse_args(["serve", "--db", str(bogus)])
+    args.config_dir = None
+    assert serve_cmd.cmd_serve(args) == 2
+    assert "cannot open" in capsys.readouterr().err
+
+
+def test_busy_port_is_one_line_not_a_traceback(tmp_path, capsys):
+    import socket
+
+    db = tmp_path / "r.sqlite"
+    Store(db).close()
+    app = api.RadarAPI(db)
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        assert api.serve(app, host="127.0.0.1", port=port) == 1
+    finally:
+        holder.close()
+    err = capsys.readouterr().err
+    assert f"cannot listen on 127.0.0.1:{port}" in err and "--port" in err and "Traceback" not in err
+
+
 def test_cors_and_options(tmp_path):
     db = tmp_path / "r.sqlite"
     Store(db).close()
@@ -301,9 +363,15 @@ def test_log_line_redacts_emails(caplog, served):
     assert api.redact_path("/search?q=Xenium%20NovaSeq&since=7d") == "/search?q=Xenium%20NovaSeq&since=7d"  # untouched when clean
     assert api.redact_path("/search?q=" + "x" * 500).endswith("…")
     with caplog.at_level("INFO", logger="litradar.api"):
-        _get(served["base"], "/search?q=Xenium%20someone@example.org")
+        # quoted: '@' is not an FTS5 bareword character, so the unquoted form would be a (correct) 400
+        _get(served["base"], "/search?q=Xenium%20%22someone@example.org%22")
     line = next(r.getMessage() for r in caplog.records if r.name == "litradar.api" and "/search" in r.getMessage())
     assert "@" not in line and "[email]" in line and " 200 " in line
+    caplog.clear()
+    with caplog.at_level("INFO", logger="litradar.api"):
+        _get(served["base"], "/search?q=someone@example.org")  # rejected by FTS5, still masked in the log
+    line = next(r.getMessage() for r in caplog.records if r.name == "litradar.api" and "/search" in r.getMessage())
+    assert "@" not in line and " 400 " in line
 
 
 # ---- client stub -----------------------------------------------------------------------
@@ -317,6 +385,7 @@ def test_radar_client(served):
     assert client.companies(since="2026-10-10", until="2026-10-17")["results"][0]["entity_id"] == "10x-genomics"
     assert client.archive_instruments(since="2026-10-10", until="2026-10-17")["results"][0]["experiments"] == 3
     assert client.top(since="2026-10-10", until="2026-10-17", limit=1)["count"] == 1
+    assert client.top(since="2026-10-10", until="2026-10-17", limit=1, full=True)["results"][0]["mentions"]
     assert client.news(since="2026-10-10", company="vendor-a")["count"] == 1
     assert client.stats()["counts"]["papers"] == 3
     assert client.digest_latest().startswith("# Science literature radar")
@@ -327,6 +396,10 @@ def test_radar_client(served):
     with pytest.raises(api.RadarAPIError) as exc:
         client.search("Xenium", since="never")
     assert exc.value.status == 400
+    # no server at all: still a RadarAPIError (status 0), not a raw urllib exception
+    with pytest.raises(api.RadarAPIError) as exc:
+        api.RadarClient("http://127.0.0.1:1", timeout=2).stats()
+    assert exc.value.status == 0 and "connection failed" in str(exc.value)
 
 
 # ---- parameter helpers and the CLI plugin ------------------------------------------------
@@ -364,3 +437,26 @@ def test_serve_command_is_registered_and_datasette_hint(monkeypatch, capsys, tmp
     live = serve_cmd.datasette_command(Path("x"), Path("y"), "h", 1, immutable=False)
     assert "-i" not in live and live[3] == "x"
     assert os.path.exists(serve_cmd.DATASETTE_METADATA)
+
+
+def test_datasette_detection_is_not_fooled_by_the_repo_folder(monkeypatch):
+    import importlib.machinery
+    import importlib.util
+
+    from litradar.commands import serve as serve_cmd
+    from litradar.config import REPO_ROOT
+
+    # what find_spec returns from the repository root with no package installed: the metadata folder as a namespace package
+    ns = importlib.machinery.ModuleSpec("datasette", None)
+    ns.submodule_search_locations = [str(REPO_ROOT / "datasette")]
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: ns)
+    assert serve_cmd.datasette_available() is False
+    # a loader whose __init__.py sits inside the repository's datasette/ folder is not the package either
+    local = importlib.machinery.ModuleSpec("datasette", object(), origin=str(REPO_ROOT / "datasette" / "__init__.py"))
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: local)
+    assert serve_cmd.datasette_available() is False
+    real = importlib.machinery.ModuleSpec("datasette", object(), origin="/opt/venv/lib/python3.9/site-packages/datasette/__init__.py")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: real)
+    assert serve_cmd.datasette_available() is True
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert serve_cmd.datasette_available() is False

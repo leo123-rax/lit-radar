@@ -297,7 +297,11 @@ def test_watchlist_add_list_remove_and_kinds(tmp_path):
     rows = entities.watch_list(st)
     assert [(r["term"], r["kind"]) for r in rows] == [("methylation ctDNA", "term"), ("pacb-revio", "entity"), ("Feng Zhang", "author"), ("Xenium", "term")]
     assert all(r["added_at"].endswith("Z") for r in rows)
-    assert entities.watch_remove(st, "Xenium") is True and entities.watch_remove(st, "Xenium") is False
+    assert entities.watch_remove(st, "Xenium") == "Xenium" and entities.watch_remove(st, "Xenium") is None
+    # remove accepts the spelling add resolved: the name "Revio" was stored as the id pacb-revio
+    assert entities.watch_remove(st, "Revio") is None  # without gazetteers there is nothing to resolve against
+    assert entities.watch_remove(st, "Revio", instruments=INSTRUMENTS, companies=COMPANIES) == "pacb-revio"
+    assert [r["term"] for r in entities.watch_list(st)] == ["methylation ctDNA", "Feng Zhang"]
     with pytest.raises(ValueError):
         entities.watch_add(st, "  ")
     with pytest.raises(ValueError):
@@ -307,7 +311,8 @@ def test_watchlist_add_list_remove_and_kinds(tmp_path):
 
 def test_watch_run_reports_matches_per_kind(tmp_path):
     st = _seed(tmp_path)
-    entities.watch_add(st, "methylation ctDNA")
+    entities.watch_add(st, "methylation AND ctDNA")  # explicit FTS5 operator: AND of the two words
+    entities.watch_add(st, "methylation ctDNA")  # plain multi-word term: matched as a PHRASE (the abstracts say "methylation and ctDNA")
     entities.watch_add(st, "pacb-revio", instruments=INSTRUMENTS, companies=COMPANIES)
     entities.watch_add(st, "Feng Zhang", instruments=INSTRUMENTS, companies=COMPANIES, subgroups=SUBGROUPS)
     entities.watch_add(st, "甲基化", kind="term")  # CJK: exact substring path
@@ -316,8 +321,9 @@ def test_watch_run_reports_matches_per_kind(tmp_path):
     rep = entities.watch_run(st, "2026-10-01", "2026-10-17", limit=10, instruments=INSTRUMENTS, companies=COMPANIES, subgroups=SUBGROUPS)
     by = {t["term"]: t for t in rep["terms"]}
     # odd-numbered seed papers carry "methylation and ctDNA" in the abstract: e3 (Oct 2), e9 (Oct 12), e21 (undated, first seen now)
-    assert by["methylation ctDNA"]["kind"] == "term"
-    assert {i["id"] for i in by["methylation ctDNA"]["items"]} == {"doi:10.1000/e3", "doi:10.1000/e9", "doi:10.1000/e21"}
+    assert by["methylation AND ctDNA"]["kind"] == "term"
+    assert {i["id"] for i in by["methylation AND ctDNA"]["items"]} == {"doi:10.1000/e3", "doi:10.1000/e9", "doi:10.1000/e21"}
+    assert by["methylation ctDNA"]["matches"] == 0 and by["methylation ctDNA"]["items"] == []  # phrase: "and" sits between the words
     assert by["pacb-revio"]["resolved"]["id"] == "pacb-revio" and [i["id"] for i in by["pacb-revio"]["items"]] == ["doi:10.1000/e4", "doi:10.1000/e3"]
     assert "methods" in by["pacb-revio"]["items"][0]["sections"]
     assert [i["id"] for i in by["Feng Zhang"]["items"]] == ["doi:10.1000/e4"] and by["Feng Zhang"]["items"][0]["snippet"] == "author: Zhang, F."
@@ -330,7 +336,7 @@ def test_watch_run_reports_matches_per_kind(tmp_path):
     json.dumps(rep, default=str)
     # the window matters: September keeps e1 (2026-09-10) plus the undated e21, which counts through first_seen (store rule)
     rep2 = entities.watch_run(st, "2026-09-01", "2026-09-30")
-    assert {i["id"] for t in rep2["terms"] if t["term"] == "methylation ctDNA" for i in t["items"]} == {"doi:10.1000/e1", "doi:10.1000/e21"}
+    assert {i["id"] for t in rep2["terms"] if t["term"] == "methylation AND ctDNA" for i in t["items"]} == {"doi:10.1000/e1", "doi:10.1000/e21"}
     assert "empty watchlist" in entities.render_watch_report({"since": "a", "until": "b", "terms": [], "total_matches": 0})
 
 
@@ -476,19 +482,20 @@ def test_cli_show_and_watch(tmp_path, monkeypatch, capsys):
     assert "Illumina  [company illumina]  matched by id" in capsys.readouterr().out
     assert cli.main(["show", "no-such-thing"]) == 1
     assert "nothing in the gazetteers" in capsys.readouterr().out
-    assert cli.main(["watch", "add", "methylation ctDNA"]) == 0
-    assert "added: 'methylation ctDNA' as term" in capsys.readouterr().out
+    assert cli.main(["watch", "add", "methylation AND ctDNA"]) == 0
+    assert "added: 'methylation AND ctDNA' as term" in capsys.readouterr().out
     assert cli.main(["watch", "add", "Revio", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["term"] == "pacb-revio"
     assert cli.main(["watch", "list"]) == 0
     out = capsys.readouterr().out
-    assert "methylation ctDNA" in out and "pacb-revio" in out
+    assert "methylation AND ctDNA" in out and "pacb-revio" in out
     assert cli.main(["watch", "run", "--since", "2026-10-01", "--until", "2026-10-17", "--json"]) == 0
     rep = json.loads(capsys.readouterr().out)
-    assert {t["term"]: t["matches"] for t in rep["terms"]} == {"methylation ctDNA": 3, "pacb-revio": 2}
-    assert cli.main(["watch", "remove", "pacb-revio"]) == 0
+    assert {t["term"]: t["matches"] for t in rep["terms"]} == {"methylation AND ctDNA": 3, "pacb-revio": 2}
+    assert cli.main(["watch", "remove", "Revio"]) == 0  # the same spelling `add` accepted removes the stored id
+    assert "removed 'pacb-revio' (given as 'Revio')" in capsys.readouterr().out
     assert cli.main(["watch", "remove", "pacb-revio"]) == 1
-    capsys.readouterr()
+    assert "was not on the watchlist" in capsys.readouterr().out
 
 
 def test_cli_errors_are_messages_not_tracebacks(tmp_path, monkeypatch, capsys):
@@ -499,15 +506,18 @@ def test_cli_errors_are_messages_not_tracebacks(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "e.sqlite"))
     assert cli.main(["watch", "add", "   "]) == 1
     assert "watch: empty watch term" in capsys.readouterr().out
-    # --since / --until: YYYY-MM-DD or Nd, validated, exit 2 like an argparse error
-    assert cli.main(["show", "illumina", "--until", "garbage"]) == 2
-    assert "bad --until 'garbage'" in capsys.readouterr().err
-    assert cli.main(["show", "illumina", "--since", "2026-13-01"]) == 2
-    assert "bad --since '2026-13-01'" in capsys.readouterr().err
+    # --since / --until: YYYY-MM-DD or Nd, validated by the parser itself (usage error, exit 2)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["show", "illumina", "--until", "garbage"])
+    assert exc.value.code == 2 and "argument --until: must be YYYY-MM-DD or Nd (for example 90d), got 'garbage'" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["show", "illumina", "--since", "2026-13-01"])
+    assert exc.value.code == 2 and "argument --since: is not a real calendar date: 2026-13-01" in capsys.readouterr().err
     assert cli.main(["show", "illumina", "--since", "2026-10-17", "--until", "2026-10-01"]) == 2
     assert "is after --until" in capsys.readouterr().err
-    assert cli.main(["watch", "run", "--since", "7x"]) == 2
-    assert "bad --since '7x'" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["watch", "run", "--since", "7x"])
+    assert exc.value.code == 2 and "argument --since: must be YYYY-MM-DD or Nd" in capsys.readouterr().err
     assert cli.main(["show", "illumina", "--until", "30d", "--json"]) == 0  # Nd works for --until too (N days before today)
     d = json.loads(capsys.readouterr().out)
     assert d["window"]["until"] == (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()

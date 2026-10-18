@@ -3,6 +3,7 @@
 No third-party dotenv dependency. The .env format we support:
 
     KEY=VALUE                  # unquoted: a ' #' (space + hash) starts a trailing comment
+    KEY=            # note     # a blank value followed by a comment is an EMPTY value, never the comment text
     KEY="value with # inside"  # quoted (single or double): taken literally up to the closing quote
     export KEY=value           # the shell 'export' prefix is accepted and ignored
     # full-line comments and blank lines are skipped
@@ -13,15 +14,32 @@ string; settings that have a default (such as the LLM model) fall back to it whe
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_DIR = REPO_ROOT / "config"
 DEFAULT_LLM_MODEL = "claude-opus-5-5"
+# the YAML files a config directory must hold for the pipeline and `check-config` to mean anything
+REQUIRED_CONFIG_FILES = ("radar.yaml", "instruments.yaml", "companies.yaml", "journals.yaml", "subgroups.yaml", "feeds.yaml")
+
+_TOP_LEVEL_KEY_RE = re.compile(r"^([A-Za-z_][\w.-]*)\s*:")
+
+
+class ConfigError(Exception):
+    """A configuration file is missing or does not parse; the message is one line, fit for stderr."""
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Trailing-comment rule for unquoted values: a value that *starts* with '#' is all comment (empty value);
+    otherwise ' #' or a tab + '#' ends the value. 'p4ss#word' (no space before '#') is data."""
+    if value.startswith("#"):
+        return ""
+    return value.split(" #", 1)[0].split("\t#", 1)[0].strip()
 
 
 def parse_env_line(raw: str) -> Optional[tuple]:
@@ -47,7 +65,7 @@ def parse_env_line(raw: str) -> Optional[tuple]:
         else:
             value = value[1:]  # unterminated quote: take the rest literally
     else:
-        value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()  # trailing comment only outside quotes
+        value = _strip_inline_comment(value)  # trailing comment only outside quotes
     return key, value
 
 
@@ -73,10 +91,56 @@ def load_yaml(path: Path) -> Any:
         return yaml.safe_load(fh) or {}
 
 
+def format_yaml_error(path: Path, exc: BaseException) -> str:
+    """One line: ``companies.yaml: YAML parse error at line 235, column 1: expected ',' or ']'``."""
+    mark = getattr(exc, "problem_mark", None)
+    where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+    problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+    return f"{Path(path).name}: YAML parse error{where}: {problem}"
+
+
+def load_yaml_checked(path: Path) -> Any:
+    """``load_yaml`` that turns a missing file or a YAML syntax error into ``ConfigError`` (one-line message)."""
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigError(f"{path.name}: not found in {path.parent}")
+    try:
+        return load_yaml(path)
+    except yaml.YAMLError as exc:
+        raise ConfigError(format_yaml_error(path, exc)) from None
+
+
+def check_config_dir(config_dir: Path, required: tuple = REQUIRED_CONFIG_FILES) -> List[str]:
+    """Problems with a config directory: it does not exist, or required files are absent. Empty list = fine."""
+    d = Path(config_dir)
+    if not d.is_dir():
+        return [f"config directory not found: {d}"]
+    return [f"missing {name} in {d}" for name in required if not (d / name).is_file()]
+
+
+def duplicate_top_level_keys(path: Path) -> Dict[str, List[int]]:
+    """Top-level mapping keys that appear more than once in a block-style YAML file -> their 1-based line numbers.
+
+    PyYAML keeps the last duplicate silently; a validator should say so. Flow-style documents and keys
+    inside nested blocks are not inspected (only column-0 ``key:`` lines count).
+    """
+    seen: Dict[str, List[int]] = {}
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        m = _TOP_LEVEL_KEY_RE.match(line)
+        if m:
+            seen.setdefault(m.group(1), []).append(n)
+    return {k: v for k, v in seen.items() if len(v) > 1}
+
+
 def _env(name: str, default: str = "") -> str:
-    """Environment value, or ``default`` when the variable is unset *or empty*."""
-    v = os.environ.get(name)
+    """Environment value, or ``default`` when the variable is unset *or empty* (whitespace counts as empty)."""
+    v = (os.environ.get(name) or "").strip()
     return v if v else default
+
+
+def resolve_config_dir(config_dir: Optional[Path] = None) -> Path:
+    """The config directory a command will use: the flag, else ``LITRADAR_CONFIG_DIR``, else the repository's."""
+    return Path(config_dir or os.environ.get("LITRADAR_CONFIG_DIR") or DEFAULT_CONFIG_DIR)
 
 
 @dataclass
@@ -110,7 +174,7 @@ class Settings:
     @classmethod
     def from_env(cls, config_dir: Optional[Path] = None, env_file: Optional[Path] = None) -> Settings:
         load_env(env_file)
-        cfg_dir = Path(config_dir or os.environ.get("LITRADAR_CONFIG_DIR") or DEFAULT_CONFIG_DIR)
+        cfg_dir = resolve_config_dir(config_dir)
         radar = load_yaml(cfg_dir / "radar.yaml") if (cfg_dir / "radar.yaml").exists() else {}
         s = cls(
             config_dir=cfg_dir,

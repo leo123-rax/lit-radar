@@ -8,6 +8,13 @@ No user-supplied SQL is ever executed: the FTS5 query string is bound as a param
 through :meth:`litradar.store.Store.search`, and every other parameter is validated and
 bounded before it reaches a query.
 
+Privacy: author records may carry e-mail addresses when a source supplied them. The API never
+returns them: ``authors[].email`` and ``extra.emails`` are removed from every paper payload
+(``/papers``, ``/top``), and e-mail-like tokens in request paths are masked in the log.
+
+The FTS5 query is passed to SQLite as written. A query that FTS5 cannot parse is a ``400`` carrying
+SQLite's own message (``query not understood by FTS5: ...``); the API never silently rewrites it.
+
 Endpoints (all GET; see ``/api`` for the machine-readable index and docs/search.md):
 
     /search?q=&since=&in=methods,coi&limit=     full-text search (FTS5 syntax allowed)
@@ -16,7 +23,7 @@ Endpoints (all GET; see ``/api`` for the machine-readable index and docs/search.
     /instruments?since=&until=&limit=            instrument counts in a window
     /companies?since=&until=&limit=              company counts by role in a window
     /archive/instruments?since=&until=&limit=    archive experiments per instrument model
-    /top?since=&until=&limit=                    top scored papers in a window
+    /top?since=&until=&limit=&full=1             top scored papers in a window (chips by default; full=1 for mention rows)
     /news?since=&company=&limit=                 news items, optionally for one company id
     /stats                                       table totals and recent runs
     /digest/latest                               the latest digest as Markdown text
@@ -31,17 +38,19 @@ import logging
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, unquote_plus, urlencode, urlsplit
 from urllib.request import Request, pathname2url, urlopen
 
 from . import __version__
+from . import query as Q
 from .store import Store
 
 FTS_COLUMNS: Tuple[str, ...] = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body")
@@ -51,9 +60,8 @@ MAX_COUNT_LIMIT = 500  # aggregate endpoints (/instruments, /companies, /archive
 MAX_QUERY_LEN = 500
 MAX_ID_LEN = 300
 DEFAULT_WINDOW_DAYS = 7
+TOP_SECTIONS = ("funding", "coi")  # the only sections /top carries unless full=1
 
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_RELATIVE_RE = re.compile(r"^(\d{1,4})d$")
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}", re.I)
 _ENTITY_PATH_RE = re.compile(r"^/entities/([a-z]+)/(.+)/papers$")
@@ -65,7 +73,7 @@ ENDPOINTS: List[Dict[str, str]] = [
     {"path": "/instruments", "params": "since, until, limit", "returns": "instrument counts in the window"},
     {"path": "/companies", "params": "since, until, limit", "returns": "company counts by role in the window"},
     {"path": "/archive/instruments", "params": "since, until, limit", "returns": "archive experiments per instrument model"},
-    {"path": "/top", "params": "since, until, limit", "returns": "top scored papers with mentions"},
+    {"path": "/top", "params": "since, until, limit, full", "returns": "top scored papers with score, reasons and entity chips (full=1: mention rows and all sections)"},
     {"path": "/news", "params": "since, company, limit", "returns": "news items, optionally filtered by company id"},
     {"path": "/stats", "params": "", "returns": "table totals, date range, recent runs"},
     {"path": "/digest/latest", "params": "", "returns": "latest digest as text/markdown"},
@@ -119,26 +127,39 @@ class ReadOnlyStore(Store):
         self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         self.conn.execute("PRAGMA query_only=1")
 
+    def probe(self) -> None:
+        """Touch the schema once so a file that is not a radar database fails here, not on the first request."""
+        try:
+            self.conn.execute("SELECT 1 FROM papers LIMIT 1").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise sqlite3.DatabaseError(f"{self.path} is not a readable radar database: {exc}") from None
+
     def close(self) -> None:
         self.conn.close()
 
 
 # ---- parameter validation --------------------------------------------------------------
 def parse_date(value: Optional[str], name: str, today: Optional[date] = None) -> Optional[str]:
-    """Accept ``YYYY-MM-DD`` or ``Nd`` (days back from today); return ISO date or None when blank."""
-    if value is None or value == "":
-        return None
-    m = _RELATIVE_RE.match(value)
-    if m:
-        base = today or datetime.now(timezone.utc).date()
-        return (base - timedelta(days=int(m.group(1)))).isoformat()
-    if _DATE_RE.match(value):
-        try:
-            datetime.strptime(value, "%Y-%m-%d")
-        except ValueError:
-            raise ApiError(400, f"{name} is not a real calendar date: {value}") from None
-        return value
-    raise ApiError(400, f"{name} must be YYYY-MM-DD or Nd (for example 90d)")
+    """Accept ``YYYY-MM-DD`` or ``Nd`` (days back from today); return ISO date or None when blank.
+
+    The same rule as the CLI (:func:`litradar.query.parse_date`); a bad value is a 400.
+    """
+    try:
+        return Q.parse_date(value, name, today)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from None
+
+
+def parse_flag(value: Optional[str], default: bool) -> bool:
+    """``1/true/yes/on`` and ``0/false/no/off`` (any case); blank -> default; anything else is a 400."""
+    if value is None or value.strip() == "":
+        return default
+    v = value.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    raise ApiError(400, f"expected 0/1, true/false, yes/no, got {value!r}")
 
 
 def parse_limit(value: Optional[str], default: int, maximum: int) -> int:
@@ -190,10 +211,31 @@ def _first_values(raw_query: str) -> Dict[str, str]:
     return {k: v[0] for k, v in parse_qs(raw_query, keep_blank_values=True).items()}
 
 
+PRIVATE_AUTHOR_FIELDS = ("email",)
+PRIVATE_EXTRA_FIELDS = ("emails", "email")
+
+
+def strip_private_fields(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove personal data the sources sometimes supply: ``authors[].email`` and ``extra.emails``. In place."""
+    authors = out.get("authors")
+    if isinstance(authors, list):
+        for a in authors:
+            if isinstance(a, dict):
+                for k in PRIVATE_AUTHOR_FIELDS:
+                    a.pop(k, None)
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        for k in PRIVATE_EXTRA_FIELDS:
+            extra.pop(k, None)
+    return out
+
+
 def _parse_json_columns(row: Dict[str, Any]) -> Dict[str, Any]:
-    """``*_json`` text columns become real objects; booleans become booleans."""
+    """``*_json`` text columns become real objects; booleans become booleans; internal and private fields go."""
     out: Dict[str, Any] = {}
     for key, value in row.items():
+        if key == "_rowid":
+            continue  # SQLite's internal row number: not part of the API
         if key.endswith("_json"):
             name = key[: -len("_json")]
             try:
@@ -204,7 +246,7 @@ def _parse_json_columns(row: Dict[str, Any]) -> Dict[str, Any]:
             out[key] = bool(value)
         else:
             out[key] = value
-    return out
+    return strip_private_fields(out)
 
 
 def _chips(mentions: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -269,7 +311,11 @@ class RadarAPI:
         self.cors_origin = cors_origin or None
         self._today = today
         self.logger = logging.getLogger("litradar.api")
-        self.open().close()  # fail fast on a missing or unreadable database
+        st = self.open()  # fail fast on a missing, unreadable or non-SQLite database
+        try:
+            st.probe()
+        finally:
+            st.close()
 
     # -- helpers --
     def today(self) -> date:
@@ -310,6 +356,10 @@ class RadarAPI:
             if any(marker in msg.lower() for marker in ("fts5", "syntax", "no such column")):
                 return json_response({"error": f"query not understood by FTS5: {msg}", "status": 400}, 400)
             self.logger.error("sqlite error on %s: %s", redact_path(raw_path), msg)
+            return json_response({"error": "database error", "status": 503}, 503)
+        except sqlite3.DatabaseError as exc:
+            # "file is not a database", a corrupt or truncated file: the data layer is down, not the client's fault
+            self.logger.error("database error on %s: %s", redact_path(raw_path), exc)
             return json_response({"error": "database error", "status": 503}, 503)
         except Exception:  # noqa: BLE001 - never leak a traceback to the client
             self.logger.exception("unhandled error on %s", redact_path(raw_path))
@@ -355,9 +405,14 @@ class RadarAPI:
         since = parse_date(q.get("since"), "since", self.today())
         sections = parse_sections(q.get("in"))
         limit = parse_limit(q.get("limit"), 50, MAX_LIMIT)
-        with_chips = q.get("mentions", "1") != "0"
+        with_chips = parse_flag(q.get("mentions"), True)
         st = self.open()
         try:
+            # Store.search would retry an unparsable query as a phrase and return 200 with nothing; the API says
+            # what FTS5 objected to instead, so a mistyped column name is visible to the client and the page.
+            fts_error = Q.fts_syntax_error(st.conn, Q.with_sections(query, sections))
+            if fts_error:
+                raise ApiError(400, f"query not understood by FTS5: {fts_error}")
             try:
                 rows = st.search(query, since=since, limit=limit, sections=sections)
             except sqlite3.OperationalError as exc:
@@ -400,7 +455,7 @@ class RadarAPI:
 
     def entity_papers(self, kind: str, entity_id: str, q: Dict[str, str]) -> Response:
         if kind not in ENTITY_KINDS:
-            raise ApiError(404, f"kind must be one of {', '.join(ENTITY_KINDS)}")
+            raise ApiError(400, f"kind must be one of {', '.join(ENTITY_KINDS)}")
         entity_id = parse_slug(entity_id, "entity id") or ""
         if not entity_id:
             raise ApiError(400, "entity id is required")
@@ -412,11 +467,14 @@ class RadarAPI:
                 "SELECT entity_name, vendor, ticker, category FROM mentions WHERE kind=? AND entity_id=? LIMIT 1",
                 (kind, entity_id),
             ).fetchone()
-            meta = None
-            rows: List[Dict[str, Any]] = []
-            if meta_row:
-                meta = {"name": meta_row[0], "vendor": meta_row[1] or "", "ticker": meta_row[2] or "", "category": meta_row[3] or ""}
-                rows = _entity_papers(st, kind, entity_id, since, limit)
+            if not meta_row:
+                # the API has no gazetteer; an id with no stored mention is unknown here (a typo, the wrong kind,
+                # or an entry nothing has cited yet), and says so instead of answering 200 with nothing
+                other = st.conn.execute("SELECT kind FROM mentions WHERE entity_id=? LIMIT 1", (entity_id,)).fetchone()
+                hint = f"; it exists as a {other[0]}" if other else " (ids: `litradar entities`)"
+                raise ApiError(404, f"unknown {kind} id {entity_id!r}: no mentions in this database{hint}")
+            meta = {"name": meta_row[0], "vendor": meta_row[1] or "", "ticker": meta_row[2] or "", "category": meta_row[3] or ""}
+            rows = _entity_papers(st, kind, entity_id, since, limit)
         finally:
             st.close()
         return json_response(
@@ -460,12 +518,23 @@ class RadarAPI:
     def top(self, q: Dict[str, str]) -> Response:
         since, until = self._window(q)
         limit = parse_limit(q.get("limit"), 25, MAX_LIMIT)
+        full = parse_flag(q.get("full"), False)
         st = self.open()
         try:
             rows = [_parse_json_columns(r) for r in st.top_papers(since, until, limit)]
         finally:
             st.close()
-        return json_response({"since": since, "until": until, "limit": limit, "count": len(rows), "results": rows})
+        if not full:
+            # a ranked shortlist, not a dump: entity chips instead of every mention row, and only the short
+            # disclosure sections; /papers/{id} (or full=1) has the rest
+            for r in rows:
+                mentions = r.pop("mentions", None) or []
+                r["instruments"], r["companies"] = _chips(mentions)
+                r["mention_rows"] = len(mentions)
+                secs = r.get("sections")
+                if isinstance(secs, dict):
+                    r["sections"] = {k: v for k, v in secs.items() if k in TOP_SECTIONS}
+        return json_response({"since": since, "until": until, "limit": limit, "full": full, "count": len(rows), "results": rows})
 
     def news(self, q: Dict[str, str]) -> Response:
         today = self.today()
@@ -603,9 +672,14 @@ def start_in_thread(app: RadarAPI, host: str = "127.0.0.1", port: int = 0) -> Tu
 
 
 def serve(app: RadarAPI, host: str = "127.0.0.1", port: int = 8787) -> int:
-    server = make_server(app, host, port)
+    try:
+        server = make_server(app, host, port)
+    except OSError as exc:
+        # EADDRINUSE, a privileged port, an address that is not local: one line, not a traceback
+        print(f"litradar serve: cannot listen on {host}:{port}: {exc.strerror or exc} (pass --port to pick another port)", file=sys.stderr, flush=True)
+        return 1
     shown_host = "localhost" if host in ("0.0.0.0", "::", "127.0.0.1") else host
-    print(f"lit-radar read-only API on http://{shown_host}:{server.server_address[1]}/  (database {app.db_path.name}; Ctrl-C to stop)")
+    print(f"lit-radar read-only API on http://{shown_host}:{server.server_address[1]}/  (database {app.db_path.name}; Ctrl-C to stop)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -617,8 +691,11 @@ def serve(app: RadarAPI, host: str = "127.0.0.1", port: int = 8787) -> int:
 
 # ---- Python client ---------------------------------------------------------------------
 class RadarAPIError(Exception):
+    """An error answer from the API (``status`` = HTTP status) or, with ``status == 0``, no answer at all
+    (connection refused, DNS failure, timeout): ``message`` carries the reason."""
+
     def __init__(self, status: int, message: str) -> None:
-        super().__init__(f"HTTP {status}: {message}")
+        super().__init__(f"HTTP {status}: {message}" if status else f"connection failed: {message}")
         self.status = status
         self.message = message
 
@@ -650,6 +727,10 @@ class RadarClient:
             except ValueError:
                 message = body.decode("utf-8", "replace") or exc.reason
             raise RadarAPIError(exc.code, str(message)) from None
+        except URLError as exc:
+            raise RadarAPIError(0, f"{exc.reason} ({url})") from None
+        except OSError as exc:  # socket timeout and friends
+            raise RadarAPIError(0, f"{exc} ({url})") from None
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return json.loads(self._request(path, params).decode("utf-8"))
@@ -672,8 +753,8 @@ class RadarClient:
     def archive_instruments(self, since: Optional[str] = None, until: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
         return self._get("/archive/instruments", {"since": since, "until": until, "limit": limit})
 
-    def top(self, since: Optional[str] = None, until: Optional[str] = None, limit: int = 25) -> Dict[str, Any]:
-        return self._get("/top", {"since": since, "until": until, "limit": limit})
+    def top(self, since: Optional[str] = None, until: Optional[str] = None, limit: int = 25, full: bool = False) -> Dict[str, Any]:
+        return self._get("/top", {"since": since, "until": until, "limit": limit, "full": "1" if full else None})
 
     def news(self, since: Optional[str] = None, company: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
         return self._get("/news", {"since": since, "company": company, "limit": limit})
