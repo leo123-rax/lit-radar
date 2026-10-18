@@ -7,8 +7,9 @@ The store is one SQLite file with an FTS5 index over every paper. Three ways in:
 | CLI | `litradar search "methods:Xenium" --since 90d` | quick checks at the terminal |
 | JSON API + search page | `litradar serve --port 8787` then http://127.0.0.1:8787/ | sharing with people and scripts; no extra dependencies |
 | Datasette | `litradar serve --datasette` then http://127.0.0.1:8001/ | browsing tables, facets, canned queries, ad-hoc SQL |
+| Static search page | `litradar dashboard --out site/` (or `litradar search-index --out site/`), publish `site/` | a server-less search over the recent window on GitHub Pages; see section 7 |
 
-All three are read-only and all three run the same FTS5 query language against the same index. They
+The first three are read-only and all three run the same FTS5 query language against the same index. They
 differ in one convenience: the **CLI** (and the watchlist) treats plain text as a phrase, the **API** and
 **Datasette** take the query exactly as written. See "Plain text versus FTS5 syntax" below.
 
@@ -307,3 +308,54 @@ litradar stats [--json]                                  # --json: one object {c
 
 `--since` / `--until` are validated everywhere (`YYYY-MM-DD` or `Nd`; anything else is a usage error, exit 2,
 never a silent empty result), `--limit` must be at least 1, and output piped into `head` ends quietly.
+
+## 7. The static search page (GitHub Pages)
+
+The three ways above need a running process. The dashboard site has none, so it carries its own
+search engine: `litradar dashboard --out site/` writes, next to the trend pages,
+
+| File | Content |
+|---|---|
+| `search.html` | the page: query box, facets, sort, result rows; plain JavaScript in the dashboard's shared shell |
+| `search-index.json` | one compact record per paper in the look-back window (default 180 days), best rank score first |
+| `search-entities.json` | instrument, company, subgroup, source, tier, kind and country vocabulary with per-value paper counts |
+
+`litradar search-index --out site/ [--days 180] [--max 20000] [--max-bytes 4000000] [--db PATH] [--json]`
+rebuilds just those three files (a wider window, a different cap, a look at the sizes). The database
+is opened read-only, as for the dashboard.
+
+**How a query matches.** The page builds a prefix-token index in the browser from the records:
+every keystroke is split into words, each word matches as a *prefix* of indexed words (`xen` finds
+Xenium, `novaseq` finds NovaSeq X), and a paper must match every word (AND). Fields are weighted —
+title 3, instrument and company names 2.5, subgroups 2, venue 1.5, abstract excerpt 1 — and an
+exact word outranks a prefix. Matching is case- and accent-insensitive. There is no FTS5 syntax
+here: no quotes, no `OR`, no column filters; for those use the CLI, the JSON API or Datasette.
+
+**Facets and sort.** Instruments, companies, subgroups, journal tier (A / B / C as the ranker
+recorded it, preprint, unranked venue), kind, source kind (bioRxiv, Crossref, Europe PMC, RSS, ...),
+country of affiliation when the store carries one, and a date range. Facet counts are computed over
+the current result list; several values inside one facet are OR-ed, facets are AND-ed. Sort by
+relevance (default while a query is typed), rank score, date, or citations when any record carries
+a count. Clicking a chip under a result adds that entity as a filter; the arrow next to a chip opens
+the entity's trend card where the dashboard has one.
+
+**Shareable searches.** The state lives in the URL fragment (`search.html#q=xenium&in=txg-xenium&sort=date`),
+written as you type and read back on load, so a result list can be pasted into a message.
+
+**What the index holds, and what it does not.** Per paper: id, title, venue, date, DOI, URL (only
+when it is not the DOI resolver), kind, source kind, tier, rank score, citation count when stored,
+subgroups, instrument and company ids, country codes, and an excerpt of the stored **abstract** of
+at most 240 characters. The index never reads parsed sections or the full-text body, and no
+excerpt is written for a paper whose data-policy level is `none` (see `docs/LEGAL.md` and
+`litradar/policy.py`: metadata and abstracts are storable at every level, full text is not; the
+digest's 420-character rule is the precedent for excerpts). Everything from the data files is
+written into the page with `textContent`; links are made only from `http(s)` URLs, DOIs and
+sibling `.html` pages.
+
+**Size.** Records are ranked by score then date, capped at `--max` records (20,000) and then at
+`--max-bytes` raw bytes (4,000,000) by dropping the tail of the ranking; the page says how many
+papers in the window are not indexed. A one-week corpus of 3,562 papers gave a 1.79 MB index
+(about 500 bytes per record, 74% of them with an excerpt) and a 43 KB vocabulary; at that density
+the byte budget binds near 7,900 records. The files are fetched by the page, not embedded, so a
+local copy must be served over HTTP (`python3 -m http.server -d site 8000`); the page says so when
+the fetch fails from a `file://` URL.
