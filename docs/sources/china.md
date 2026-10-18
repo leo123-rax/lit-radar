@@ -13,12 +13,12 @@ undercounts Chinese platforms by roughly half.
 
 | Source | Status | Adapter | What it yields | Window digits (2026-09-17 .. 10-17) |
 |---|---|---|---|---|
-| **GSA search page** (`ngdc.cncb.ac.cn/gsa/search`) | works, HTML, no key | `litradar/sources/gsa.py` `platform_histogram()`, `fetch()` | per-experiment `ArchiveRecord(archive='gsa')` with CRX/CRA, platform **family**, strategy, exact release day; facet histogram in one request | 33,480 native (NGDC) experiments: ILLUMINA 21,891 / BGISEQ 11,014 / PACBIO_SMRT 451 / OXFORD_NANOPORE 86 / CAPILLARY 18 / GENEMIND 11 / CapitalBio 8 / ION_TORRENT 1. Including INSDC mirrors the same index holds 363,091. |
-| **GSA statistics JSON** (`/gsa/statistics/statistics.json`) | works, JSON (~12 MB), no key | `gsa.fetch_statistics()` + `litradar/gsa_snapshots.py` | cumulative counts per instrument **model** (80 models), CRA created per month, organisms, sample types, funders, organizations by country, 17,850 dataset-linked publications (DOI + PMID + CRA) | DNBSEQ-T7 112,846 experiments all-time (#5 overall), MGISEQ-2000 23,398, BGISEQ-500 13,905, DNBSEQ-G99 2,179, GenoLab M 453, FASTASeq 300 268; 2,115,280 experiments total, 1,233,693 released |
+| **GSA search page** (`ngdc.cncb.ac.cn/gsa/search`) | **wired** 2026-10-17 (`sources.gsa`, default on; §9), HTML, no key | `litradar/sources/gsa.py` `platform_histogram()`, `fetch()` | per-experiment `ArchiveRecord(archive='gsa')` with CRX/CRA, platform **family**, strategy, exact release day; facet histogram in one request | 33,480 native (NGDC) experiments: ILLUMINA 21,891 / BGISEQ 11,014 / PACBIO_SMRT 451 / OXFORD_NANOPORE 86 / CAPILLARY 18 / GENEMIND 11 / CapitalBio 8 / ION_TORRENT 1. Including INSDC mirrors the same index holds 363,091. |
+| **GSA statistics JSON** (`/gsa/statistics/statistics.json`) | works, JSON (~12 MB), no key; opt-in per-run snapshot (`sources.gsa.statistics_snapshot: true`; §9) | `gsa.fetch_statistics()` + `litradar/gsa_snapshots.py` | cumulative counts per instrument **model** (80 models), CRA created per month, organisms, sample types, funders, organizations by country, 17,850 dataset-linked publications (DOI + PMID + CRA) | DNBSEQ-T7 112,846 experiments all-time (#5 overall), MGISEQ-2000 23,398, BGISEQ-500 13,905, DNBSEQ-G99 2,179, GenoLab M 453, FASTASeq 300 268; 2,115,280 experiments total, 1,233,693 released |
 | **GSA browse pages** (`/gsa/browse/**`) | **browser-gated** (nginx JavaScript cookie challenge) | not used | the only place the instrument model of a native CRX is shown | — |
 | **GSA RunInfo export** (`/gsa/search/getRunInfo`) | works but ignores the ReleaseDate term; ~10k-row cap | not used | CSV with Run, ReleaseDate, Platform (family), BioProject, TaxID … | returns the first ~10k rows of the whole index regardless of the query |
-| **GSA-Human** (`/gsa-human/browse/`, `/gsa-human/ajaxb/runinstudy`) | works, HTML list + JSON runs, no key | `litradar/sources/gsa_human.py` `fetch()` | per-experiment `ArchiveRecord(archive='gsa-human')` with **model-level** platform, HRA study, PRJCA, organization, release date, Homo sapiens | 243 studies released; first 40 studies = 3,581 experiments: DNBSEQ-T7 2,481 / NovaSeq 6000 911 / NovaSeq X Plus 108 / NextSeq 550 53 / BGISEQ-500 22 / HiSeq X Ten 6 (100% matched to the instrument gazetteer) |
-| **ChinaXiv OAI-PMH** (`global.chinaxiv.org/oaiapi/getdata`) | works, verified live (no reachable vendor docs), no key | `litradar/sources/chinaxiv.py` `fetch()` | `Paper(source='chinaxiv', kind='preprint')` with Chinese title/abstract/authors/keywords/subject, derived DOI, abs URL | 275 distinct records (3 pages): 天文学 122, 核物理学 19, 图书馆学 19, … life-science subjects 33 (临床医学 5, 预防医学与公共卫生学 5, 农业基础学科 2, 植物生态学 2, 药物设计 1 …); 99 Chinese-language titles |
+| **GSA-Human** (`/gsa-human/browse/`, `/gsa-human/ajaxb/runinstudy`) | **wired** 2026-10-17 (`sources.gsa_human`, default on; §9), HTML list + JSON runs, no key | `litradar/sources/gsa_human.py` `fetch()` | per-experiment `ArchiveRecord(archive='gsa-human')` with **model-level** platform, HRA study, PRJCA, organization, release date, Homo sapiens | 243 studies released; first 40 studies = 3,581 experiments: DNBSEQ-T7 2,481 / NovaSeq 6000 911 / NovaSeq X Plus 108 / NextSeq 550 53 / BGISEQ-500 22 / HiSeq X Ten 6 (100% matched to the instrument gazetteer) |
+| **ChinaXiv OAI-PMH** (`global.chinaxiv.org/oaiapi/getdata`) | **wired** 2026-10-17 (`sources.chinaxiv`, default on with `life_science_only: true`; §9), verified live (no reachable vendor docs), no key | `litradar/sources/chinaxiv.py` `fetch()` | `Paper(source='chinaxiv', kind='preprint')` with Chinese title/abstract/authors/keywords/subject, derived DOI, abs URL | 275 distinct records (3 pages): 天文学 122, 核物理学 19, 图书馆学 19, … life-science subjects 33 (临床医学 5, 预防医学与公共卫生学 5, 农业基础学科 2, 植物生态学 2, 药物设计 1 …); 99 Chinese-language titles |
 | ChinaXiv main-site OAI (`chinaxiv.org/oai/request`) | **access-restricted** ("Sorry! You have no right to access this web.") | not used | — | — |
 | ChinaXiv RSS | none (`/rss`, `/rss.xml`, `/feed` → 404); search pages answer 403 to scripts | not used | — | — |
 | **CNKI / Wanfang / CQVIP** | licensed databases, no public API | not used (boundary) | — | see below |
@@ -327,3 +327,60 @@ scripts, 0 retries, 0 failures:
   be detected for ChinaXiv records; only title/abstract/keyword mentions feed the company gazetteer.
 * Chinese full-text search in SQLite FTS5 (see §3).
 * CNKI/Wanfang/CQVIP remain a boundary (see §4).
+* Digest: `SEQUENCING_ARCHIVES` in `litradar/digest/render.py` still lists SRA / ENA / GEO, so GSA and GSA-Human rows
+  reach `New archive records` and `Store.archive_instrument_counts()` but not yet the sequencing census table (§9).
+
+## 9. Pipeline wiring (applied 2026-10-17)
+
+All three adapters now run in the weekly pipeline; every live endpoint was re-checked on the wiring day with one request
+each through the shared client (0 retries, 0 failures):
+
+* GSA histogram 2026-09-17..10-17, NGDC: total **33,480**; ILLUMINA 21,891 / BGISEQ 11,014 / PACBIO_SMRT 451 /
+  OXFORD_NANOPORE 86 / CAPILLARY 18 / GENEMIND 11 / CapitalBio 8 / ION_TORRENT 1; strategies Genome 11,203 / Other 11,057 /
+  RNASeq 10,380 / Exome 549 / EpiGenomics 291; 1 request, 10.2 s (same digits as the first live test).
+* GSA-Human list page 1: **246** studies released in the window (243 on the first test day); `runinstudy` for HRA021718 =
+  96 runs on DNBSEQ-T7, Illumina NovaSeq 6000 and Illumina NovaSeq X Plus; 2 requests, 4.1 s.
+* ChinaXiv 2026-10-10..17: 51 distinct records in one page, 4 life-science subjects, 0 Chinese-language titles in that
+  week's sample; 1 request, 4.1 s.
+
+### Configuration (`config/radar.yaml`, `sources:`)
+
+```yaml
+gsa:
+  enabled: true
+  center: NGDC               # NGDC = native records; INSDC = the mirrored SRA/ENA/DDBJ copies (already counted by sra / ena)
+  page_size: 200             # per-day probe
+  max_page_size: 1500        # largest single page; bigger days are split by facet (never paged)
+  max_records: 20000         # per run
+  statistics_snapshot: false # true = also fetch statistics.json (~12 MB) and store a per-model snapshot (litradar/gsa_snapshots.py)
+gsa_human:
+  enabled: true
+  max_studies: 400           # one JSON request per study
+chinaxiv:
+  enabled: true
+  source: chinaxiv
+  life_science_only: true    # subject-taxonomy filter (chinaxiv.LIFE_SCIENCE_SUBJECT_TERMS); false = every discipline
+  max_records: 5000
+```
+
+### Where the records go
+
+* `Pipeline.fetch_archives` stores GSA experiments as `ArchiveRecord(archive="gsa")` and GSA-Human experiments as
+  `ArchiveRecord(archive="gsa-human")` through `_store_archive`, so every record passes `Gazetteer.match_archive_model`.
+  The GSA family label `BGISEQ (model n/a)` resolves to the MGI entry (vendor MGI Tech, ticker 688114.SS); the GSA-Human
+  model strings resolve directly; `ILLUMINA (model n/a)` and the other families stay unmapped and are labelled from the
+  platform string by `store.archive_vendor_label` ("Illumina (unmapped model)"). Counters: `archive.gsa_new`,
+  `archive.gsa_human_new`, and `archive.gsa_snapshot_models` when the snapshot is on. `--sources gsa` / `--sources gsa_human`
+  run the archive stage alone.
+* `Pipeline.fetch_papers` adds ChinaXiv records with the usual `add()` / `merge()` path (counter `fetched.chinaxiv`); the
+  derived `10.12074/<article-id>` DOI never collides with Crossref or DataCite records, so no cross-source merge happens.
+* Failures are isolated per source and reported as `gsa: …`, `gsa_human: …`, `chinaxiv: …` in the run's error list;
+  `HOST_SOURCES` maps `ngdc.cncb.ac.cn` to `gsa` and `global.chinaxiv.org` to `chinaxiv` for the dead-host report.
+* Offline wiring tests: `tests/test_pipeline_offline.py` (`test_run_reaches_global_corpus_sources_with_configured_caps`,
+  `test_global_corpus_toggles_are_respected_and_jstage_is_opt_in`, `test_global_corpus_source_failures_are_isolated`).
+
+### Still open after the wiring
+
+* The digest's sequencing census table (`SEQUENCING_ARCHIVES` in `litradar/digest/render.py`) does not include `gsa` /
+  `gsa-human` yet; the `New archive records` line does list them.
+* `litradar run --sources` help text in `litradar/cli.py` does not list the new ids yet (they work; only the help string lags).
