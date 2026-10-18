@@ -62,7 +62,7 @@ from .coverage import render_coverage_markdown  # noqa: E402
 from .digest import deliver, render  # noqa: E402
 from .extract.gazetteer import Gazetteer  # noqa: E402
 from .http import Http  # noqa: E402
-from .pipeline import Pipeline, window  # noqa: E402
+from .pipeline import RUN_SOURCES, Pipeline, unknown_sources  # noqa: E402
 from .store import FTS_COLUMNS, Store  # noqa: E402
 
 _parse_since = Q.parse_since  # kept for callers that imported the old private name
@@ -80,17 +80,54 @@ def _dated_window(since_arg: Optional[str], until_arg: Optional[str], default_si
 
 
 def _window(args) -> tuple:
-    if getattr(args, "since", None) and getattr(args, "until", None):
-        return args.since, args.until
-    if getattr(args, "since", None):
-        return args.since, datetime.now(timezone.utc).date().isoformat()
-    return window(int(getattr(args, "days", 7) or 7))
+    """--since / --until / --days of `run` and `digest` -> (since, until), through the resolver `fetch` and `coverage`
+    use too: --until alone ends a --days window there, and since after until raises toolkit.UsageError (exit 2)."""
+    return toolkit.resolve_window(getattr(args, "since", None), getattr(args, "until", None), getattr(args, "days", None))
+
+
+def _sources(args, cmd: str) -> tuple:
+    """`--sources a,b` -> (list or None, problem). A source id no pipeline stage reads is a problem (exit 2 for the
+    caller) instead of a run that fetches nothing and still writes a digest."""
+    if not args.sources:
+        return None, ""
+    only = [s.strip() for s in args.sources.split(",") if s.strip()]
+    if not only:
+        return None, f"litradar {cmd}: error: --sources is empty"
+    bad = unknown_sources(only)
+    if bad:
+        return None, f"litradar {cmd}: error: unknown source(s) {', '.join(bad)}; choose from: {', '.join(RUN_SOURCES)}"
+    return only, ""
+
+
+def _open_store(settings: Settings, cmd: str) -> Optional[Store]:
+    """The store for a command that only READS it. None, after one line on stderr (the caller exits 1), when there is
+    no database at settings.db_path: Store.__init__ creates the directory, the file and the schema, so a mistyped
+    LITRADAR_DB would otherwise materialise an empty database (or raise OSError on an unwritable path) and the
+    command would report zeros. A 0-byte file is "no database" too (it is what an interrupted first open leaves)."""
+    path = Path(settings.db_path)
+    try:
+        missing = not path.is_file() or path.stat().st_size == 0
+    except OSError as exc:
+        print(f"litradar {cmd}: cannot read {path}: {exc}", file=sys.stderr)
+        return None
+    if missing:
+        print(f"litradar {cmd}: no database at {path}; run `litradar run --days 7` first "
+              f"(LITRADAR_DB or db_path in radar.yaml names the file)", file=sys.stderr)
+        return None
+    return Store(settings.db_path)
 
 
 def cmd_run(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
-    since, until = _window(args)
-    only = args.sources.split(",") if args.sources else None
+    try:
+        since, until = _window(args)
+    except toolkit.UsageError as exc:
+        print(f"litradar run: error: {exc}", file=sys.stderr)
+        return 2
+    only, problem = _sources(args, "run")
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
     pipe = Pipeline(settings)
     report = pipe.run(since, until, use_llm=args.llm, fulltext=not args.no_fulltext, only=only)
     out = render.render(pipe.store, since, until, settings.radar, run_report=report, company_types=pipe.company_types)
@@ -115,7 +152,11 @@ def cmd_run(args) -> int:
 
 def cmd_digest(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
-    since, until = _window(args)
+    try:
+        since, until = _window(args)
+    except toolkit.UsageError as exc:
+        print(f"litradar digest: error: {exc}", file=sys.stderr)
+        return 2
     db_path = Path(settings.db_path)
     hint = "no runs yet; run `litradar run --days 7` first (or pass --allow-empty to render an empty digest anyway)"
     if not db_path.exists() and not getattr(args, "allow_empty", False):
@@ -175,7 +216,9 @@ def cmd_search(args) -> int:
     except ValueError as exc:
         print(f"litradar search: error: {exc}", file=sys.stderr)
         return 2
-    store = Store(settings.db_path)
+    store = _open_store(settings, "search")
+    if store is None:
+        return 1
     query = args.query.strip()
     if not query:
         print("litradar search: error: the query is empty", file=sys.stderr)
@@ -202,7 +245,9 @@ def cmd_search(args) -> int:
 
 def cmd_entity(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
-    store = Store(settings.db_path)
+    store = _open_store(settings, "entity")
+    if store is None:
+        return 1
     rows, total, kind = entities.entity_papers(store, args.entity_id, since=args.since or None, limit=args.limit)
     if kind is None:
         # never seen in the mentions table: a valid gazetteer id with no hits, or a typo
@@ -238,7 +283,9 @@ def cmd_entities(args) -> int:
 
 def cmd_stats(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
-    store = Store(settings.db_path)
+    store = _open_store(settings, "stats")
+    if store is None:
+        return 1
     counts = store.counts()
     runs = [
         {"id": r[0], "started": r[1], "finished": r[2], "since": r[3], "until": r[4]}
@@ -431,7 +478,9 @@ def cmd_show(args) -> int:
         print(f"litradar show: error: {exc}", file=sys.stderr)
         return 2
     settings = Settings.from_env(config_dir=args.config_dir)
-    store = Store(settings.db_path)
+    store = _open_store(settings, "show")
+    if store is None:
+        return 1
     instruments, companies, subgroups = _entity_context(settings)
     res = entities.resolve(store, args.query, instruments, companies, subgroups)
     if res.kind == "unknown":
@@ -592,7 +641,9 @@ def _iso_date(s: str) -> str:
 
 def cmd_trends(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
-    store = Store(settings.db_path)
+    store = _open_store(settings, "trends")
+    if store is None:
+        return 1
     until = args.until or datetime.now(timezone.utc).date().isoformat()
     subgroups = (settings.yaml("subgroups") or {}).get("subgroups") or []
     try:
@@ -645,7 +696,9 @@ def cmd_export(args) -> int:
     return 1 if failed else 0
 def cmd_tag(args) -> int:
     settings = Settings.from_env(config_dir=args.config_dir)
-    store = Store(settings.db_path)
+    store = _open_store(settings, "tag")
+    if store is None:
+        return 1
     since, until = args.since or None, args.until or None
     if args.check:
         # read-only: what a dashboard would see, plus how many rows lost their tags to a re-ingest
@@ -721,7 +774,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--until", type=Q.until_arg, help=until_help)
     p.add_argument("--llm", action="store_true", help="score the shortlist with Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--no-fulltext", action="store_true", help="skip open-access full-text retrieval (metadata and abstracts only)")
-    p.add_argument("--sources", help="comma-separated subset: biorxiv,medrxiv,europepmc,openalex,crossref,arxiv,rss,chinaxiv,scielo,kci,jstage,ena,sra,geo,pride,cellxgene,gsa,gsa_human,nih_reporter,clinicaltrials,openfda,semantic_scholar,news (see docs/SOURCES.md)")
+    p.add_argument("--sources", help="comma-separated subset: biorxiv,medrxiv,europepmc,openalex,crossref,arxiv,rss,chinaxiv,scielo,kci,jstage,ena,sra,geo,pride,cellxgene,gsa,gsa_human,nih_reporter,clinicaltrials,openfda,semantic_scholar, "
+                                     "and for the news layer news (all of it), press, sec, gdelt, gnews (one sub-layer each; rss = the journal feeds plus the whole news layer). "
+                                     "An unknown id is a usage error (see docs/SOURCES.md)")
     p.add_argument("--out", help="digest directory (default: out_dir in radar.yaml / LITRADAR_OUT_DIR, else digests/)")
     p.add_argument("--email", action="store_true", help="e-mail the digest (SMTP_* and DIGEST_* in .env)")
     p.add_argument("--slack", action="store_true", help="post the top 10 to Slack (SLACK_WEBHOOK_URL in .env)")

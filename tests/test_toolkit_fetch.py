@@ -423,3 +423,183 @@ def test_europepmc_usage_error_lists_the_three_selectors(fake, tmp_path, capsys)
     assert cli.main(["fetch", "europepmc", "--days", "3", "--out", str(tmp_path / "x.jsonl")]) == 2
     err = capsys.readouterr().err
     assert "--query" in err and "--issn" in err and "--section METHODS --terms" in err and err.count("\n") >= 3
+
+
+# ------------------------------------------------------------------ the registry covers every adapter the pipeline runs
+
+
+def test_registry_covers_every_source_module_and_every_run_source_id():
+    import pkgutil
+
+    from litradar import pipeline, sources
+
+    modules = {m.name for m in pkgutil.iter_modules(sources.__path__)} - {"script_lang"}  # a shared helper, not an adapter
+    covered = {s.module.__name__.rsplit(".", 1)[1] for s in REGISTRY}
+    assert modules <= covered, f"adapter module(s) without a SourceSpec in litradar/toolkit.py: {sorted(modules - covered)}"
+    # every `litradar run --sources` id that names one adapter is a `fetch` source too (news / press are feed kinds served
+    # through `rss`; Google News is a legal opt-in with no raw tool on purpose)
+    ids = {s.replace("_", "-") for s in pipeline.RUN_SOURCES} - {"news", "press", "gnews"}
+    assert ids <= set(toolkit.BY_NAME), sorted(ids - set(toolkit.BY_NAME))
+    for name in ("chinaxiv", "scielo", "kci", "jstage", "gsa", "gsa_human", "gdelt", "sec"):
+        spec = toolkit.get(name)
+        assert spec.summary and spec.hosts and spec.example.startswith(f"litradar fetch {spec.name}")
+    assert toolkit.get("sec").summary.startswith("SEC EDGAR 8-K filings")  # `doc` overrides the shared rss module docstring
+    assert toolkit.get("gsa_human") is toolkit.get("gsa-human")
+
+
+def _record(src, i):
+    from litradar.models import Paper
+
+    return Paper(id=f"{src}:{i}", source=src, title=f"{src} paper {i}", pub_date="2026-10-02", url=f"https://example.org/{src}/{i}")
+
+
+def test_regional_and_archive_wrappers_pass_window_options_and_limit(fake, tmp_path, monkeypatch):
+    from litradar.models import ArchiveRecord
+
+    fake([])
+    calls = {}
+
+    def chinaxiv_fetch(http, start, end, source="chinaxiv", max_records=5000, life_science_only=False):
+        calls["chinaxiv"] = (start, end, source, max_records, life_science_only)
+        yield _record("chinaxiv", 1)
+
+    def scielo_fetch(http, since, until, collections=None, subject_areas=None, keywords=(), max_articles=2000, fmt="opac", stats=None):
+        calls["scielo"] = (since, until, collections, list(keywords), max_articles)
+        yield _record("scielo", 1)
+
+    def kci_fetch(http, since, until, keywords=(), categories=(), min_pub_year=None, metadata_prefix="oai_kci", max_pages=10, stats=None):
+        calls["kci"] = (since, until, list(keywords))
+        yield _record("kci", 1)
+
+    def jstage_fetch(http, start, end, terms=(), field="abst", journals=(), issns=(), max_records=5000, year_slack=1, stats=None):
+        calls["jstage"] = (start, end, list(terms), field, list(issns), max_records)
+        yield _record("jstage", 1)
+
+    def gsa_fetch(http, start, end, center="NGDC", page_size=200, max_records=20000, max_page_size=1500):
+        calls["gsa"] = (start, end, center, max_records)
+        yield ArchiveRecord("gsa", "CRX1", "CRA1", "BGISEQ (model n/a)", "BGISEQ", "WGS", "2026-10-02", "", "t", "")
+        yield ArchiveRecord("gsa", "CRX2", "CRA1", "ILLUMINA (model n/a)", "ILLUMINA", "WGS", "2026-10-02", "", "t", "")
+
+    def gsa_human_fetch(http, start, end, max_studies=400):
+        calls["gsa_human"] = (start, end, max_studies)
+        yield ArchiveRecord("gsa-human", "HRX1", "HRA1", "DNBSEQ-T7", "BGISEQ", "WGS", "2026-10-02", "", "t", "Homo sapiens")
+
+    monkeypatch.setattr(toolkit.chinaxiv, "fetch", chinaxiv_fetch)
+    monkeypatch.setattr(toolkit.scielo, "fetch", scielo_fetch)
+    monkeypatch.setattr(toolkit.kci, "fetch", kci_fetch)
+    monkeypatch.setattr(toolkit.jstage, "fetch", jstage_fetch)
+    monkeypatch.setattr(toolkit.gsa, "fetch", gsa_fetch)
+    monkeypatch.setattr(toolkit.gsa_human, "fetch", gsa_human_fetch)
+    out = tmp_path / "o.jsonl"
+    window = ["--since", "2026-10-01", "--until", "2026-10-07"]
+    assert cli.main(["fetch", "chinaxiv", *window, "--life-science-only", "--limit", "5", "--out", str(out)]) == 0
+    assert calls["chinaxiv"] == ("2026-10-01", "2026-10-07", "chinaxiv", 5, True) and _lines(out)[0]["source"] == "chinaxiv"
+    assert cli.main(["fetch", "scielo", *window, "--collection", "scl,mex", "--terms", "genom", "--limit", "9", "--out", str(out)]) == 0
+    assert calls["scielo"] == ("2026-10-01", "2026-10-07", ["scl", "mex"], ["genom"], 9)
+    assert cli.main(["fetch", "kci", *window, "--terms", "genome,유전체", "--out", str(out)]) == 0
+    assert calls["kci"] == ("2026-10-01", "2026-10-07", ["genome", "유전체"]) and _lines(out)[0]["id"] == "kci:1"
+    assert cli.main(["fetch", "jstage", *window, "--terms", "genome", "--field", "text", "--issn", "1234-5678", "--limit", "7", "--out", str(out)]) == 0
+    assert calls["jstage"] == ("2026-10-01", "2026-10-07", ["genome"], "text", ["1234-5678"], 7)
+    assert cli.main(["fetch", "gsa", *window, "--center", "insdc", "--limit", "1", "--out", str(out)]) == 0
+    assert calls["gsa"] == ("2026-10-01", "2026-10-07", "INSDC", 1)
+    assert [r["accession"] for r in _lines(out)] == ["CRX1"]  # --limit caps the stream as well as the adapter
+    assert cli.main(["fetch", "gsa-human", *window, "--limit", "3", "--out", str(out)]) == 0
+    assert calls["gsa_human"] == ("2026-10-01", "2026-10-07", 3) and _lines(out)[0]["archive"] == "gsa-human"
+    assert cli.main(["fetch", "gsa_human", "--days", "2", "--out", str(out)]) == 0  # the pipeline's underscore spelling works too
+    assert calls["gsa_human"][2] == 400
+
+
+def test_jstage_gdelt_and_sec_report_missing_options_as_usage_errors(fake, tmp_path, capsys, monkeypatch):
+    fake([])
+    out = str(tmp_path / "u.jsonl")
+    assert cli.main(["fetch", "jstage", "--days", "7", "--out", out]) == 2
+    assert "jstage needs --terms" in capsys.readouterr().err
+    assert cli.main(["fetch", "jstage", "--terms", "genome", "--field", "nope", "--out", out]) == 2
+    assert "jstage --field must be one of abst, text" in capsys.readouterr().err
+    assert cli.main(["fetch", "gdelt", "--days", "7", "--out", out]) == 2
+    assert "gdelt needs --query" in capsys.readouterr().err
+    assert cli.main(["fetch", "gdelt", "--terms", "Illumina", "--since", "2025-01-01", "--out", out]) == 2
+    assert "reaches back at most 3 months" in capsys.readouterr().err
+    monkeypatch.setenv("LITRADAR_CONTACT_EMAIL", "contact@example.org")
+    assert cli.main(["fetch", "sec", "--days", "7", "--out", out]) == 2
+    assert "sec needs --ticker" in capsys.readouterr().err
+    assert cli.main(["fetch", "sec", "--ticker", "BRK.B", "--out", out]) == 2
+    assert "not a plain US ticker" in capsys.readouterr().err
+    monkeypatch.setenv("LITRADAR_CONTACT_EMAIL", "")
+    assert cli.main(["fetch", "sec", "--ticker", "ILMN", "--out", out]) == 2
+    assert "sec needs LITRADAR_CONTACT_EMAIL" in capsys.readouterr().err
+    assert not (tmp_path / "u.jsonl").read_text(encoding="utf-8")  # nothing was written for any of them
+
+
+_SEC_FEED = (
+    '<feed xmlns="http://www.w3.org/2005/Atom">'
+    '<entry><title>8-K - Current report</title><link rel="alternate" href="https://www.sec.gov/Archives/edgar/data/1/0001.htm"/>'
+    "<updated>2026-10-14T10:00:00-04:00</updated><summary>Item 2.02</summary></entry>"
+    '<entry><title>8-K - Too new</title><link rel="alternate" href="https://www.sec.gov/Archives/edgar/data/1/0002.htm"/>'
+    "<updated>2026-10-20T10:00:00-04:00</updated></entry>"
+    '<entry><title>8-K - Older report</title><link rel="alternate" href="https://www.sec.gov/Archives/edgar/data/1/0000.htm"/>'
+    "<updated>2026-09-01T10:00:00-04:00</updated></entry></feed>"
+)
+
+
+def test_sec_builds_the_pipeline_feed_url_per_ticker_and_applies_the_window(fake, tmp_path, monkeypatch):
+    from litradar.pipeline import sec_feed_url
+
+    monkeypatch.setenv("LITRADAR_CONTACT_EMAIL", "contact@example.org")
+    http = fake([_SEC_FEED, _SEC_FEED])
+    out = tmp_path / "sec.jsonl"
+    assert cli.main(["fetch", "sec", "--ticker", "ilmn,TXG", "--since", "2026-10-10", "--until", "2026-10-17", "--out", str(out)]) == 0
+    assert [c[1] for c in http.calls] == [sec_feed_url("ILMN"), sec_feed_url("TXG")]
+    assert "CIK=ILMN&type=8-K" in http.calls[0][1] and http.calls[0][1].endswith("output=atom")
+    rows = _lines(out)
+    assert [(r["feed"], r["title"], r["published"]) for r in rows] == [
+        ("SEC 8-K ILMN", "8-K - Current report", "2026-10-14"),  # September is before --since, the 20th is after --until
+        ("SEC 8-K TXG", "8-K - Current report", "2026-10-14"),
+    ]
+    assert rows[0]["url"] == "https://www.sec.gov/Archives/edgar/data/1/0001.htm" and rows[0]["summary"] == "Item 2.02"
+
+
+def test_gdelt_terms_are_one_batched_request_sized_to_reach_since(fake, tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    from litradar import query as Q
+    from litradar.sources import gdelt as gd
+
+    today = Q.today_utc()
+    recorded = {}
+
+    def batch_news(http, companies, context="", timespan="7d", language="english", since=None, max_records=250, outcome=None):
+        recorded.update(companies=list(companies), context=context, timespan=timespan, since=since, max_records=max_records)
+        yield gd.to_news_item({"url": "https://news.example/1", "title": "Illumina posts results", "seendate": today.strftime("%Y%m%dT120000Z")}, "gdelt")
+        yield gd.to_news_item({"url": "https://news.example/2", "title": "Ancient story", "seendate": "20200101T120000Z"}, "gdelt")
+
+    monkeypatch.setattr(toolkit.gdelt, "batch_news", batch_news)
+    fake([])
+    out = tmp_path / "g.jsonl"
+    assert cli.main(["fetch", "gdelt", "--terms", "Illumina,10x Genomics", "--days", "7", "--limit", "50", "--out", str(out)]) == 0
+    assert recorded["companies"] == [("Illumina", ""), ("10x Genomics", "")] and recorded["context"] == ""
+    assert recorded["since"] == (today - timedelta(days=7)).isoformat() and recorded["max_records"] == 50
+    assert recorded["timespan"] == "8d"  # the DOC API's timespan is relative to now: 7 days back plus today
+    assert [r["title"] for r in _lines(out)] == ["Illumina posts results"]  # the 2020 article is outside the window
+
+
+def test_gdelt_query_is_sent_verbatim_and_a_dead_api_is_exit_1(fake, tmp_path, capsys):
+    from litradar import query as Q
+    from litradar.sources import gdelt as gd
+
+    seen = Q.today_utc().strftime("%Y%m%dT120000Z")
+    http = fake([{"articles": [
+        {"url": "https://news.example/a", "title": "Spatial biology round-up", "seendate": seen, "domain": "news.example"},
+        {"url": "https://news.example/b", "title": "Ancient", "seendate": "20200101T000000Z", "domain": "news.example"},
+    ]}])
+    out = tmp_path / "q.jsonl"
+    assert cli.main(["fetch", "gdelt", "--query", '"spatial biology" sourcelang:english', "--days", "3", "--out", str(out)]) == 0
+    method, url, params = http.calls[0]
+    assert (method, url) == ("GET", gd.DOC_API)
+    assert params["query"] == '"spatial biology" sourcelang:english' and params["timespan"] == "4d" and params["mode"] == "ArtList"
+    rows = _lines(out)
+    assert [r["title"] for r in rows] == ["Spatial biology round-up"] and rows[0]["feed"] == "gdelt" and rows[0]["companies"] == []
+    # no answer at all (429 penalty, transport failure, rejected query) is a hard failure, never "0 records, exit 0"
+    fake([])
+    assert cli.main(["fetch", "gdelt", "--query", "x", "--days", "1", "--out", str(out)]) == 1
+    assert "GDELT gave no answer" in capsys.readouterr().err

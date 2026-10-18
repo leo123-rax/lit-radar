@@ -202,10 +202,12 @@ def compute_window(
 ) -> Dict[str, Any]:
     """Decide what [since, until] the next incremental pull should cover.
 
-    * `--since`/`--until` override everything; an explicit `since` is honoured as given (no cap).
+    * `--since`/`--until` override everything; an explicit `since` is honoured as given (no cap), and an
+      explicit `since` after the window end is a ValueError (never a silent 0-day window).
     * No previous run: the last `first_run_days` days.
     * Otherwise: from the last run's `until` minus `overlap_days` (sources backfill late), capped at
-      `max_days` so an outage is repaired deliberately with --since rather than by one giant pull.
+      `max_days` so an outage is repaired deliberately with --since rather than by one giant pull. A
+      recorded `until` in the future (clock skew, a run made with --until ahead) is clamped to the end.
 
     Dates are inclusive on both ends in every source adapter, so an overlap of N days re-fetches N+1
     calendar days including the previous `until` itself.
@@ -224,6 +226,8 @@ def compute_window(
     else:
         start, basis = end - timedelta(days=first_run_days), "first_run"
     if start > end:
+        if basis == "override":
+            raise ValueError(f"--since {start.isoformat()} is after --until {end.isoformat()}")
         start = end
     if (end - start).days > max_days and basis != "override":
         start, capped = end - timedelta(days=max_days), True

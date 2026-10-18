@@ -27,6 +27,7 @@ import argparse
 import dataclasses
 import json
 import logging
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from itertools import islice
@@ -41,16 +42,23 @@ from .sources import (
     arxiv,
     biorxiv,
     cellxgene,
+    chinaxiv,
     clinicaltrials,
     crossref,
     ena,
     europepmc,
+    gdelt,
     geo,
+    gsa,
+    gsa_human,
+    jstage,
+    kci,
     nih_reporter,
     openalex,
     openfda,
     pride,
     rss,
+    scielo,
     semantic_scholar,
     sra,
 )
@@ -104,6 +112,11 @@ OPTS: Dict[str, Opt] = {
         Opt("--url", "feed URL (RSS 2.0, RSS 1.0 or Atom)", metavar="URL"),
         Opt("--name", "feed name used in the record's `source`/`feed` field (default: the URL's host)", metavar="NAME"),
         Opt("--as", "RSS record type: news (default) or papers", metavar="KIND", default="news"),
+        Opt("--ticker", "SEC EDGAR: plain US ticker of a listed company (one 8-K Atom feed each); repeatable or comma-separated", kind="multi", metavar="TICKER"),
+        Opt("--collection", "SciELO collection code (scl Brazil, mex, arg, chl, col, esp, prt, sza, spa ...); repeatable; default: every collection", kind="multi", metavar="CODE"),
+        Opt("--field", "J-STAGE search field for --terms: abst (default), text, article, keyword, author, affil, material", metavar="FIELD", default="abst"),
+        Opt("--life-science-only", "ChinaXiv: keep only records whose subject labels are life-science / biomedical", kind="flag"),
+        Opt("--center", "GSA: NGDC (default; native GSA submissions) or INSDC (records mirrored from SRA/ENA/DDBJ)", metavar="CENTER", default="NGDC"),
     )
 }
 
@@ -352,6 +365,99 @@ def _rss(http: Http, req: FetchRequest) -> Iterator[Any]:
     return rss.news_items(http, name, url, since=since)
 
 
+def _sec(http: Http, req: FetchRequest) -> Iterator[Any]:
+    """SEC EDGAR 8-K Atom feeds, one per ticker: the same URL the pipeline builds for every watched company."""
+    tickers = [t.upper() for t in _list(req.opt("ticker"))]
+    if not tickers:
+        raise UsageError("sec needs --ticker (a plain US ticker; repeatable or comma-separated)")
+    bad = [t for t in tickers if not re.fullmatch(r"[A-Z]{1,5}", t)]
+    if bad:
+        raise UsageError(f"sec: not a plain US ticker (1-5 letters): {', '.join(bad)}")
+    if not req.settings.contact_email:
+        raise UsageError("sec needs LITRADAR_CONTACT_EMAIL (.env): EDGAR requires '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise")
+    # lazy import: the pipeline module is heavy and `fetch` needs only the feed URL from it
+    from .pipeline import sec_feed_url
+
+    for ticker in tickers:
+        for item in rss.news_items(http, f"SEC 8-K {ticker}", sec_feed_url(ticker), since=req.since):
+            if item.published and item.published > req.until:
+                continue
+            yield item
+
+
+def _gdelt(http: Http, req: FetchRequest) -> Iterator[Any]:
+    """GDELT DOC 2.0: one verbatim query (--query) or one OR'd request for a batch of company names (--terms)."""
+    query = req.opt("query")
+    names = _list(req.opt("terms"))
+    if not (query or names):
+        raise UsageError("gdelt needs --query (a verbatim DOC API query) or --terms (company names, sent as one OR'd request)")
+    # the DOC API's `timespan` is relative to now, so it is sized to reach back to --since; the window then bounds the articles
+    today = datetime.now(timezone.utc).date()
+    back = max(1, (today - datetime.strptime(req.since, "%Y-%m-%d").date()).days + 1)
+    if back > 92:
+        raise UsageError(f"gdelt: the DOC API reaches back at most 3 months; --since {req.since} is {back} days ago")
+    timespan = f"{back}d"
+    cap = req.max_records or gdelt.MAX_RECORDS
+    if query:
+        arts = gdelt.search(http, query, timespan=timespan, max_records=cap)
+        if arts is None:
+            raise RuntimeError("GDELT gave no answer (transport failure, HTTP 429 or a rejected query; see the WARNING lines above)")
+        items: Iterable[Any] = (gdelt.to_news_item(a, "gdelt") for a in arts)
+    else:
+        items = gdelt.batch_news(http, [(n, "") for n in names], timespan=timespan, since=req.since, max_records=cap)
+    for item in items:
+        if item is None:
+            continue
+        if item.published and (item.published < req.since or item.published > req.until):
+            continue
+        yield item
+
+
+def _chinaxiv(http: Http, req: FetchRequest) -> Iterator[Any]:
+    kw: Dict[str, Any] = {"life_science_only": bool(req.opt("life_science_only"))}
+    if req.max_records:
+        kw["max_records"] = req.max_records
+    return chinaxiv.fetch(http, req.since, req.until, **kw)
+
+
+def _scielo(http: Http, req: FetchRequest) -> Iterator[Any]:
+    kw: Dict[str, Any] = {"collections": _list(req.opt("collection")) or None, "keywords": _list(req.opt("terms"))}
+    if req.max_records:
+        kw["max_articles"] = req.max_records
+    return scielo.fetch(http, req.since, req.until, **kw)
+
+
+def _kci(http: Http, req: FetchRequest) -> Iterator[Any]:
+    return kci.fetch(http, req.since, req.until, keywords=_list(req.opt("terms")))
+
+
+def _jstage(http: Http, req: FetchRequest) -> Iterator[Any]:
+    terms, issns = _list(req.opt("terms")), _list(req.opt("issn"))
+    if not (terms or issns):
+        raise UsageError("jstage needs --terms (search words; --field picks the field) and/or --issn")
+    field = (req.opt("field") or "abst").lower()
+    if field not in jstage.SEARCH_FIELDS:
+        raise UsageError(f"jstage --field must be one of {', '.join(jstage.SEARCH_FIELDS)} (got {field!r})")
+    kw: Dict[str, Any] = {"terms": terms, "field": field, "issns": issns}
+    if req.max_records:
+        kw["max_records"] = req.max_records
+    return jstage.fetch(http, req.since, req.until, **kw)
+
+
+def _gsa(http: Http, req: FetchRequest) -> Iterator[Any]:
+    kw: Dict[str, Any] = {"center": (req.opt("center") or "NGDC").upper()}
+    if req.max_records:
+        kw["max_records"] = req.max_records
+    return gsa.fetch(http, req.since, req.until, **kw)
+
+
+def _gsa_human(http: Http, req: FetchRequest) -> Iterator[Any]:
+    kw: Dict[str, Any] = {}
+    if req.max_records:
+        kw["max_studies"] = req.max_records  # one JSON request per study; --limit caps the sweep as well as the output
+    return gsa_human.fetch(http, req.since, req.until, **kw)
+
+
 # ----------------------------------------------------------------------------- registry
 
 
@@ -366,11 +472,12 @@ class SourceSpec:
     hosts: Tuple[str, ...]
     example: str
     requires: str = ""  # which of the options is mandatory, in words
+    doc: str = ""  # overrides the module docstring as the `--list` summary (for a source that shares a module, e.g. sec -> rss)
 
     @property
     def summary(self) -> str:
-        """First paragraph of the module docstring, whitespace-collapsed."""
-        doc = (self.module.__doc__ or "").strip()
+        """First paragraph of `doc`, else of the module docstring, whitespace-collapsed."""
+        doc = (self.doc or self.module.__doc__ or "").strip()
         first = doc.split("\n\n", 1)[0]
         return " ".join(first.split())
 
@@ -477,6 +584,60 @@ REGISTRY: Tuple[SourceSpec, ...] = (
         access="depends on the feed host (several publisher and trade feeds answer 403 to scripts)", hosts=(),
         example="litradar fetch rss --url https://www.nature.com/nmeth.rss --as papers --days 14",
         requires="--url",
+    ),
+    SourceSpec(
+        "sec", rss, "NewsItem", _sec, WINDOW + ("--ticker",),
+        access="free; LITRADAR_CONTACT_EMAIL is required (EDGAR wants '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise)",
+        hosts=("www.sec.gov",),
+        example="litradar fetch sec --ticker ILMN,TXG --days 7",
+        requires="--ticker, and LITRADAR_CONTACT_EMAIL in the environment",
+        doc="SEC EDGAR 8-K filings as news items: the per-ticker Atom feed the pipeline reads for every watched company with a "
+            "plain US ticker (parsed by litradar/sources/rss.py).",
+    ),
+    SourceSpec(
+        "gdelt", gdelt, "NewsItem", _gdelt, WINDOW + ("--query", "--terms", "--limit"),
+        access="free, no key; one request every 5 s per client (the client paces 8 s and stops after four 429s in a row)",
+        hosts=("api.gdeltproject.org",),
+        example='litradar fetch gdelt --terms "Illumina,10x Genomics" --days 7',
+        requires="--query or --terms",
+    ),
+    SourceSpec(
+        "chinaxiv", chinaxiv, "Paper", _chinaxiv, WINDOW + ("--life-science-only", "--limit"),
+        access="free, no key (the global aggregator's public OAI-PMH endpoint; metadata only, mostly Chinese titles)",
+        hosts=("global.chinaxiv.org",),
+        example="litradar fetch chinaxiv --days 30 --life-science-only",
+    ),
+    SourceSpec(
+        "scielo", scielo, "Paper", _scielo, WINDOW + ("--collection", "--terms", "--limit"),
+        access="free, no key; one request per identifier page, per journal ISSN and per article (life-science subject areas only)",
+        hosts=("articlemeta.scielo.org",),
+        example='litradar fetch scielo --collection scl --terms "genom" --days 30 --limit 200',
+    ),
+    SourceSpec(
+        "kci", kci, "Paper", _kci, WINDOW + ("--terms", "--limit"),
+        access="free, no key; the KCI open-data licence requires attribution and forbids commercial use",
+        hosts=("open.kci.go.kr",),
+        example='litradar fetch kci --terms "genome" --days 30',
+    ),
+    SourceSpec(
+        "jstage", jstage, "Paper", _jstage, WINDOW + ("--terms", "--field", "--issn", "--limit"),
+        access="free, no key; the J-STAGE terms forbid storing or caching the data for 24 h or more and require a 'Powered by J-STAGE' "
+               "credit wherever it is shown (which is why the pipeline runs it only as an explicit opt-in)",
+        hosts=("api.jstage.jst.go.jp",),
+        example='litradar fetch jstage --terms "genome" --days 30',
+        requires="--terms and/or --issn",
+    ),
+    SourceSpec(
+        "gsa", gsa, "ArchiveRecord", _gsa, WINDOW + ("--center", "--limit"),
+        access="free, no key; one probe request per day in the window plus one sized page per day (platform FAMILY only, no model)",
+        hosts=("ngdc.cncb.ac.cn",),
+        example="litradar fetch gsa --days 2 --out gsa.jsonl",
+    ),
+    SourceSpec(
+        "gsa-human", gsa_human, "ArchiveRecord", _gsa_human, WINDOW + ("--limit",),
+        access="free, no key; one request per 10 studies plus one JSON request per study (--limit caps the studies)",
+        hosts=("ngdc.cncb.ac.cn",),
+        example="litradar fetch gsa-human --days 7 --limit 50",
     ),
 )
 
@@ -595,14 +756,24 @@ def run_fetch(
     return n
 
 
-def _resolve_window(opts: argparse.Namespace) -> Tuple[str, str]:
-    """--since/--until (YYYY-MM-DD or Nd) and --days -> an inclusive ISO window; bad input is a UsageError."""
+def resolve_window(since: Optional[str], until: Optional[str], days: Optional[int] = None) -> Tuple[str, str]:
+    """``--since`` / ``--until`` (``YYYY-MM-DD`` or ``Nd``) and ``--days`` -> an inclusive ISO window.
+
+    The one resolver behind ``run``, ``digest``, ``coverage`` and ``fetch``, so every command agrees:
+
+    * both given: used as they are; ``since`` after ``until`` is a :class:`UsageError`;
+    * ``since`` alone: ``since`` .. today (UTC);
+    * ``until`` alone: the ``days`` (default 7) days ending on ``until``, so a digest for a past week is
+      ``--until 2026-10-10`` and nothing else;
+    * neither: the ``days`` days ending today.
+
+    ``days`` below 1 is a :class:`UsageError` (``window(-3)`` would otherwise be a window in the future).
+    """
     try:
-        since = Q.parse_date(getattr(opts, "since", None), "--since")
-        until = Q.parse_date(getattr(opts, "until", None), "--until")
+        since = Q.parse_date(since, "--since")
+        until = Q.parse_date(until, "--until")
     except ValueError as exc:
         raise UsageError(str(exc)) from None
-    days = getattr(opts, "days", None)
     if days is not None and days < 1:
         raise UsageError(f"--days must be at least 1, got {days}")
     if since and until:
@@ -615,6 +786,11 @@ def _resolve_window(opts: argparse.Namespace) -> Tuple[str, str]:
         end = datetime.strptime(until, "%Y-%m-%d").date()
         return (end - timedelta(days=days or 7)).isoformat(), until
     return window(days or 7)
+
+
+def _resolve_window(opts: argparse.Namespace) -> Tuple[str, str]:
+    """:func:`resolve_window` over a parsed ``fetch`` namespace."""
+    return resolve_window(getattr(opts, "since", None), getattr(opts, "until", None), getattr(opts, "days", None))
 
 
 # ----------------------------------------------------------------------------- `--list`
@@ -757,5 +933,5 @@ def fetch_exit_code(source: str, n: int, stats: Dict[str, Any], blocked_hosts: A
 
 __all__ = [
     "REGISTRY", "BY_NAME", "SourceSpec", "FetchRequest", "RecordingHttp", "UsageError",
-    "get", "records", "run_fetch", "describe", "format_list", "add_fetch_parser", "cmd_fetch", "fetch_exit_code", "make_http", "window", "Paper",
+    "get", "records", "run_fetch", "describe", "format_list", "add_fetch_parser", "cmd_fetch", "fetch_exit_code", "make_http", "window", "resolve_window", "Paper",
 ]
