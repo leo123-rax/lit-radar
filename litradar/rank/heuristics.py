@@ -4,19 +4,23 @@ Score components (defaults live in config/radar.yaml -> ranking.weights):
   journal tier        A=4, B=2.5, C=1, preprint=1, unknown=0.5
   platforms named     +1.0 per distinct platform entity (cap 3): sequencers, single-cell, spatial, proteomics, cryo-EM, arrays, synthesis, cell engineering
   lab tools named     +0.2 per distinct infrastructure entity (cap 3): QC, library prep, PCR, automation, imaging, cytometry, bioprocess
-  companies named     +0.5 per distinct company entity (cap 3)
-  company author      +1.0 if an author has a company affiliation
+  companies named     +0.5 per distinct COMMERCIAL company entity (cap 3); gazetteer entries typed
+                      `institute` (funders, non-profits, plasmid repositories) or as AI tools / software
+                      (ChatGPT credits, AlphaFold) are listed in the reasons but never scored
+  company author      +1.0 if an author has a commercial-company affiliation (institutes do not count)
   watchlist terms     +1.0 per matched watchlist term (cap 3)
   tracked author      +3.0
   novelty language    +0.5 per cue (cap 1.0)
   early citations     +1.0 if cited_by_count > 0 within the window (rare, strong signal)
   full text parsed    +0 by default (configurable)
-The sum is scaled to 0-10 for blending with the optional LLM score.
+The sum is scaled to 0-10 for blending with the optional LLM score. `score_paper(..., company_types=)`
+takes the {company id: type} mapping from config/companies.yaml (Pipeline.company_types); without it every
+company entity is treated as commercial.
 """
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 DEFAULT_WEIGHTS = {
     "tier_A": 4.0,
@@ -42,11 +46,25 @@ DEFAULT_WEIGHTS = {
 }
 
 PLATFORM_CATEGORIES = ("sequencer", "single_cell", "spatial", "proteomics", "cryo_em", "array", "synthesis", "cell_engineering")
+# company `type` values (config/companies.yaml) that are not commercial signals: research institutes, foundations,
+# non-profit repositories ... and the AI tools / software credited for language polishing or structure prediction
+INSTITUTE_COMPANY_TYPES = ("institute", "foundation", "non_profit", "nonprofit", "non-profit")
+AI_TOOL_COMPANY_TYPES = ("software", "ai_tool", "ai-tool", "ai tool", "llm")
 
 
 def is_platform(category: str) -> bool:
     """Platforms are the instruments an investor tracks; the rest is lab infrastructure and consumables."""
     return category.startswith(PLATFORM_CATEGORIES)
+
+
+def company_role(entity_id: str, company_types: Optional[Dict[str, str]]) -> str:
+    """'company' (commercial, scored), 'institute' or 'ai_tool' (listed, not scored) for a company mention."""
+    t = ((company_types or {}).get(entity_id) or "").lower()
+    if t in INSTITUTE_COMPANY_TYPES:
+        return "institute"
+    if t in AI_TOOL_COMPANY_TYPES:
+        return "ai_tool"
+    return "company"
 
 
 NOVELTY_CUES = [
@@ -72,10 +90,12 @@ def score_paper(
     watchlist_terms: Sequence[str],
     tracked_author: bool,
     weights: Dict[str, Any] = None,
+    company_types: Optional[Dict[str, str]] = None,
 ) -> Tuple[float, str]:
     w = dict(DEFAULT_WEIGHTS)
     if weights:
         w.update(weights)
+    types = {k: (v or "").lower() for k, v in (company_types or {}).items()}
     reasons: List[str] = []
     raw = 0.0
     kind = paper.get("kind") or "article"
@@ -89,7 +109,10 @@ def score_paper(
 
     platforms = {m["entity_id"] for m in mentions if m.get("kind") == "instrument" and is_platform(m.get("category") or "")}
     infra = {m["entity_id"] for m in mentions if m.get("kind") == "instrument" and not is_platform(m.get("category") or "")}
-    companies = {m["entity_id"] for m in mentions if m.get("kind") == "company"}
+    company_mentions = [m for m in mentions if m.get("kind") == "company"]
+    companies = {m["entity_id"] for m in company_mentions if company_role(m["entity_id"], types) == "company"}
+    institutes = {m["entity_id"] for m in company_mentions if company_role(m["entity_id"], types) == "institute"}
+    ai_tools = {m["entity_id"] for m in company_mentions if company_role(m["entity_id"], types) == "ai_tool"}
     if platforms:
         n = min(len(platforms), int(w["instrument_cap"]))
         raw += n * w["instrument"]
@@ -102,7 +125,11 @@ def score_paper(
         n = min(len(companies), int(w["company_cap"]))
         raw += n * w["company"]
         reasons.append(f"{len(companies)} company mention(s)")
-    if any(m.get("kind") == "company" and m.get("section") == "affiliations" for m in mentions):
+    if institutes:
+        reasons.append(f"{len(institutes)} institute mention(s), not scored")
+    if ai_tools:
+        reasons.append(f"{len(ai_tools)} AI tool(s), not scored")
+    if any(m.get("section") == "affiliations" and company_role(m["entity_id"], types) == "company" for m in company_mentions):
         raw += w["company_author"]
         reasons.append("company-affiliated author")
 

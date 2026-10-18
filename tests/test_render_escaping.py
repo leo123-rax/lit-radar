@@ -12,12 +12,15 @@ WINDOW = ("2026-10-10", "2026-10-17")
 def test_esc_neutralises_html_tables_and_block_syntax():
     out = esc(HOSTILE)
     assert "<" not in out and ">" not in out and "|" not in out
-    assert "&lt;script&gt;" in out and "&#124;" in out and "&amp; amp" in out and "\\[link\\]\\(http://evil)" in out
+    assert "&lt;script&gt;" in out and "&#124;" in out and "& amp" in out and "\\[link\\]\\(http://evil)" in out
     for s in ("# heading", "- item", "> quote", "* star", "+ plus", "#hash"):
         assert esc(s).startswith("\\"), s
     assert esc("a\nb\r\n  c") == "a b c"
     assert esc(None) == "" and esc(5) == "5" and esc("plain text") == "plain text"
-    assert esc("&amp;") == "&amp;amp;"  # already-escaped input is not trusted either
+    # a bare ampersand stays a bare ampersand (Markdown is fine with it; `&amp;` would leak into plain-text mail)
+    assert esc("NEB enzymes & clean-up kits") == "NEB enzymes & clean-up kits"
+    assert esc("&amp;") == "&amp;"  # an entity in the input renders as its character, never as markup
+    assert esc("&lt;script&gt;") == "&lt;script&gt;"  # ... so pre-escaped tags stay visible text, not tags
 
 
 def test_links_only_for_http_urls():
@@ -143,3 +146,123 @@ def test_top_list_shows_journal_version_and_marks_the_preprint(tmp_path):
     assert out["summary"]["top"][0]["preprints"][0]["id"] == pre.id
     assert out["summary"]["preprint_conversions"][0]["article_id"] == art.id
     st.close()
+
+
+def _mention(pid, kind, eid, name, section, category="", count=1, snippet=""):
+    return Mention(pid, kind, eid, name, "", "", category, section, count, snippet)
+
+
+def test_platform_and_lab_tool_tables_have_separate_budgets_and_truncation_notes(tmp_path):
+    st = Store(tmp_path / "i.sqlite")
+    pid = "doi:10.1000/i1"
+    st.upsert_paper(Paper(id=pid, source="x", kind="article", title="A paper naming many products", pub_date="2026-10-12", url="https://e/1"))
+    st.replace_mentions(pid, [
+        _mention(pid, "instrument", "kits", "QIAGEN kits", "methods", "library_prep", 5),
+        _mention(pid, "instrument", "nanodrop", "NanoDrop", "methods", "qc", 4),
+        _mention(pid, "instrument", "mystery", "Mystery tool", "methods", "", 3),
+        _mention(pid, "instrument", "txg-xenium", "Xenium", "methods", "spatial", 2),
+        _mention(pid, "instrument", "ilmn-novaseq-x", "NovaSeq X", "methods", "sequencer.short_read", 1),
+    ])
+    st.save_score(pid, 1.0, None, 1.0, "r")
+    st.commit()
+    md = render(st, *WINDOW, {"digest": {"platforms_table_n": 1, "lab_tools_table_n": 2}})["markdown"]
+    plat = md[md.index("## Platforms named"): md.index("### Lab infrastructure")]
+    tools = md[md.index("### Lab infrastructure"): md.index("## Instruments behind")]
+    assert "| Xenium |" in plat and "| NovaSeq X |" not in plat and "| QIAGEN kits |" not in plat
+    assert "… and 1 more platform(s) named in the window; the table shows the 1 with most papers (digest.platforms_table_n)." in plat
+    assert "| QIAGEN kits |" in tools and "| NanoDrop |" in tools and "| Mystery tool |" not in tools
+    assert "… and 1 more product line(s) named in the window" in tools
+    out = render(st, *WINDOW, {})
+    assert out["summary"]["platforms_total"] == 2 and out["summary"]["lab_tools_total"] == 3
+    assert [r["entity_id"] for r in out["summary"]["platforms"]] == ["txg-xenium", "ilmn-novaseq-x"]
+    assert len(out["summary"]["instruments"]) == 5 and "more platform(s)" not in out["markdown"] and "more product line(s)" not in out["markdown"]
+    # the legacy single budget still caps the platform table
+    assert "… and 1 more platform(s)" in render(st, *WINDOW, {"digest": {"instruments_table_n": 1}})["markdown"]
+    st.close()
+
+
+def test_top_list_falls_back_to_full_text_when_abstract_is_missing(tmp_path):
+    st = Store(tmp_path / "f.sqlite")
+    with_body = Paper(id="doi:10.1000/f1", source="europepmc", kind="article", title="Body paper", pub_date="2026-10-12", url="https://e/1",
+                      sections={"body": "Introduction In most cells, a long noncoding RNA localizes to the nucleus. " + "More text. " * 60})
+    with_methods = Paper(id="doi:10.1000/f2", source="europepmc", kind="article", title="Methods paper", pub_date="2026-10-12", url="https://e/2",
+                         sections={"methods": "Cells were lysed in RIPA buffer. Lysates were then cleared by centrifugation."})
+    bare = Paper(id="doi:10.1000/f3", source="crossref", kind="article", title="Bare paper", pub_date="2026-10-12", url="https://e/3")
+    with_abstract = Paper(id="doi:10.1000/f4", source="crossref", kind="article", title="Normal paper", pub_date="2026-10-12", url="https://e/4", abstract="A real abstract.")
+    for i, p in enumerate((with_body, with_methods, bare, with_abstract)):
+        st.upsert_paper(p)
+        st.save_score(p.id, 5.0 - i, None, 5.0 - i, "r")
+    st.commit()
+    md = render(st, *WINDOW, {})["markdown"]
+    top = md[md.index("## Top"): md.index("## Platforms")]
+    assert "In most cells, a long noncoding RNA localizes to the nucleus." in top and "<sub>(from full text; no abstract on record)</sub>" in top
+    assert not any(line.startswith("Introduction In most") for line in top.splitlines())
+    assert "Cells were lysed in RIPA buffer. <sub>(first Methods sentence; no abstract on record)</sub>" in top
+    assert "Lysates were then cleared" not in top
+    assert "A real abstract." in top and top.count("no abstract on record") == 2  # the bare paper gets no summary line
+    body_entry = top[top.index("Body paper"): top.index("Methods paper")]
+    assert len(body_entry) < 1200  # the fallback is cut like an abstract (~420 chars)
+    st.close()
+
+
+def test_top_list_company_line_separates_institutes_ai_tools_and_disclosures(tmp_path):
+    st = Store(tmp_path / "c2.sqlite")
+    pid = "doi:10.1000/c2"
+    st.upsert_paper(Paper(id=pid, source="x", kind="article", title="A paper with many kinds of company mention", pub_date="2026-10-12", url="https://e/1"))
+    st.replace_mentions(pid, [
+        _mention(pid, "company", "illumina", "Illumina", "methods"),
+        _mention(pid, "company", "profluent", "Profluent Bio", "coi"),
+        _mention(pid, "company", "roche", "Roche", "methods"),
+        _mention(pid, "company", "roche", "Roche", "coi"),
+        _mention(pid, "company", "hhmi", "Howard Hughes Medical Institute", "funding"),
+        _mention(pid, "company", "openai", "OpenAI", "ack"),
+        _mention(pid, "company", "unlisted:some-corp", "Some Corp", "affiliations"),
+    ])
+    st.save_score(pid, 1.0, None, 1.0, "r")
+    st.commit()
+    md = render(st, *WINDOW, {}, company_types={"hhmi": "institute", "openai": "software"})["markdown"]
+    line = md[md.index("<sub>Companies:"): md.index("</sub>", md.index("<sub>Companies:"))]
+    assert "Companies: Illumina, Profluent Bio (COI), Roche" in line  # Roche is also a supplier: no tag
+    assert "Institutes / funders: Howard Hughes Medical Institute (funding)" in line
+    assert "AI tools: OpenAI (ack)" in line and "Some Corp" not in line
+    md2 = render(st, *WINDOW, {})["markdown"]  # without types everything is a company
+    assert "Companies: Howard Hughes Medical Institute (funding), Illumina, OpenAI (ack), Profluent Bio (COI), Roche" in md2
+    st.close()
+
+
+def test_news_display_names_coverage_labels_and_single_archive_placeholder(tmp_path):
+    st = Store(tmp_path / "n.sqlite")
+    pid = "doi:10.1000/n1"
+    st.upsert_paper(Paper(id=pid, source="crossref", kind="article", title="A paper mentioning a pharma", pub_date="2026-10-12", url="https://e/1", fulltext_available=True))
+    st.replace_mentions(pid, [_mention(pid, "company", "astrazeneca", "AstraZeneca", "coi")])
+    st.save_score(pid, 1.0, None, 1.0, "r")
+    st.upsert_news([NewsItem("n1", "feed", "Deal announced", "https://e/news", "2026-10-12", "", ["astrazeneca", "unknown-co"])])
+    st.record_run("2026-10-09T00:00:00Z", "2026-10-01", "2026-10-08", {
+        "counts": {"fetched.biorxiv": 12, "papers.unique": 10}, "errors": ["arxiv: host export.arxiv.org rate-limited (HTTP 429)"],
+        "http": {"blocked_hosts": ["export.arxiv.org"]},
+    })
+    st.commit()
+    md = render(st, *WINDOW, {}, company_names={"unknown-co": "Unknown Co"})["markdown"]
+    news = md[md.index("## Trade press"): md.index("## Coverage and method")]
+    assert "**AstraZeneca**" in news and "**Unknown Co**" in news and "**astrazeneca**" not in news and "**unknown-co**" not in news
+    assert "_Rendered " in md and "every count is a snapshot of the database at that moment" in md
+    cov = md[md.index("## Coverage and method"):]
+    assert "**This window (2026-10-10 to 2026-10-17), counted in the database:** 1 papers, 1 with parsed full text; by source: crossref 1 (1 with full text)." in cov
+    assert "**Last pipeline run** (finished 20" in cov  # record_run stamps the real finish time
+    assert "UTC, window 2026-10-01 to 2026-10-08; that is NOT this digest's window, so these counters describe that run alone)." in cov
+    assert "Records pulled per source in that run, before de-duplication: biorxiv 12." in cov
+    assert "In that run: unique papers after de-duplication 10 (0 new to the database" in cov
+    assert "Hosts skipped after repeated HTTP 429 in that run: export.arxiv.org." in cov
+    assert "Source errors in that run (1): arxiv: host export.arxiv.org rate-limited (HTTP 429)." in cov
+    # empty archive section: one placeholder, generic heading
+    arch = md[md.index("## Instruments behind"): md.index("### Proteomics")]
+    assert arch.count("_nothing in this window_") == 1 and "(NCBI SRA, ENA, GEO)" in arch
+    st.close()
+    # with only SRA rows the heading names only SRA, and a window with no run says so
+    st2 = Store(tmp_path / "n2.sqlite")
+    st2.upsert_archive_records([ArchiveRecord("sra", "SRX1", "SRP1", "Illumina NovaSeq X Plus", "ILLUMINA", "WGS", "2026-10-12", "", "", "", "ilmn-novaseq-x", "Illumina", "ILMN")])
+    st2.commit()
+    md2 = render(st2, *WINDOW, {})["markdown"]
+    assert "## Instruments behind newly public sequencing data (NCBI SRA)\n" in md2
+    assert "No pipeline run is recorded for this database yet." in md2
+    st2.close()

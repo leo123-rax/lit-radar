@@ -25,6 +25,16 @@ SNIPPET_RADIUS = 90
 
 
 @dataclass
+class MatchedMention(Mention):
+    """A Mention that also carries the alias string(s) that actually matched, '; '-joined in match order.
+
+    The store writes it to `mentions.alias` and indexes it in the `mentions` full-text column, so a paper that
+    says "Next GEM" is found by a search for that phrase as well as by the canonical name "Chromium"."""
+
+    alias: str = ""
+
+
+@dataclass
 class Entry:
     id: str
     name: str
@@ -154,7 +164,8 @@ class Gazetteer:
             return []
         low = text.lower() if _prefilter else ""
         taken: List[Tuple[int, int]] = []
-        hits: Dict[str, Mention] = {}
+        hits: Dict[str, MatchedMention] = {}
+        aliases: Dict[str, List[str]] = {}
         for pat in self._patterns:
             if _prefilter and pat.token and pat.token not in low:
                 continue
@@ -169,12 +180,14 @@ class Gazetteer:
                         continue
                 taken.append(span)
                 e = pat.entry
+                if pat.alias not in aliases.setdefault(e.id, []):
+                    aliases[e.id].append(pat.alias)
                 if e.id in hits:
                     hits[e.id].count += 1
                     continue
                 lo, hi = max(0, span[0] - SNIPPET_RADIUS), min(len(text), span[1] + SNIPPET_RADIUS)
                 snippet = re.sub(r"\s+", " ", text[lo:hi]).strip()
-                hits[e.id] = Mention(
+                hits[e.id] = MatchedMention(
                     paper_id=paper_id,
                     kind=e.kind,
                     entity_id=e.id,
@@ -186,6 +199,8 @@ class Gazetteer:
                     count=1,
                     snippet=snippet,
                 )
+        for eid, hit in hits.items():
+            hit.alias = "; ".join(aliases.get(eid, []))
         return list(hits.values())
 
     def find_in_sections(self, paper, sections: Sequence[str]) -> List[Mention]:

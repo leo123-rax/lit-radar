@@ -2,14 +2,17 @@
 wiring of the archive / signal / citation adapters, tracked-author caps and the WAL checkpoint."""
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
 from litradar import pipeline as pl
 from litradar.config import Settings
 from litradar.digest import render
-from litradar.models import ArchiveRecord, Author, NewsItem, Paper
+from litradar.models import ArchiveRecord, Author, Mention, NewsItem, Paper
 from litradar.pipeline import Pipeline
+
+JATS = (Path(__file__).parent / "fixtures" / "sample_jats.xml").read_bytes()
 
 PID = "doi:10.1101/2026.10.01.777"
 METHODS = "Libraries were sequenced on a Revio system (PacBio) and a NovaSeq X Plus."
@@ -112,7 +115,13 @@ def test_restricted_licence_keeps_derived_facts_but_no_text(tmp_path, monkeypatc
     assert row["fulltext_available"] == 1  # the text was parsed, which is what the count reports
     assert {("pacb-revio", "methods"), ("ilmn-novaseq-x", "methods")} <= _sections(pipe.store)
     assert rep["counts"]["fulltext.policy_facts_only"] == 1 and rep["counts"]["fulltext.biorxiv"] == 1
-    assert pipe.store.search("Revio") == []  # nothing of the restricted text is searchable
+    # nothing of the restricted TEXT is searchable: the Methods words are not indexed in any text column ...
+    assert pipe.store.search("Libraries sequenced") == []
+    assert pipe.store.search("Revio", sections=["methods", "body"]) == []
+    # ... but the derived fact (the entity named in the Methods) is, through the `mentions` column, so search
+    # agrees with `litradar entity pacb-revio` on which papers used the instrument
+    assert [r["id"] for r in pipe.store.search("Revio")] == [PID]
+    assert [r["id"] for r in pipe.store.search("Revio", sections=["mentions"])] == [PID]
     pipe.store.close()
 
     # a metadata-only re-ingest keeps the derived facts although no text is stored
@@ -375,4 +384,287 @@ def test_successful_run_checkpoints_and_records_the_run(tmp_path, monkeypatch):
     assert not wal.exists() or wal.stat().st_size == 0
     assert pipe.store.conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
     assert rep["counts"]["papers.new"] == 1
+    assert rep["started"] <= rep["finished"] and rep["since"] == WINDOW[0]
     pipe.store.close()
+
+
+# ---- tracked-author name matching -----------------------------------------------------------------
+def test_norm_name_requires_full_given_name_and_handles_last_first():
+    assert pl._norm_name("Daniel G. Anderson") == "daniel anderson" == pl._norm_name("Anderson, Daniel G.") == pl._norm_name("Daniel Anderson")
+    assert pl._norm_name("Feng Zhang") == "feng zhang" == pl._norm_name("Zhang, Feng") == pl._norm_name("Féng  Zhang")
+    for initials_only in ("Zhang F", "Zhang, F.", "F. Zhang", "Anderson, D. J.", "D. J. Anderson", "J Doe", "Zhang F."):
+        assert pl._norm_name(initials_only) == "", initials_only
+    assert pl._norm_name("Dana Pe'er") == pl._norm_name("Dana Pe’er") == "dana peer"
+    assert pl._norm_name("Jean-Pierre O'Brien") == "jean obrien"
+    assert pl._norm_name("") == "" and pl._norm_name("Consortium") == "consortium"
+    assert pl._display_key("  Fei   Chen ") == "fei chen"
+
+
+def test_name_matches_reject_initials_and_other_openalex_ids(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    pipe = Pipeline(settings, http=FakeHttp())
+    pipe.tracked = {"feng zhang": [("Feng Zhang", "gene_editing")], "daniel anderson": [("Daniel G. Anderson", "delivery")]}
+    pipe.tracked_display = {"feng zhang": [("Feng Zhang", "gene_editing")], "daniel g. anderson": [("Daniel G. Anderson", "delivery")],
+                            "j. craig venter": [("J. Craig Venter", "synthesis")]}
+    pipe.tracked_ids = {"A1": [("Feng Zhang", "gene_editing")]}
+    pipe.tracked_id_for = {("Feng Zhang", "gene_editing"): "A1"}
+
+    def paper(i, *authors):
+        return _preprint(id=f"doi:10.1101/n{i}", doi=f"10.1101/n{i}", title=f"Paper {i}", fulltext_url="", authors=list(authors))
+
+    papers = [
+        paper(1, Author(name="Zhang F"), Author(name="Anderson, D. J.")),  # surname + initial: never a match
+        paper(2, Author(name="Feng Zhang")),  # full name, record without author ids: provisional
+        paper(3, Author(name="Feng Zhang", openalex_id="A999")),  # same name, a different id: another person
+        paper(4, Author(name="Feng Zhang", openalex_id="A1")),  # the configured id
+        paper(5, Author(name="Daniel Anderson")),  # full given name + surname, no id configured
+        paper(6, Author(name="Zhang, Feng")),  # Last, First form
+        paper(7, Author(name="J. Craig Venter")),  # exact display name when the normalised key is an initial
+    ]
+    rep = _run(pipe, monkeypatch, papers, attach=_no_attach)
+    hits = {(h["id"], h["author_name"], h["matched_by"]) for h in pipe.store.tracked_hits_in_window(*WINDOW)}
+    assert hits == {
+        ("doi:10.1101/n2", "Feng Zhang", "name_no_ids"),
+        ("doi:10.1101/n4", "Feng Zhang", "openalex_id"),
+        ("doi:10.1101/n5", "Daniel G. Anderson", "name"),
+        ("doi:10.1101/n6", "Feng Zhang", "name_no_ids"),
+        ("doi:10.1101/n7", "J. Craig Venter", "name"),
+    }
+    assert rep["counts"]["tracked_hits.name_rejected_other_id"] == 1
+    md = render.render(pipe.store, *WINDOW, settings.radar, run_report=rep)["markdown"]
+    assert md.count("the record carried no OpenAlex author ids, so the configured id could not be checked") == 2
+    assert md.count("add the OpenAlex id to make it exact") == 2
+    assert "Paper 1" not in md[md.index("## Tracked researchers"): md.index("## Grants")]
+    pipe.store.close()
+
+
+def test_tracked_lists_are_built_from_subgroup_config(tmp_path):
+    pipe = Pipeline(_settings(tmp_path), http=FakeHttp())
+    pipe.subgroups = [{"id": "g", "tracked_authors": [{"name": "Fei Chen", "openalex_id": ""}, {"name": "Sarah A. Teichmann", "openalex_id": "A5"}, {"name": "J. Craig Venter", "openalex_id": ""}]}]
+    pipe2 = Pipeline.__new__(Pipeline)
+    pipe2.__dict__.update(pipe.__dict__)
+    pipe2.tracked, pipe2.tracked_display, pipe2.tracked_ids, pipe2.tracked_id_for = {}, {}, {}, {}
+    for g in pipe2.subgroups:
+        for a in g["tracked_authors"]:
+            key = pl._norm_name(a["name"])
+            if key:
+                pipe2.tracked.setdefault(key, []).append((a["name"], g["id"]))
+            pipe2.tracked_display.setdefault(pl._display_key(a["name"]), []).append((a["name"], g["id"]))
+            if a["openalex_id"]:
+                pipe2.tracked_ids.setdefault(a["openalex_id"], []).append((a["name"], g["id"]))
+                pipe2.tracked_id_for[(a["name"], g["id"])] = a["openalex_id"]
+    assert set(pipe2.tracked) == {"fei chen", "sarah teichmann"}  # the initial-only key is not a name key ...
+    assert "j. craig venter" in pipe2.tracked_display  # ... but the display name still matches exactly
+    assert pipe2.tracked_id_for == {("Sarah A. Teichmann", "g"): "A5"}
+    pipe.store.close()
+
+
+# ---- source failures reach the run's error list --------------------------------------------------
+def test_openalex_query_failures_are_reported(tmp_path, monkeypatch, caplog):
+    settings = _settings(tmp_path, sources={"openalex": {"enabled": True, "topics": True, "company_authors": True, "tracked_authors": False, "journals": False}})
+    pipe = Pipeline(settings, http=FakeHttp())
+    pipe.subgroups = [{"id": "g1", "openalex_topics": ["T1"], "keywords": ["x"]}, {"id": "g2", "openalex_topics": ["T2"], "keywords": []}]
+    err = "HTTP 400: Invalid query parameters error: grants is not a valid select field"
+
+    def works(http, filters, mailto="", api_key="", max_records=10000, select=None, extra_params=None, state=None):
+        if state is not None:
+            state["error"] = err
+        return iter(())
+
+    monkeypatch.setattr(pl.openalex_src, "works", works)
+    with caplog.at_level(logging.WARNING, logger="litradar.pipeline"):
+        papers = pipe.fetch_papers(*WINDOW, only=["openalex"])
+    assert papers == {}
+    assert pipe.errors == [f"openalex: company_authors: 1 of 1 query failed ({err})", f"openalex: topics: 2 of 2 queries failed ({err})"]
+    assert pipe.counts["openalex.topics_failed_queries"] == 2
+    assert sum("openalex topics query failed" in r.message for r in caplog.records) == 2
+    from litradar.incremental import error_sources
+    assert error_sources(pipe.errors) == ["openalex"]
+
+    # a transport failure that leaves no state message is detected from the client's failure counter
+    class CountingHttp(FakeHttp):
+        def __init__(self):
+            self.stats = {"requests": 0, "failures": 0}
+
+    pipe2 = Pipeline(settings, http=CountingHttp())
+    pipe2.subgroups = pipe.subgroups
+
+    def works2(http, filters, *a, **k):
+        http.stats["failures"] += 1
+        return iter(())
+
+    monkeypatch.setattr(pl.openalex_src, "works", works2)
+    pipe2.fetch_papers(*WINDOW, only=["openalex"])
+    assert any("1 request(s) failed, no records" in e for e in pipe2.errors)
+    # a query that succeeds reports nothing
+    pipe3 = Pipeline(settings, http=FakeHttp())
+    pipe3.subgroups = pipe.subgroups
+    monkeypatch.setattr(pl.openalex_src, "works", lambda http, filters, *a, state=None, **k: (state.__setitem__("complete", True), iter(()))[1])
+    pipe3.fetch_papers(*WINDOW, only=["openalex"])
+    assert pipe3.errors == []
+
+
+def test_blocked_and_dead_hosts_land_in_run_errors_and_the_digest(tmp_path, monkeypatch):
+    class HostHttp(FakeHttp):
+        def __init__(self):
+            self.stats = {"requests": 9, "failures": 9, "blocked_skips": 8}
+
+        def host_report(self):
+            return {
+                "blocked_hosts": ["api.gdeltproject.org", "export.arxiv.org"],
+                "failed_only_hosts": ["api.semanticscholar.org", "www.example.org"],
+                "failures_by_host": {"export.arxiv.org": 2, "api.semanticscholar.org": 4, "www.example.org": 1, "api.gdeltproject.org": 2},
+                "successes_by_host": {}, "blocked_skips_by_host": {"export.arxiv.org": 7, "api.gdeltproject.org": 1},
+                "circuit_threshold": {"export.arxiv.org": 2, "api.gdeltproject.org": 2},
+            }
+
+    pipe = Pipeline(_settings(tmp_path), http=HostHttp())
+    pipe.errors.append("gdelt: host rate-limited (HTTP 429) during the run; 1 company quer(y/ies) skipped")  # the source's own report
+    rep = _run(pipe, monkeypatch, [_preprint(fulltext_url="")], attach=_no_attach)
+    errs = rep["errors"]
+    assert sum(e.startswith("gdelt:") for e in errs) == 1  # not listed twice
+    assert "arxiv: host export.arxiv.org rate-limited (HTTP 429 2 times in a row); skipped for the rest of the run, 7 request(s) not sent" in errs
+    assert "semantic_scholar: all 4 request(s) to api.semanticscholar.org failed; no successful response this run" in errs
+    assert "www.example.org: all 1 request(s) to www.example.org failed; no successful response this run" in errs  # unknown host: named as itself
+    assert rep["http"]["blocked_hosts"] == ["api.gdeltproject.org", "export.arxiv.org"] and rep["http"]["failures_by_host"]["export.arxiv.org"] == 2
+    from litradar.incremental import error_sources
+    assert error_sources(errs) == ["gdelt", "arxiv", "semantic_scholar", "www.example.org"]
+    md = render.render(pipe.store, *WINDOW, pipe.settings.radar, run_report=rep)["markdown"]
+    assert "Hosts skipped after repeated HTTP 429 in that run: api.gdeltproject.org, export.arxiv.org" in md
+    assert "Source errors in that run (4): gdelt:" in md and "arxiv: host export.arxiv.org rate-limited" in md
+    pipe.store.close()
+
+
+def test_semantic_scholar_total_failure_is_an_error(tmp_path, monkeypatch):
+    pipe = Pipeline(_settings(tmp_path), http=FakeHttp())
+    summary = {"candidates": 2848, "requested": 0, "matched": 0, "updated": 0, "unmatched": 0, "batches": 2, "failed_batches": 2, "citations": {}}
+    monkeypatch.setattr(pl.s2_src, "enrich_citations", lambda *a, **k: dict(summary))
+    rep = _run(pipe, monkeypatch, [_preprint(fulltext_url="")], attach=_no_attach, only=("biorxiv", "semantic_scholar"))
+    assert rep["errors"] == ["semantic_scholar: 2 batch(es) failed and no DOI was matched (0 of 2848 candidate DOIs requested)"]
+    # a partial failure with matches is not an error (it is counted)
+    monkeypatch.setattr(pl.s2_src, "enrich_citations", lambda *a, **k: dict(summary, failed_batches=1, matched=5, requested=500))
+    pipe2 = Pipeline(_settings(tmp_path), http=FakeHttp())
+    rep2 = _run(pipe2, monkeypatch, [_preprint(fulltext_url="")], attach=_no_attach, only=("biorxiv", "semantic_scholar"))
+    assert rep2["errors"] == [] and rep2["counts"]["semantic_scholar.failed_batches"] == 1
+    pipe2.store.close()
+
+
+def test_sec_skip_message_is_prefixed_with_its_source_id(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, news={"gdelt": False})
+    settings.contact_email = ""
+    pipe = Pipeline(settings, http=FakeHttp())
+    pipe.feeds = []
+    monkeypatch.setattr(pl.rss_src, "news_items", lambda *a, **k: iter(()))
+    pipe.fetch_news("2026-10-10")
+    assert len(pipe.errors) == 1 and pipe.errors[0].startswith("sec: SEC 8-K feeds skipped (LITRADAR_CONTACT_EMAIL not set;")
+    from litradar.incremental import error_sources
+    assert error_sources(pipe.errors) == ["sec"]  # so the coverage hint reads `--sources sec`, not `--sources SEC 8-K feeds skipped`
+    pipe.store.close()
+
+
+# ---- abstracts recovered from the full-text XML -------------------------------------------------
+def test_missing_abstract_is_filled_from_the_fulltext_xml(tmp_path, monkeypatch):
+    class XmlHttp(FakeHttp):
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, **k):
+            self.calls += 1
+            r = type("R", (), {})()
+            r.status_code, r.content = 200, JATS
+            return r
+
+    def attach(http, p):
+        p.sections["methods"] = METHODS
+        p.fulltext_available = True
+        return True
+
+    http = XmlHttp()
+    pipe = Pipeline(_settings(tmp_path), http=http)
+    rep = _run(pipe, monkeypatch, [_preprint(abstract="")], attach=attach)
+    row = pipe.store.get_paper(PID)
+    assert row["abstract"].startswith("We profile tumours with a multiplexed in situ assay") and "The assay resolves single cells." in row["abstract"]
+    assert json.loads(row["extra_json"])["abstract_source"] == "fulltext_xml"
+    assert rep["counts"]["fulltext.abstract_from_jats"] == 1 and http.calls == 1
+    assert "abstracts recovered from full-text XML 1" in render.render(pipe.store, *WINDOW, pipe.settings.radar, run_report=rep)["markdown"]
+    # a record that already has an abstract is left alone and the XML is not re-read
+    other = _preprint(id="doi:10.1101/other", doi="10.1101/other", abstract="Own abstract.")
+    _run(pipe, monkeypatch, [other], attach=attach)
+    assert http.calls == 1 and pipe.store.get_paper(other.id)["abstract"] == "Own abstract."
+    pipe.store.close()
+    # the Europe PMC path reads the XML through the source's (cached) fetcher
+    monkeypatch.setattr(pl.epmc_src, "attach_fulltext", attach)
+    monkeypatch.setattr(pl.epmc_src, "fulltext_xml", lambda http, pmcid, retries=1: JATS)
+    ep = _preprint(id="doi:10.1000/epmc1", doi="10.1000/epmc1", source="europepmc", abstract="", fulltext_url="", extra={"pmcid": "PMC1", "is_open_access": "Y"})
+    pipe3 = Pipeline(_settings(tmp_path), http=FakeHttp())
+    pipe3.attach_fulltext({ep.id: ep})
+    assert ep.abstract.startswith("We profile tumours") and pipe3.counts["fulltext.europepmc"] == 1
+    pipe3.store.close()
+
+
+# ---- rematch keeps what it cannot re-derive -----------------------------------------------------
+def test_rematch_keeps_mentions_whose_source_text_is_not_stored(tmp_path):
+    pipe = Pipeline(_settings(tmp_path), http=object())
+    p = _preprint(license="cc_by")  # 'full' policy, but this record never had its text stored
+    pipe.store.upsert_paper(p)
+    pipe.store.replace_mentions(PID, [
+        Mention(PID, "company", "acme", "Acme Genomics", "", "", "", "methods", 2, "kits from Acme Genomics"),  # from text that is not stored
+        Mention(PID, "company", "acme", "Acme Genomics", "", "", "", "coi", 1, "equity in Acme Genomics"),
+        Mention(PID, "company", "acme", "Acme Genomics", "", "", "", "ack", 1, "thanks"),
+        Mention(PID, "instrument", "txg-xenium", "Xenium", "10x Genomics", "TXG", "spatial", "abstract", 1, "..."),
+        Mention(PID, "instrument", "stale", "Stale Thing", "", "", "", "abstract", 1, "..."),  # the abstract IS stored: re-derived
+    ])
+    pipe.store.commit()
+    assert Pipeline.underivable_sections(pipe.paper_from_row(pipe.store.get_paper(PID))) == ("methods", "funding", "coi", "ack", "data_availability", "body")
+    rep = pipe.rematch()
+    secs = _sections(pipe.store)
+    assert {("acme", "methods"), ("acme", "coi"), ("acme", "ack"), ("txg-xenium", "abstract")} <= secs
+    assert ("stale", "abstract") not in secs
+    assert rep["counts"]["fulltext.purged"] == 0
+    assert [r["id"] for r in pipe.store.search("Acme")] == [PID]  # the kept facts stay searchable
+    # with Methods text stored, methods mentions ARE re-derived (a stale one goes); coi/ack without text stay
+    p2 = _preprint(id="doi:10.1101/with-text", doi="10.1101/with-text", license="cc_by")
+    p2.sections = {"methods": METHODS}
+    p2.fulltext_available = True
+    pipe.store.upsert_paper(p2)
+    pipe.store.replace_mentions(p2.id, [
+        Mention(p2.id, "instrument", "stale", "Stale Thing", "", "", "", "methods", 1, ""),
+        Mention(p2.id, "company", "acme", "Acme Genomics", "", "", "", "coi", 1, ""),
+    ])
+    pipe.store.commit()
+    assert Pipeline.underivable_sections(pipe.paper_from_row(pipe.store.get_paper(p2.id))) == ("funding", "coi", "ack", "data_availability", "body")
+    pipe.rematch()
+    secs2 = _sections(pipe.store, p2.id)
+    assert ("stale", "methods") not in secs2 and ("pacb-revio", "methods") in secs2 and ("acme", "coi") in secs2
+    pipe.store.close()
+
+
+# ---- journal names, FTS maintenance --------------------------------------------------------------
+def test_journal_names_are_canonicalised_from_journals_yaml(tmp_path, monkeypatch):
+    pipe = Pipeline(_settings(tmp_path), http=FakeHttp())
+    pipe.journal_name_by_lower = {"nature methods": "Nature Methods"}
+    pipe.journal_name_by_issn = {"1548-7091": "Nature Methods"}
+    assert pipe.canonical_journal("Nature methods") == "Nature Methods" and pipe.canonical_journal("NATURE METHODS ") == "Nature Methods"
+    assert pipe.canonical_journal("", ["1548-7091"]) == "Nature Methods" and pipe.canonical_journal("Cell") == "Cell"
+    assert pipe.canonical_journal("Some Other Journal", ["1548-7091"]) == "Some Other Journal"  # a real name is never overridden by an ISSN
+    papers = [
+        _preprint(id="doi:10.1038/a", doi="10.1038/a", kind="article", journal="Nature methods", fulltext_url=""),
+        _preprint(id="doi:10.1038/b", doi="10.1038/b", kind="article", journal="", fulltext_url="", extra={"issn": ["1548-7091"]}),
+    ]
+    _run(pipe, monkeypatch, papers, attach=_no_attach)
+    assert pipe.store.get_paper("doi:10.1038/a")["journal"] == "Nature Methods" == pipe.store.get_paper("doi:10.1038/b")["journal"]
+    pipe.store.close()
+
+
+def test_run_merges_fts_segments_only_after_many_rewrites(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, fts_optimize_after=3)
+    pipe = Pipeline(settings, http=FakeHttp())
+    papers = [_preprint(id=f"doi:10.1101/o{i}", doi=f"10.1101/o{i}", fulltext_url="") for i in range(4)]
+    rep = _run(pipe, monkeypatch, papers, attach=_no_attach)
+    assert rep["counts"]["fts.rows_rewritten"] >= 4 and rep["counts"]["fts.optimized"] == 1
+    pipe.store.close()
+    pipe2 = Pipeline(settings, http=FakeHttp())
+    rep2 = _run(pipe2, monkeypatch, papers, attach=_no_attach)  # the identical re-ingest rewrites nothing
+    assert rep2["counts"]["fts.rows_unchanged"] == 4 and rep2["counts"]["fts.rows_rewritten"] == 0 and "fts.optimized" not in rep2["counts"]
+    assert rep2["counts"]["papers.reingested"] == 4
+    pipe2.store.close()

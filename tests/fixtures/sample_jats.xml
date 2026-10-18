@@ -11,6 +11,8 @@
       <aff id="a2"><label>2</label>Department of Genetics, Example University, Boston, MA, USA</aff>
       <funding-group><award-group><funding-source>National Institutes of Health</funding-source><award-id>R01HG000001</award-id></award-group></funding-group>
       <author-notes><fn fn-type="conflict"><p>J.D. is an employee of 10x Genomics. R.R. has received research support from Illumina.</p></fn></author-notes>
+      <abstract abstract-type="graphical"><p><graphic xlink:href="toc.jpg"/></p></abstract>
+      <abstract><title>Abstract</title><p>We profile tumours with a multiplexed in situ assay and compare it with sequencing-based spatial methods.</p><p>The assay resolves single cells.</p></abstract>
     </article-meta>
   </front>
   <body>

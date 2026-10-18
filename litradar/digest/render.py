@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ..concepts import render_concepts_markdown
 from ..discovery import render_candidates_markdown
-from ..rank.heuristics import is_platform
-from ..store import Store
+from ..rank.heuristics import company_role
+from ..store import Store, _json_dict
 from ..trends import compute_trends, render_trends_markdown
 
 
@@ -38,18 +39,30 @@ SIGNAL_FEED_LABELS = {
 }
 SIGNAL_FEEDS = tuple(SIGNAL_FEED_LABELS)
 SEQUENCING_ARCHIVES = ("sra", "ena", "geo")
+SEQUENCING_ARCHIVE_LABELS = {"sra": "NCBI SRA", "ena": "ENA", "geo": "GEO"}
+# how a tracked-author hit was made -> the caveat shown next to it
+TRACKED_HINTS = {
+    "openalex_id": "",
+    "name": " <sub>(name match; add the OpenAlex id to make it exact)</sub>",
+    "name_no_ids": " <sub>(name match; the record carried no OpenAlex author ids, so the configured id could not be checked)</sub>",
+}
+SUMMARY_CHARS = 420  # abstract / fallback summary length in the top list
+_COI_SECTIONS = ("coi", "funding", "ack")
 
 _URL_RE = re.compile(r"^https?://[^\s<>\"'`]+$", re.I)
 _WS_RE = re.compile(r"\s+")
+_INTRO_HEADING_RE = re.compile(r"^(introduction|background|main|main text|summary)\b[\s:.\-]*", re.I)
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def esc(value: Any) -> str:
     """Make untrusted text inert inside Markdown: no HTML, no table breaks, no accidental block syntax.
 
-    Escapes &, <, >, | and [ ], collapses whitespace (so a value stays on one line / in one cell) and prefixes a
-    leading #, -, +, * or > with a backslash so a value cannot open a heading, list or quote."""
+    Escapes <, >, | and [ ], collapses whitespace (so a value stays on one line / in one cell) and prefixes a
+    leading #, -, +, * or > with a backslash so a value cannot open a heading, list or quote. A bare & is left
+    alone: it is harmless in Markdown and `&amp;` would leak into plain-text readers (e-mail, chat)."""
     s = _WS_RE.sub(" ", str(value if value is not None else "")).strip()
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;")
+    s = s.replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;")
     s = s.replace("[", "\\[").replace("]", "\\]").replace("](", "]\\(")
     if s[:1] in ("#", "-", "+", "*") or s[:4] == "&gt;":
         s = "\\" + s
@@ -129,6 +142,48 @@ def _archive_table(rows: List[Dict[str, Any]], n: int, first_col: str = "Instrum
     return _table(headers, body)
 
 
+def fallback_summary(store: Store, paper: Dict[str, Any], max_chars: int = SUMMARY_CHARS) -> Tuple[str, str]:
+    """A summary for a top-list entry whose record has no abstract: the opening of the stored full-text body
+    (its introduction), else the first sentence of the stored Methods. Returns (text, label); ('', '') when the
+    store holds no text for the paper (facts-only policy, metadata-only record)."""
+    body = store.body_for(paper["id"], rowid=paper.get("_rowid"))
+    if body:
+        text = _INTRO_HEADING_RE.sub("", _WS_RE.sub(" ", body).strip())
+        if text:
+            return text[:max_chars].rstrip() + ("…" if len(text) > max_chars else ""), "(from full text; no abstract on record)"
+    methods = (_json_dict(paper.get("sections_json")).get("methods") or "").strip()
+    if methods:
+        first = _SENTENCE_END_RE.split(_WS_RE.sub(" ", methods), maxsplit=1)[0]
+        return first[:max_chars].rstrip() + ("…" if len(first) > max_chars else ""), "(first Methods sentence; no abstract on record)"
+    return "", ""
+
+
+def _company_tail(mentions: Sequence[Dict[str, Any]], company_types: Dict[str, str]) -> List[str]:
+    """The per-paper 'Companies / Institutes / AI tools' fragments, with a role tag for entities that appear only in
+    funding, competing-interest or acknowledgement text (so a disclosed equity stake does not read like a supplier)."""
+    sections: Dict[str, Set[str]] = defaultdict(set)
+    role_of: Dict[str, str] = {}
+    for m in mentions:
+        if m["kind"] != "company" or m["entity_id"].startswith("unlisted:"):
+            continue
+        sections[m["entity_name"]].add(m["section"])
+        role_of[m["entity_name"]] = company_role(m["entity_id"], company_types)
+
+    def label(name: str) -> str:
+        secs = sections[name]
+        tag = ""
+        if secs and secs <= set(_COI_SECTIONS):
+            tag = " (COI)" if "coi" in secs else (" (funding)" if "funding" in secs else " (ack)")
+        return esc(name) + tag
+
+    out = []
+    for role, heading in (("company", "Companies"), ("institute", "Institutes / funders"), ("ai_tool", "AI tools")):
+        names = sorted(n for n, r in role_of.items() if r == role)
+        if names:
+            out.append(f"{heading}: " + ", ".join(label(n) for n in names))
+    return out
+
+
 def render(
     store: Store,
     since: str,
@@ -136,19 +191,30 @@ def render(
     cfg: Dict[str, Any],
     run_report: Optional[Dict[str, Any]] = None,
     company_types: Optional[Dict[str, str]] = None,
+    company_names: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Build the digest. `company_types` maps gazetteer company id -> type (tools, diagnostics, synthesis, ai_bio,
     pharma, cro, institute, software / ai_tool); the caller builds it from config/companies.yaml (see
-    Pipeline.company_types). Without it every company lands in the main table."""
+    Pipeline.company_types). Without it every company lands in the main table. `company_names` (id -> display
+    name) labels the news groups; ids without a name fall back to the mentions table, then to the id itself.
+
+    Table budgets (cfg['digest']): `platforms_table_n` (default: `instruments_table_n`, 40) and `lab_tools_table_n`
+    (25) are separate, so reagent and QC products never push a platform out of the platform table; a cut table
+    says how many rows it dropped."""
     company_types = {k: (v or "").lower() for k, v in (company_types or {}).items()}
     dcfg = cfg.get("digest") or {}
     top_n = int(dcfg.get("top_n", 25))
     news_n = int(dcfg.get("news_n", 40))
     signals_n = int(dcfg.get("signals_n", 15))
+    platforms_n = int(dcfg.get("platforms_table_n", dcfg.get("instruments_table_n", 40)))
+    tools_n = int(dcfg.get("lab_tools_table_n", 25))
     title = str(dcfg.get("title", "Science literature radar"))
+    rendered_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     top = store.top_papers(since, until, limit=top_n)
     conversions = store.preprint_conversions(since, until)
-    instruments = store.instrument_counts(since, until, limit=int(dcfg.get("instruments_table_n", 40)))
+    platforms = store.instrument_counts(since, until, limit=platforms_n, platform_only=True)
+    infra = store.instrument_counts(since, until, limit=tools_n, platform_only=False)
+    instruments = platforms + infra
     archive = store.archive_instrument_counts(since, until, archives=SEQUENCING_ARCHIVES)
     archive_proteomics = store.archive_instrument_counts(since, until, archives=("pride",))
     archive_singlecell = store.archive_instrument_counts(since, until, archives=("cellxgene",))
@@ -163,19 +229,23 @@ def render(
     in_window = store.papers_in_window(since, until)
     has_history = store.has_history_before(since)
     n_inst = store.distinct_entities_in_window(since, until, "instrument")
+    n_platforms = store.distinct_entities_in_window(since, until, "instrument", platform_only=True)
+    n_infra = max(0, n_inst - n_platforms)
     n_comp = store.distinct_entities_in_window(since, until, "company")
-    platforms = [r for r in instruments if is_platform(r.get("category") or "")]
-    infra = [r for r in instruments if not is_platform(r.get("category") or "")]
+    n_fulltext = sum(1 for p in in_window if p.get("fulltext_available"))
+    names = store.entity_names("company")
+    names.update({k: v for k, v in (company_names or {}).items() if v})
 
     md: List[str] = []
     md.append(f"# {esc(title)}: {esc(since)} to {esc(until)}\n")
     md.append(
-        f"{len(in_window)} new papers and preprints in the window; {sum(1 for p in in_window if p.get('fulltext_available'))} with parsed full text; "
+        f"{len(in_window)} new papers and preprints in the window; {n_fulltext} with parsed full text; "
         f"{n_inst} instrument entities and {n_comp} companies detected; {sum(int(r['experiments']) for r in archive)} new sequencing experiments in public archives"
         + (f"; {sum(int(r['experiments']) for r in archive_proteomics)} proteomics datasets" if archive_proteomics else "")
         + (f"; {sum(int(r['experiments']) for r in archive_singlecell)} single-cell / spatial dataset assays" if archive_singlecell else "")
         + ".\n"
     )
+    md.append(f"_Rendered {rendered_at}; every count is a snapshot of the database at that moment._\n")
 
     # ---- top innovations
     md.append(f"## Top {len(top)} innovations\n")
@@ -191,7 +261,6 @@ def render(
             if not isinstance(llm, dict):
                 llm = None
         inst = sorted({m["entity_name"] for m in p["mentions"] if m["kind"] == "instrument"})
-        comp = sorted({m["entity_name"] for m in p["mentions"] if m["kind"] == "company" and not m["entity_id"].startswith("unlisted:")})
         venue = esc(p.get("journal") or p.get("source") or "") + (" (preprint)" if p.get("kind") == "preprint" else "")
         for pre in p.get("preprints") or []:
             venue += f" (also as preprint {esc(pre.get('pub_date') or 'n.d.')})"
@@ -207,13 +276,17 @@ def render(
             md.append(f"\n<sub>{flags}</sub>  ")
         else:
             abstract = (p.get("abstract") or "").strip()
+            label = ""
             if abstract:
-                md.append(f"\n{esc(abstract[:420].rstrip())}{'…' if len(abstract) > 420 else ''}  ")
+                abstract = abstract[:SUMMARY_CHARS].rstrip() + ("…" if len(abstract) > SUMMARY_CHARS else "")
+            else:
+                abstract, label = fallback_summary(store, p)
+            if abstract:
+                md.append(f"\n{esc(abstract)}" + (f" <sub>{label}</sub>" if label else "") + "  ")
         tail = []
         if inst:
             tail.append("Instruments: " + ", ".join(esc(x) for x in inst))
-        if comp:
-            tail.append("Companies: " + ", ".join(esc(x) for x in comp))
+        tail.extend(_company_tail(p["mentions"], company_types))
         tail.append("Signals: " + esc(p.get("reasons") or ""))
         md.append("\n<sub>" + " · ".join(tail) + "</sub>\n")
     if conversions:
@@ -230,20 +303,29 @@ def render(
         ["Platform", "Vendor", "Ticker", "Papers", "Example"],
         [[esc(r["entity_name"]), esc(r["vendor"]), esc(r["ticker"]), esc(r["papers"]), _link(r["example_title"] or "", r["example_url"], max_len=70)] for r in platforms],
     ))
+    if n_platforms > len(platforms):
+        md.append(f"_… and {n_platforms - len(platforms)} more platform(s) named in the window; the table shows the {len(platforms)} with most papers (digest.platforms_table_n)._\n")
     md.append("### Lab infrastructure and consumables named\n")
     md.append("Library prep, QC, PCR, automation, imaging, cytometry and bioprocess products. Useful for supplier share, not for innovation.\n")
     md.append(_table(
         ["Product line", "Vendor", "Ticker", "Papers"],
-        [[r["entity_name"], r["vendor"], r["ticker"], r["papers"]] for r in infra[:25]],
+        [[r["entity_name"], r["vendor"], r["ticker"], r["papers"]] for r in infra],
     ))
+    if n_infra > len(infra):
+        md.append(f"_… and {n_infra - len(infra)} more product line(s) named in the window; the table shows the {len(infra)} with most papers (digest.lab_tools_table_n)._\n")
     if new_instruments and has_history:
         md.append("**First appearance in the corpus this window:** " + ", ".join(f"{esc(r['entity_name'])} ({int(r['papers'])})" for r in new_instruments[:20]) + "\n")
 
     # ---- archives
-    md.append("## Instruments behind newly public sequencing data (NCBI SRA, ENA, GEO)\n")
+    archives_present = {a for r in archive for a in (r.get("archive") or "").split(",") if a}
+    archive_label = ", ".join(SEQUENCING_ARCHIVE_LABELS[a] for a in SEQUENCING_ARCHIVES if a in archives_present) or ", ".join(SEQUENCING_ARCHIVE_LABELS.values())
+    md.append(f"## Instruments behind newly public sequencing data ({archive_label})\n")
     md.append("Each row is a sequencing *experiment* (SRA / ENA) or *series x platform* (GEO) released in the window, with the instrument model the submitter declared (SRA covers submissions worldwide; ENA adds European and Japanese records SRA has not mirrored yet; GEO is the study-level view behind most published expression and single-cell datasets). This is a census of what machines are producing data right now, independent of what gets written up. Deposits lag sequencing by months to years, and clinical or commercial sequencing is never deposited. Models the gazetteer cannot map are grouped under their declared platform, e.g. 'Illumina (model unspecified)'.\n")
-    md.append(_vendor_share_table(archive))
-    md.append(_archive_table(archive, int(dcfg.get("archive_table_n", 30)), show_archive=True))
+    if archive:
+        md.append(_vendor_share_table(archive))
+        md.append(_archive_table(archive, int(dcfg.get("archive_table_n", 30)), show_archive=True))
+    else:
+        md.append("_nothing in this window_\n")
     if strategies:
         md.append("Library strategies: " + ", ".join(f"{esc(s['library_strategy'] or 'n/a')} ({int(s['experiments'])})" for s in strategies) + "\n")
     md.append("### Proteomics instruments behind new datasets (PRIDE)\n")
@@ -297,7 +379,7 @@ def render(
         for grp, rows in by_group.items():
             md.append(f"**{esc(grp)}**\n")
             for t in rows:
-                how = "" if t.get("matched_by") == "openalex_id" else " <sub>(name match; add the OpenAlex id to make it exact)</sub>"
+                how = TRACKED_HINTS.get(str(t.get("matched_by") or ""), " <sub>(name match)</sub>")
                 md.append(f"- {esc(t['author_name'])}: {_link(t['title'], t['url'])} — {esc(t.get('journal') or '')} {esc(t.get('pub_date') or '')}{' (preprint)' if t.get('kind') == 'preprint' else ''}{how}")
             md.append("")
 
@@ -339,7 +421,7 @@ def render(
             general.append(n)
     shown = 0
     for comp_id, items in sorted(by_company.items(), key=lambda kv: -len(kv[1])):
-        md.append(f"**{esc(comp_id)}**")
+        md.append(f"**{esc(names.get(comp_id) or comp_id)}**")
         for n in items[:4]:
             md.append(f"- {_link(n['title'], n['url'])} <sub>{esc(n.get('feed'))} · {esc(n.get('published') or '')}</sub>")
             shown += 1
@@ -367,21 +449,39 @@ def render(
 
     # ---- coverage / methodology
     md.append("## Coverage and method\n")
+    # the window's own numbers come from the database; the run counters below describe one pipeline process
+    by_source: Counter = Counter()
+    ft_by_source: Counter = Counter()
+    for p in in_window:
+        src = str(p.get("source") or "unknown")
+        base = "rss" if src.startswith("rss:") else src
+        by_source[base] += 1
+        if p.get("fulltext_available"):
+            ft_by_source[base] += 1
+    md.append(
+        f"**This window ({esc(since)} to {esc(until)}), counted in the database:** {len(in_window)} papers, {n_fulltext} with parsed full text; by source: "
+        + (", ".join(f"{esc(k)} {v} ({ft_by_source[k]} with full text)" for k, v in by_source.most_common()) or "none")
+        + ".  "
+    )
     if not run_report:
-        row = store.conn.execute("SELECT counts_json FROM runs WHERE since=? AND until=? ORDER BY id DESC LIMIT 1", (since, until)).fetchone()
-        if row and row[0]:
-            try:
-                run_report = json.loads(row[0])
-            except ValueError:
-                run_report = None
+        run_report = _latest_run_report(store, since, until)
     if run_report:
         c = run_report.get("counts", {}) or {}
+        r_since, r_until = str(run_report.get("since") or "?"), str(run_report.get("until") or "?")
+        when = str(run_report.get("finished") or run_report.get("started") or "")[:16].replace("T", " ")
+        same_window = (r_since, r_until) == (since, until)
+        scope = "" if same_window else "; that is NOT this digest's window, so these counters describe that run alone"
         fetched = {k.split(".", 1)[1]: v for k, v in c.items() if k.startswith("fetched.")}
-        md.append("Records pulled per source: " + ", ".join(f"{esc(k)} {esc(v)}" for k, v in sorted(fetched.items())) + ".  ")
         md.append(
-            f"\nUnique papers after de-duplication: {esc(c.get('papers.unique', 0))} ({esc(c.get('papers.new', 0))} new to the database, {esc(c.get('papers.reingested', 0))} already known and merged). "
+            f"\n**Last pipeline run** (finished {esc(when) or 'n/a'} UTC, window {esc(r_since)} to {esc(r_until)}{scope}). "
+            "Records pulled per source in that run, before de-duplication: " + (", ".join(f"{esc(k)} {esc(v)}" for k, v in sorted(fetched.items())) or "none") + ".  "
+        )
+        md.append(
+            f"\nIn that run: unique papers after de-duplication {esc(c.get('papers.unique', 0))} ({esc(c.get('papers.new', 0))} new to the database, {esc(c.get('papers.reingested', 0))} already known and merged). "
             f"Full text parsed: bioRxiv {esc(c.get('fulltext.biorxiv', 0))} (failed {esc(c.get('fulltext.biorxiv_failed', 0))}), Europe PMC {esc(c.get('fulltext.europepmc', 0))} (failed {esc(c.get('fulltext.europepmc_failed', 0))}); "
-            f"stored in full {esc(c.get('fulltext.policy_full', 0))}, facts only (licence does not allow redistribution) {esc(c.get('fulltext.policy_facts_only', 0))}. LLM-scored: {esc(c.get('llm.scored', 0))}.  "
+            f"stored in full {esc(c.get('fulltext.policy_full', 0))}, facts only (licence does not allow redistribution) {esc(c.get('fulltext.policy_facts_only', 0))}"
+            + (f"; abstracts recovered from full-text XML {esc(c.get('fulltext.abstract_from_jats'))}" if c.get("fulltext.abstract_from_jats") else "")
+            + f". LLM-scored: {esc(c.get('llm.scored', 0))}.  "
         )
         arch = {k[len("archive."):-len("_new")]: v for k, v in c.items() if k.startswith("archive.") and k.endswith("_new")}
         if arch:
@@ -393,8 +493,15 @@ def render(
             md.append(f"\nCitation enrichment: {esc(c.get('semantic_scholar.requested', 0))} DOIs looked up, {esc(c.get('semantic_scholar.matched', 0))} matched, {esc(c.get('semantic_scholar.updated', 0))} counts raised.  ")
         if c.get("tracked_hits.name_capped"):
             md.append(f"\nTracked-author name matches dropped by the per-name cap: {esc(c.get('tracked_hits.name_capped'))} (common names; add OpenAlex ids).  ")
+        http = run_report.get("http") or {}
+        if http.get("blocked_hosts"):
+            md.append("\nHosts skipped after repeated HTTP 429 in that run: " + ", ".join(esc(h) for h in http["blocked_hosts"]) + ".  ")
         if run_report.get("errors"):
-            md.append("\nSource errors this run: " + "; ".join(esc(e) for e in run_report["errors"][:10]) + ".  ")
+            md.append(f"\nSource errors in that run ({len(run_report['errors'])}): " + "; ".join(esc(e) for e in run_report["errors"][:10]) + (" …" if len(run_report["errors"]) > 10 else "") + ".  ")
+        else:
+            md.append("\nSource errors in that run: none recorded.  ")
+    else:
+        md.append("\nNo pipeline run is recorded for this database yet.  ")
     md.append(f"\nDatabase totals: {counts['papers']} papers, {counts['mentions']} entity mentions, {counts['archive_records']} archive records, {counts['news_items']} news items. "
               "Scores: a transparent heuristic (journal tier, instruments and companies named, watchlist terms, tracked authors, novelty cues) optionally blended with an LLM rubric. "
               "Only metadata, abstracts and open-licensed full text are stored; for other full text only the derived facts (entity mentions with short snippets) are kept, and subscription content is linked, never copied.\n")
@@ -406,13 +513,38 @@ def render(
                  "instruments": sorted({m["entity_name"] for m in p["mentions"] if m["kind"] == "instrument"}),
                  "companies": sorted({m["entity_name"] for m in p["mentions"] if m["kind"] == "company"})} for p in top],
         "preprint_conversions": conversions,
-        "instruments": instruments, "archive": archive, "archive_proteomics": archive_proteomics, "archive_singlecell": archive_singlecell,
+        "instruments": instruments, "platforms": platforms, "lab_tools": infra,
+        "platforms_total": n_platforms, "lab_tools_total": n_infra,
+        "archive": archive, "archive_proteomics": archive_proteomics, "archive_singlecell": archive_singlecell,
         "companies": companies, "company_groups": {"main": [c["entity_id"] for c in main], "pharma": [c["entity_id"] for c in pharma],
                                                    "institutes": [c["entity_id"] for c in institutes], "ai_tools": [c["entity_id"] for c in ai_tools]},
         "tracked": tracked, "signals": signals,
         "counts": counts, "run": run_report,
     }
     return {"markdown": "\n".join(md), "summary": summary}
+
+
+def _latest_run_report(store: Store, since: str, until: str) -> Optional[Dict[str, Any]]:
+    """The recorded report of the last run for exactly this window, else the last run of all (labelled with its
+    own window by the caller). `started` / `finished` / `since` / `until` are filled from the runs table when the
+    stored report lacks them (reports written before they were recorded there)."""
+    row = store.conn.execute(
+        "SELECT started, finished, since, until, counts_json FROM runs WHERE since=? AND until=? ORDER BY id DESC LIMIT 1", (since, until)
+    ).fetchone()
+    if not row:
+        row = store.conn.execute("SELECT started, finished, since, until, counts_json FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    if not row or not row[4]:
+        return None
+    try:
+        report = json.loads(row[4])
+    except ValueError:
+        return None
+    if not isinstance(report, dict):
+        return None
+    for key, val in (("started", row[0]), ("finished", row[1]), ("since", row[2]), ("until", row[3])):
+        if not report.get(key) and val:
+            report[key] = val
+    return report
 
 
 def split_companies_by_type(companies: Sequence[Dict[str, Any]], company_types: Dict[str, str]) -> Dict[str, List[Dict[str, Any]]]:

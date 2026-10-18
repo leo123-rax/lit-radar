@@ -45,3 +45,15 @@ def test_end_to_end_matching_on_fixture():
 def test_garbage_input():
     assert parse_jats(b"not xml at all") == {} or isinstance(parse_jats(b"not xml at all"), dict)
     assert parse_jats(b"") == {}
+
+
+def test_abstract_is_extracted_skipping_graphical_and_label():
+    d = parse_jats(FIX.read_bytes())
+    assert d["abstract"].startswith("We profile tumours with a multiplexed in situ assay") and "The assay resolves single cells." in d["abstract"]
+    assert not d["abstract"].lower().startswith("abstract") and "toc.jpg" not in d["abstract"]
+    assert "We profile tumours" not in d["methods"] and "We profile tumours" not in d["body"]
+    assert parse_jats(b"<article><front><article-meta/></front><body><sec><title>Methods</title><p>x</p></sec></body></article>")["abstract"] == ""
+    # a structured abstract keeps its section labels; a sub-article abstract is ignored
+    xml = (b"<article><front><article-meta><abstract><sec><title>Background</title><p>Why.</p></sec><sec><title>Results</title><p>What.</p></sec></abstract>"
+           b"</article-meta></front><body/><sub-article><front-stub><abstract><p>Not this one.</p></abstract></front-stub></sub-article></article>")
+    assert parse_jats(xml)["abstract"] == "Background Why. Results What."

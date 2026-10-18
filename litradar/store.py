@@ -1,13 +1,22 @@
 """SQLite + FTS5 store: papers, mentions, scores, archive records, news, runs.
 
 One file, zero servers. The FTS table carries title, abstract, methods, funding, COI,
-affiliations and (when available) the full body so `litradar search` answers questions
-like "everything mentioning Xenium in the last 90 days".
+affiliations, (when available) the full body and a `mentions` column with the gazetteer entities
+attributed to the paper (canonical names, matched aliases, ids), so `litradar search` answers
+questions like "everything mentioning Xenium in the last 90 days" even when the paper itself
+only wrote "Next GEM" or when its text is not stored under the data policy.
 
 Keying: `papers_fts` rows are inserted with an explicit rowid equal to `papers.rowid`, so every
 lookup, delete and join goes through the integer key instead of the UNINDEXED `id` column (which
 would be a full scan of the FTS table per paper). Stores written by earlier versions used arbitrary
-FTS rowids; `Store.__init__` detects that once and rebuilds the FTS table (logged).
+FTS rowids or lack the `mentions` column; `Store.__init__` detects either once and rebuilds the FTS
+table in place (bodies preserved, logged).
+
+Write discipline: an FTS5 row is rewritten only when one of its indexed columns actually changed
+(`upsert_paper` compares with the stored row; `replace_mentions` compares the mentions text), because
+every rewrite appends to the FTS5 segment b-tree and a weekly re-ingest of unchanged papers used to
+grow the file by megabytes. `Store.fts_changes` counts the rewrites; `Store.optimize()` merges the
+segments and refreshes planner statistics after a run with many of them.
 
 Data policy: when a paper's `extra_json.fulltext_policy` is anything but 'full', the store keeps no
 full-text sections and no body for it, whatever the caller passes (see litradar/policy.py).
@@ -25,10 +34,21 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 from .models import ArchiveRecord, Mention, NewsItem, Paper, normalize_doi
 from .policy import fulltext_storage_level
+from .rank.heuristics import PLATFORM_CATEGORIES
 
 log = logging.getLogger(__name__)
 
-SCHEMA = """
+FTS_COLUMNS = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body", "mentions")
+# the `mentions` column is maintained from the mentions table; the others are text columns of the paper
+FTS_TEXT_COLUMNS = FTS_COLUMNS[:-1]
+FTS_DDL = f"""
+CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
+  id UNINDEXED, {", ".join(FTS_COLUMNS)},
+  tokenize = 'porter unicode61'
+);
+"""
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS papers (
   id TEXT PRIMARY KEY,
   doi TEXT,
@@ -55,12 +75,7 @@ CREATE TABLE IF NOT EXISTS papers (
 CREATE INDEX IF NOT EXISTS idx_papers_pub_date ON papers(pub_date);
 CREATE INDEX IF NOT EXISTS idx_papers_doi ON papers(doi);
 CREATE INDEX IF NOT EXISTS idx_papers_first_seen ON papers(first_seen);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
-  id UNINDEXED, title, abstract, methods, funding, coi, affiliations, body,
-  tokenize = 'porter unicode61'
-);
-
+{FTS_DDL}
 CREATE TABLE IF NOT EXISTS mentions (
   paper_id TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -72,6 +87,7 @@ CREATE TABLE IF NOT EXISTS mentions (
   section TEXT NOT NULL,
   count INTEGER DEFAULT 1,
   snippet TEXT,
+  alias TEXT DEFAULT '',
   PRIMARY KEY (paper_id, kind, entity_id, section)
 );
 CREATE INDEX IF NOT EXISTS idx_mentions_entity ON mentions(kind, entity_id);
@@ -145,9 +161,10 @@ CREATE TABLE IF NOT EXISTS timeseries (
 CREATE INDEX IF NOT EXISTS idx_timeseries_entity_month ON timeseries(entity_id, month);
 """
 
-FTS_COLUMNS = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body")
 # sections that only exist when full text was parsed; dropped for any policy level other than 'full'
 FULLTEXT_SECTIONS = ("methods", "funding", "coi", "ack", "data_availability", "body")
+# display order of mention sections (entity_papers(distinct=True) sorts its `sections` list this way)
+SECTION_ORDER = ("title", "abstract", "methods", "body", "funding", "coi", "ack", "data_availability", "affiliations")
 # the archive window clause, shared by every digest query: published in the window, or undated and first seen in it
 _WINDOW = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND substr(p.first_seen,1,10) >= ?))"
 
@@ -229,6 +246,32 @@ def restricted_sections(sections: Dict[str, str], extra: Dict[str, Any]) -> Dict
     return kept
 
 
+def mentions_text(rows: Iterable[Sequence[Any]]) -> str:
+    """The `mentions` FTS column for one paper from (entity_name, alias, entity_id) rows: every distinct canonical
+    name, matched alias and id, ' ; '-joined in first-seen order. '' when the paper has no mentions."""
+    seen: Dict[str, None] = {}
+    for name, alias, entity_id in rows:
+        for tok in [name] + [a.strip() for a in str(alias or "").split(";")] + [entity_id]:
+            tok = str(tok or "").strip()
+            if tok:
+                seen.setdefault(tok, None)
+    return " ; ".join(seen)
+
+
+def _category_clause(categories: Optional[Sequence[str]], platform_only: Optional[bool]) -> Tuple[str, List[Any]]:
+    """SQL fragment restricting `m.category` to the given prefixes (or to / away from the platform categories)."""
+    negate = False
+    if platform_only is True:
+        categories = PLATFORM_CATEGORIES
+    elif platform_only is False:
+        categories, negate = PLATFORM_CATEGORIES, True
+    if not categories:
+        return "", []
+    likes = " OR ".join("COALESCE(m.category, '') LIKE ? ESCAPE '\\'" for _ in categories)
+    params = [re.sub(r"([%_\\])", r"\\\1", str(c)) + "%" for c in categories]
+    return f" AND {'NOT ' if negate else ''}({likes})", params
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -239,6 +282,13 @@ class Store:
         self.conn.executescript(SCHEMA)
         self.conn.commit()
         self._closed = False
+        # FTS write accounting for this connection (see the module docstring)
+        self.fts_rows_written = 0  # full FTS rows (re)written
+        self.fts_rows_unchanged = 0  # upserts that left the FTS row alone because nothing indexed changed
+        self.fts_mentions_updated = 0  # `mentions` column refreshes
+        self.last_search_fallback: Optional[str] = None
+        self._ensure_mentions_alias_column()
+        self.fts_migrated = self._ensure_fts_schema()
         self.fts_rebuilt = self._ensure_fts_keyed_by_rowid()
 
     # ---- lifecycle ----------------------------------------------------------------------
@@ -246,7 +296,16 @@ class Store:
         self.conn.commit()
 
     def checkpoint(self) -> None:
-        """Commit and fold the WAL back into the main file (so the .sqlite-wal sidecar is empty on disk)."""
+        """Commit and fold the WAL back into the main file (so the .sqlite-wal sidecar is empty on disk).
+
+        This does not shrink the file: pages freed by deleted or rewritten rows (FTS5 segments, dropped tables,
+        the FTS rebuilds on open) stay on the freelist and are reused by later writes. To return them to the
+        operating system run ``VACUUM`` yourself (``sqlite3 data/radar.sqlite 'VACUUM'``, or
+        ``Store.conn.execute('VACUUM')`` on an otherwise idle connection) before publishing or compressing a
+        snapshot; it rewrites the whole file, needs free disk space of about the file's size and takes seconds to
+        minutes on a 100+ MB store, which is why the store never does it on its own. ``PRAGMA freelist_count``
+        tells how much there is to reclaim; :meth:`optimize` (FTS5 segment merge + ``PRAGMA optimize``) is the
+        cheap step to run first."""
         if self._closed:
             return
         self.conn.commit()
@@ -254,6 +313,21 @@ class Store:
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.DatabaseError as exc:  # pragma: no cover - another connection may hold the WAL
             log.warning("WAL checkpoint skipped: %s", exc)
+
+    @property
+    def fts_changes(self) -> int:
+        """FTS5 rows (re)written through this connection, including `mentions` column refreshes."""
+        return self.fts_rows_written + self.fts_mentions_updated
+
+    def optimize(self) -> None:
+        """Merge the FTS5 segment b-trees into one and refresh the query planner's statistics.
+
+        Call after a run that rewrote many FTS rows (`fts_changes`); the pipeline does so automatically. It
+        does not shrink the file (see :meth:`checkpoint` for VACUUM guidance)."""
+        self.conn.commit()
+        self.conn.execute("INSERT INTO papers_fts(papers_fts) VALUES('optimize')")
+        self.conn.execute("PRAGMA optimize")
+        self.conn.commit()
 
     def close(self) -> None:
         """Checkpoint and close; safe to call more than once."""
@@ -271,6 +345,25 @@ class Store:
     def __exit__(self, *exc: Any) -> None:
         self.close()
 
+    # ---- schema migrations ---------------------------------------------------------------
+    def _ensure_mentions_alias_column(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(mentions)")}
+        if "alias" not in cols:
+            log.info("mentions table has no 'alias' column; adding it")
+            self.conn.execute("ALTER TABLE mentions ADD COLUMN alias TEXT DEFAULT ''")
+            self.conn.commit()
+
+    def _ensure_fts_schema(self) -> bool:
+        """Rebuild papers_fts once when it lacks a column of the current schema (e.g. `mentions`). Returns True
+        when a rebuild happened."""
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(papers_fts)")]
+        missing = [c for c in FTS_COLUMNS if c not in cols]
+        if not missing:
+            return False
+        log.warning("papers_fts lacks column(s) %s; rebuilding the full-text index with the current schema (bodies preserved)", ", ".join(missing))
+        self._rebuild_fts(recreate=True)
+        return True
+
     # ---- FTS keying --------------------------------------------------------------------
     def _ensure_fts_keyed_by_rowid(self) -> int:
         """Rebuild papers_fts once when its rowids do not line up with papers.rowid (stores from older versions).
@@ -286,10 +379,21 @@ class Store:
         if n == 0:
             return 0
         log.warning("papers_fts is keyed by arbitrary rowids (%d mismatched rows); rebuilding it keyed by papers.rowid", n)
+        self._rebuild_fts(recreate=False)
+        return n
+
+    def _rebuild_fts(self, recreate: bool) -> None:
+        """Re-create every FTS row from `papers` (+ the stored bodies, which live only in the FTS table, + the
+        mentions table). `recreate=True` drops and re-creates the virtual table (schema change); otherwise the rows
+        are deleted and re-inserted keyed by papers.rowid."""
         self.conn.execute("DROP TABLE IF EXISTS temp.fts_old")
         self.conn.execute("CREATE TEMP TABLE fts_old AS SELECT id, MAX(body) AS body FROM papers_fts WHERE body != '' GROUP BY id")
         self.conn.execute("CREATE INDEX temp.fts_old_id ON fts_old(id)")
-        self.conn.execute("DELETE FROM papers_fts")
+        if recreate:
+            self.conn.execute("DROP TABLE papers_fts")
+            self.conn.executescript(FTS_DDL)
+        else:
+            self.conn.execute("DELETE FROM papers_fts")
         cur = self.conn.execute("SELECT rowid, id, title, abstract, sections_json, affiliations_json FROM papers")
         while True:
             chunk = cur.fetchmany(500)
@@ -305,17 +409,52 @@ class Store:
                 self._write_fts(rowid, pid, title or "", abstract or "", sections, affiliations, (old[0] if old else "") or "")
         self.conn.execute("DROP TABLE temp.fts_old")
         self.conn.commit()
-        return n
 
-    def _write_fts(self, rowid: int, pid: str, title: str, abstract: str, sections: Dict[str, str], affiliations: Sequence[str], body: str) -> None:
+    # ---- FTS rows -------------------------------------------------------------------------
+    @staticmethod
+    def fts_values(title: str, abstract: str, sections: Dict[str, str], affiliations: Sequence[str], body: str) -> Dict[str, str]:
+        """The indexed text columns of a paper's FTS row, as stored."""
+        return {
+            "title": title or "", "abstract": abstract or "", "methods": sections.get("methods", "") or "",
+            "funding": sections.get("funding", "") or "", "coi": sections.get("coi", "") or "",
+            "affiliations": "\n".join(str(a) for a in affiliations), "body": body or "",
+        }
+
+    def _fts_row(self, rowid: int) -> Optional[Dict[str, str]]:
+        row = self.conn.execute(f"SELECT {', '.join(FTS_COLUMNS)} FROM papers_fts WHERE rowid=?", (rowid,)).fetchone()
+        return {c: (v or "") for c, v in zip(FTS_COLUMNS, row)} if row else None
+
+    def _mentions_text(self, paper_id: str) -> str:
+        return mentions_text(self.conn.execute("SELECT entity_name, alias, entity_id FROM mentions WHERE paper_id=? ORDER BY rowid", (paper_id,)).fetchall())
+
+    def _write_fts(
+        self, rowid: int, pid: str, title: str, abstract: str, sections: Dict[str, str], affiliations: Sequence[str], body: str,
+        mentions: Optional[str] = None,
+    ) -> None:
+        """(Re)write one FTS row. `mentions` defaults to the text derived from the mentions table."""
+        vals = self.fts_values(title, abstract, sections, affiliations, body)
+        vals["mentions"] = self._mentions_text(pid) if mentions is None else mentions
         self.conn.execute("DELETE FROM papers_fts WHERE rowid=?", (rowid,))
         self.conn.execute(
-            "INSERT INTO papers_fts (rowid, id, title, abstract, methods, funding, coi, affiliations, body) VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                rowid, pid, title, abstract, sections.get("methods", "") or "", sections.get("funding", "") or "",
-                sections.get("coi", "") or "", "\n".join(str(a) for a in affiliations), body or "",
-            ),
+            f"INSERT INTO papers_fts (rowid, id, {', '.join(FTS_COLUMNS)}) VALUES ({', '.join('?' * (len(FTS_COLUMNS) + 2))})",
+            (rowid, pid, *[vals[c] for c in FTS_COLUMNS]),
         )
+        self.fts_rows_written += 1
+
+    def _sync_fts_mentions(self, paper_id: str) -> bool:
+        """Refresh the `mentions` FTS column of a paper from the mentions table; True when it changed."""
+        rid = self.rowid_for(paper_id)
+        if rid is None:
+            return False
+        cur = self.conn.execute("SELECT mentions FROM papers_fts WHERE rowid=?", (rid,)).fetchone()
+        if cur is None:
+            return False  # no FTS row yet: upsert_paper writes it with the current mentions
+        text = self._mentions_text(paper_id)
+        if (cur[0] or "") == text:
+            return False
+        self.conn.execute("UPDATE papers_fts SET mentions=? WHERE rowid=?", (text, rid))
+        self.fts_mentions_updated += 1
+        return True
 
     def rowid_for(self, paper_id: str) -> Optional[int]:
         row = self.conn.execute("SELECT rowid FROM papers WHERE id=?", (paper_id,)).fetchone()
@@ -447,8 +586,14 @@ class Store:
                 json.dumps(extra, ensure_ascii=False, default=str), first_seen, now,
             ),
         )
-        rowid = existing["_rowid"] if existing else self.rowid_for(p.id)
-        self._write_fts(int(rowid), p.id, p.title or "", p.abstract or "", sections, affiliations, body)
+        rowid = int(existing["_rowid"] if existing else self.rowid_for(p.id))
+        current = self._fts_row(rowid) if existing else None
+        if current is not None:
+            wanted = self.fts_values(p.title or "", p.abstract or "", sections, affiliations, body)
+            if all(current[c] == wanted[c] for c in FTS_TEXT_COLUMNS):
+                self.fts_rows_unchanged += 1  # nothing indexed changed: leave the FTS row (and its segments) alone
+                return False
+        self._write_fts(rowid, p.id, p.title or "", p.abstract or "", sections, affiliations, body, mentions=current["mentions"] if current else None)
         return existing is None
 
     @staticmethod
@@ -510,7 +655,10 @@ class Store:
     # ---- mentions -----------------------------------------------------------------------
     def replace_mentions(self, paper_id: str, mentions: Iterable[Mention], keep_sections: Sequence[str] = ()) -> int:
         """Replace a paper's mentions. Stored mentions in `keep_sections` survive when the new extraction has
-        none for that section (used when the text they came from is not kept under the data policy)."""
+        none for that section (used when the text they came from is not kept under the data policy).
+
+        Also refreshes the paper's `mentions` full-text column (only when its text changed). A Mention may carry
+        an `alias` attribute (extract.gazetteer.MatchedMention); it is stored in `mentions.alias`."""
         new = list(mentions)
         kept: List[Dict[str, Any]] = []
         if keep_sections:
@@ -521,21 +669,34 @@ class Store:
         for m in new:
             self.conn.execute(
                 """INSERT OR REPLACE INTO mentions (paper_id, kind, entity_id, entity_name, vendor, ticker, category,
-                   section, count, snippet) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (paper_id, m.kind, m.entity_id, m.entity_name, m.vendor, m.ticker, m.category, m.section, m.count, m.snippet),
+                   section, count, snippet, alias) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (paper_id, m.kind, m.entity_id, m.entity_name, m.vendor, m.ticker, m.category, m.section, m.count, m.snippet,
+                 str(getattr(m, "alias", "") or "")),
             )
             n += 1
         for r in kept:
             self.conn.execute(
                 """INSERT OR IGNORE INTO mentions (paper_id, kind, entity_id, entity_name, vendor, ticker, category,
-                   section, count, snippet) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (paper_id, r["kind"], r["entity_id"], r["entity_name"], r["vendor"], r["ticker"], r["category"], r["section"], r["count"], r["snippet"]),
+                   section, count, snippet, alias) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (paper_id, r["kind"], r["entity_id"], r["entity_name"], r["vendor"], r["ticker"], r["category"], r["section"], r["count"], r["snippet"],
+                 r.get("alias") or ""),
             )
             n += 1
+        self._sync_fts_mentions(paper_id)
         return n
 
     def mentions_for(self, paper_id: str) -> List[Dict[str, Any]]:
         return _rows(self.conn.execute("SELECT * FROM mentions WHERE paper_id=? ORDER BY kind, entity_name", (paper_id,)))
+
+    def entity_names(self, kind: Optional[str] = None) -> Dict[str, str]:
+        """{entity_id: display name} for every entity that has at least one mention (optionally of one kind)."""
+        sql = "SELECT entity_id, MAX(entity_name) FROM mentions"
+        params: List[Any] = []
+        if kind:
+            sql += " WHERE kind=?"
+            params.append(kind)
+        sql += " GROUP BY entity_id"
+        return {eid: (name or eid) for eid, name in self.conn.execute(sql, params).fetchall()}
 
     # ---- scores -------------------------------------------------------------------------
     def save_score(self, paper_id: str, heuristic: float, llm: Optional[Dict[str, Any]], final: float, reasons: str) -> None:
@@ -698,16 +859,26 @@ class Store:
             r["mentions"] = self.mentions_for(r["id"])
         return out
 
-    def instrument_counts(self, since: str, until: str, limit: int = 60) -> List[Dict[str, Any]]:
+    def instrument_counts(
+        self, since: str, until: str, limit: int = 60,
+        categories: Optional[Sequence[str]] = None, platform_only: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """Instrument entities named in the window, most papers first.
+
+        `categories` restricts to gazetteer category prefixes (e.g. ("sequencer", "spatial")); `platform_only=True`
+        is shorthand for rank.heuristics.PLATFORM_CATEGORIES and `platform_only=False` for everything else (lab
+        infrastructure and consumables). The filter is applied in SQL, before `limit`, so the two groups never
+        compete for one row budget."""
+        cat_sql, cat_params = _category_clause(categories, platform_only)
         cur = self.conn.execute(
             f"""SELECT m.entity_id, m.entity_name, m.vendor, m.ticker, m.category,
                       COUNT(DISTINCT m.paper_id) AS papers,
                       SUM(m.count) AS mentions,
                       GROUP_CONCAT(DISTINCT m.section) AS sections
                FROM mentions m JOIN papers p ON p.id = m.paper_id
-               WHERE m.kind='instrument' AND {_WINDOW}
+               WHERE m.kind='instrument' AND {_WINDOW}{cat_sql}
                GROUP BY m.entity_id ORDER BY papers DESC, mentions DESC LIMIT ?""",
-            (since, until, since, limit),
+            (since, until, since, *cat_params, limit),
         )
         rows = _rows(cur)
         for r in rows:
@@ -815,11 +986,16 @@ class Store:
                 r["companies"] = []
         return rows
 
-    def distinct_entities_in_window(self, since: str, until: str, kind: str) -> int:
+    def distinct_entities_in_window(
+        self, since: str, until: str, kind: str,
+        categories: Optional[Sequence[str]] = None, platform_only: Optional[bool] = None,
+    ) -> int:
+        """Distinct entities of `kind` mentioned in the window; same category filter as instrument_counts."""
+        cat_sql, cat_params = _category_clause(categories, platform_only)
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT m.entity_id) FROM mentions m JOIN papers p ON p.id=m.paper_id
-               WHERE m.kind=? AND {_WINDOW}""",
-            (kind, since, until, since),
+               WHERE m.kind=? AND {_WINDOW}{cat_sql}""",
+            (kind, since, until, since, *cat_params),
         ).fetchone()
         return int(row[0] if row else 0)
 
@@ -835,11 +1011,18 @@ class Store:
         return out
 
     # ---- search -------------------------------------------------------------------------
-    def search(self, query: str, since: Optional[str] = None, limit: int = 50, sections: Sequence[str] = ()) -> List[Dict[str, Any]]:
-        """Full-text search. `sections` restricts to FTS columns (e.g. ['methods'])."""
+    def search(self, query: str, since: Optional[str] = None, limit: int = 50, sections: Sequence[str] = (), fallback: bool = True) -> List[Dict[str, Any]]:
+        """Full-text search. `sections` restricts to FTS columns (e.g. ['methods'] or ['mentions']).
+
+        When `query` is not valid FTS5 syntax (unbalanced parentheses, an unknown column such as
+        ``nosuchcol:Xenium``) the search is retried as a quoted phrase and ``self.last_search_fallback`` holds
+        the FTS5 error message, so a caller can tell the user what happened instead of showing a silent empty
+        result. Pass ``fallback=False`` to get the ``sqlite3.OperationalError`` instead (an HTTP API turns that
+        into a 400). ``last_search_fallback`` is None after a search that needed no fallback."""
         bad = [s for s in sections if s not in FTS_COLUMNS]
         if bad:
             raise ValueError(f"unknown section(s) {', '.join(bad)}; choose from {', '.join(FTS_COLUMNS)}")
+        self.last_search_fallback = None
         if sections:
             cols = " ".join(sections)
             fts_query = f"{{{cols}}}: ({query})"
@@ -857,23 +1040,46 @@ class Store:
         params.append(limit)
         try:
             return _rows(self.conn.execute(sql, params))
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            if not fallback:
+                raise
             # fall back to a phrase query when the user's text is not valid FTS5 syntax
+            self.last_search_fallback = str(exc)
             phrase = '"' + query.replace('"', " ") + '"'
             params[0] = f"{{{' '.join(sections)}}}: ({phrase})" if sections else phrase
             try:
                 return _rows(self.conn.execute(sql, params))
-            except sqlite3.OperationalError as exc:
-                log.warning("search fell back to a phrase query and still failed: %s", exc)
+            except sqlite3.OperationalError as exc2:
+                log.warning("search fell back to a phrase query and still failed: %s", exc2)
                 return []
 
-    def entity_papers(self, entity_id: str, since: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        sql = """SELECT DISTINCT p.id, p.title, p.journal, p.pub_date, p.url, p.kind, m.section, m.snippet
-                 FROM mentions m JOIN papers p ON p.id=m.paper_id WHERE m.entity_id=?"""
-        params: List[Any] = [entity_id]
+    def entity_papers(self, entity_id: str, since: Optional[str] = None, limit: int = 100, distinct: bool = False) -> List[Dict[str, Any]]:
+        """Papers mentioning an entity, newest first.
+
+        Default: one row per (paper, section) with that section's `snippet` (a paper naming the entity in the
+        abstract and in the Methods appears twice). `distinct=True`: one row per paper with `sections` (list, in
+        SECTION_ORDER), `section` (the same, comma-joined), `mentions` (summed count) and the snippet of the
+        section with most occurrences; `limit` then counts papers."""
+        since_sql, since_params = "", []
         if since:
-            sql += " AND (p.pub_date >= ? OR (p.pub_date='' AND substr(p.first_seen,1,10) >= ?))"
-            params += [since, since]
-        sql += " ORDER BY p.pub_date DESC LIMIT ?"
-        params.append(limit)
-        return _rows(self.conn.execute(sql, params))
+            since_sql = " AND (p.pub_date >= ? OR (p.pub_date='' AND substr(p.first_seen,1,10) >= ?))"
+            since_params = [since, since]
+        if not distinct:
+            sql = f"""SELECT DISTINCT p.id, p.title, p.journal, p.pub_date, p.url, p.kind, m.section, m.snippet
+                      FROM mentions m JOIN papers p ON p.id=m.paper_id WHERE m.entity_id=?{since_sql}
+                      ORDER BY p.pub_date DESC LIMIT ?"""
+            return _rows(self.conn.execute(sql, [entity_id, *since_params, limit]))
+        sql = f"""SELECT p.id, p.title, p.journal, p.pub_date, p.url, p.kind,
+                         GROUP_CONCAT(DISTINCT m.section) AS sections, SUM(m.count) AS mentions,
+                         (SELECT m2.snippet FROM mentions m2 WHERE m2.paper_id = p.id AND m2.entity_id = m.entity_id
+                          ORDER BY m2.count DESC, m2.section LIMIT 1) AS snippet
+                  FROM mentions m JOIN papers p ON p.id=m.paper_id WHERE m.entity_id=?{since_sql}
+                  GROUP BY p.id ORDER BY p.pub_date DESC LIMIT ?"""
+        rows = _rows(self.conn.execute(sql, [entity_id, *since_params, limit]))
+        order = {s: i for i, s in enumerate(SECTION_ORDER)}
+        for r in rows:
+            secs = sorted({s for s in str(r.get("sections") or "").split(",") if s}, key=lambda s: (order.get(s, len(order)), s))
+            r["sections"] = secs
+            r["section"] = ", ".join(secs)
+            r["mentions"] = int(r.get("mentions") or 0)
+        return rows
