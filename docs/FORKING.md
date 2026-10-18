@@ -169,9 +169,9 @@ secrets and one Pages setting: the workflows create their own releases.
 7. **The daily job from tomorrow** (06:20 UTC). `daily-update` restores `db-latest` (creating it if
    the weekly run has not happened yet), runs `litradar update --overlap-days 2 --max-days 14`,
    uploads the snapshot back and ends with `python -m litradar status`, whose exit code is the
-   job's. Expect that last step to be **red on a keyless fork**: the SEC skip, GDELT's 429 and any
-   upstream outage are three "failing sources" against a limit of two. Add
-   `LITRADAR_CONTACT_EMAIL` to remove one of them, or edit the last step of `daily.yml` to
+   job's. That step stays **green on a keyless fork**: the SEC skip is tagged as configuration and
+   GDELT's 429 as degraded, and neither counts against the limit of two genuinely failed sources.
+   It goes red only when upstream sources really fail; edit the last step of `daily.yml` to
    `python -m litradar status --max-failing-sources 4` if you prefer a quieter signal.
 
 8. **Keep it alive.** GitHub switches scheduled workflows off after 60 days without activity in the

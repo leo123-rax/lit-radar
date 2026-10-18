@@ -70,6 +70,7 @@ GRAPH_MAX_DEFAULT_LINKS = 400 # the graph page's default minimum edge weight kee
 NAV = [
     ("index.html", "Overview"),
     ("instruments.html", "Instruments"),
+    ("timeseries.html", "Time series"),
     ("companies.html", "Companies"),
     ("subgroups.html", "Subgroups"),
     ("countries.html", "Countries"),
@@ -660,6 +661,110 @@ def _timeseries(conn: sqlite3.Connection, tables: set) -> Dict[str, Any]:
     return {"available": bool(months), "months": months, "series": series, "by_entity": dict(by_entity)}
 
 
+# How many trailing months of the archive series are marked incomplete: archives index deposits with a lag
+# and the weekly refresh re-fetches the current month and the two before it (timeseries.DEFAULT_REFRESH_MONTHS).
+TIMESERIES_INCOMPLETE_MONTHS = 2
+TIMESERIES_TABLE_MONTHS = 12   # the per-vendor table under each chart shows this many trailing months
+
+
+def _empty_timeseries_page() -> Dict[str, Any]:
+    return {"available": False, "months": [], "incomplete": [], "sources": [], "vendors": [], "entities": 0,
+            "series": 0, "rows": 0, "fetched_at": "", "csv": "", "json": "data/timeseries.json",
+            "table_months": TIMESERIES_TABLE_MONTHS}
+
+
+def _slug(text: str) -> str:
+    out = "".join(ch if ch.isalnum() else "-" for ch in str(text).lower()).strip("-")
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out or "vendor"
+
+
+def _timeseries_labels(conn: sqlite3.Connection, tables: set, config_dir: Optional[Path],
+                       entity_ids: Sequence[str]) -> Tuple[Dict[str, str], Dict[str, str], List[str]]:
+    """(entity -> display name, entity -> vendor, entity order) for timeseries.html.
+
+    Names and vendors come from config/instruments.yaml, then config/archive_models.yaml (`vendor`), then the
+    mentions table (entity_name, vendor), then the id itself; the order is the config order of
+    archive_models.yaml with unknown ids after it, alphabetically."""
+    from . import timeseries as T
+
+    specs: Dict[str, Any] = {}
+    instruments: Dict[str, Dict[str, str]] = {}
+    if config_dir is not None:
+        specs = T.load_archive_models(Path(config_dir) / "archive_models.yaml")
+        instruments = T.load_instrument_index(Path(config_dir) / "instruments.yaml")
+    mention_meta: Dict[str, Tuple[str, str]] = {}
+    if "mentions" in tables:
+        for eid, name, vendor in _q(conn, "SELECT entity_id, MAX(entity_name), MAX(vendor) FROM mentions "
+                                          "WHERE kind='instrument' AND entity_id IS NOT NULL AND entity_id != '' GROUP BY entity_id"):
+            mention_meta[str(eid)] = (str(name or ""), str(vendor or ""))
+    names: Dict[str, str] = {}
+    vendors: Dict[str, str] = {}
+    for eid in entity_ids:
+        meta = instruments.get(eid) or {}
+        spec = specs.get(eid)
+        m_name, m_vendor = mention_meta.get(eid, ("", ""))
+        names[eid] = meta.get("name") or m_name or eid
+        vendors[eid] = meta.get("vendor") or (getattr(spec, "vendor", "") if spec else "") or m_vendor or "Other"
+    order = [eid for eid in specs if eid in set(entity_ids)] + sorted(eid for eid in entity_ids if eid not in specs)
+    return names, vendors, order
+
+
+def _timeseries_page(conn: sqlite3.Connection, tables: set, config_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Everything timeseries.html needs: per vendor, per entity (model), one list per source aligned to the
+    month axis (`null` = never fetched, 0 = fetched and zero). An entity's rows are summed per month, which is
+    exact whether the cache holds one row per entity or - an older layout - one row per vocabulary string."""
+    from . import timeseries as T
+
+    page = _empty_timeseries_page()
+    if "timeseries" not in tables:
+        return page
+    cols = set(_columns(conn, "timeseries"))
+    if not {"source", "entity_id", "month", "count"} <= cols:
+        return page
+    rows = _q(conn, "SELECT source, entity_id, month, SUM(count), COUNT(*) FROM timeseries "
+                    "WHERE entity_id IS NOT NULL AND entity_id != '' AND month IS NOT NULL GROUP BY source, entity_id, month")
+    if not rows:
+        return page
+    months = sorted({str(m) for _, _, m, _, _ in rows})
+    index = {m: i for i, m in enumerate(months)}
+    per_entity: Dict[str, Dict[str, List[Optional[int]]]] = {}
+    n_rows = 0
+    for source, eid, month, total, n in rows:
+        series = per_entity.setdefault(str(eid), {}).setdefault(str(source or "unknown"), [None] * len(months))
+        series[index[str(month)]] = int(total or 0)
+        n_rows += int(n or 0)
+    names, vendor_of, order = _timeseries_labels(conn, tables, config_dir, list(per_entity))
+    present_sources = {s for e in per_entity.values() for s in e}
+    sources = [s for s in T.SOURCES if s in present_sources] + sorted(present_sources - set(T.SOURCES))
+    source_meta = [{"id": s, "label": {"sra": "SRA experiments", "ena": "ENA runs", "epmc": "Europe PMC papers"}.get(s, s),
+                    "unit": T.UNITS.get(s, "count"), "note": T.UNIT_NOTES.get(s, "")} for s in sources]
+    vendors: List[Dict[str, Any]] = []
+    by_vendor: Dict[str, Dict[str, Any]] = {}
+    used_slugs: set = set()
+    for eid in order:
+        vendor = vendor_of[eid]
+        if vendor not in by_vendor:
+            slug = _slug(vendor)
+            while slug in used_slugs:
+                slug += "-x"
+            used_slugs.add(slug)
+            by_vendor[vendor] = {"name": vendor, "slug": slug, "entities": []}
+            vendors.append(by_vendor[vendor])
+        by_vendor[vendor]["entities"].append({"id": eid, "name": names[eid], "series": per_entity[eid]})
+    fetched = ""
+    if "fetched_at" in cols:
+        got = _q(conn, "SELECT MAX(fetched_at) FROM timeseries")
+        fetched = str(got[0][0] or "") if got else ""
+    page.update({
+        "available": True, "months": months, "incomplete": months[-TIMESERIES_INCOMPLETE_MONTHS:], "sources": source_meta,
+        "vendors": vendors, "entities": len(per_entity), "series": sum(len(e) for e in per_entity.values()), "rows": n_rows,
+        "fetched_at": fetched,
+    })
+    return page
+
+
 def _search_index(conn: sqlite3.Connection, start: str, end: str, max_papers: int) -> List[Dict[str, Any]]:
     expr = _paper_date_sql()
     has_scores = "scores" in _tables(conn)
@@ -698,8 +803,10 @@ def _search_index(conn: sqlite3.Connection, start: str, end: str, max_papers: in
 
 
 def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = None,
-            max_papers: int = DEFAULT_MAX_PAPERS) -> Dict[str, Any]:
-    """Read every dataset the site needs. Missing tables yield empty sections, never an exception."""
+            max_papers: int = DEFAULT_MAX_PAPERS, config_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Read every dataset the site needs. Missing tables yield empty sections, never an exception.
+    `config_dir` (optional) names the instrument models and vendors on timeseries.html; without it the page
+    falls back to the mentions table and then to the raw entity ids."""
     today = today or datetime.now(timezone.utc).date()
     weeks = max(2, int(weeks))
     axis = week_axis(today, weeks)
@@ -760,6 +867,7 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
         "countries": _countries(conn, axis, start, end) if have_papers else
                      {"available": False, "source": None, "series": {}, "table": []},
         "timeseries": _timeseries(conn, tables),
+        "timeseries_page": _timeseries_page(conn, tables, config_dir),
         "papers": _search_index(conn, start, end, max_papers) if have_papers else [],
         "company_pages": _company_pages(conn, start, end, today) if have_mentions else _empty_company_pages(start, end),
         "skipped_queries": list(getattr(conn, "skipped_queries", [])),
@@ -1218,6 +1326,119 @@ def _search_html(data: Dict[str, Any]) -> str:
     return _page("Search", "search.html", lede, body, payload, script, data["generated"])
 
 
+def _timeseries_html(data: Dict[str, Any]) -> str:
+    """timeseries.html: one card per vendor, its models as line series on one chart (measure and axis toggles
+    are page-wide), the trailing months shaded as incomplete, a vendor total, and a 12-month table under each
+    chart. Every name on the page comes from configuration or the store and is escaped on the way in; the
+    client-side script only ever writes text nodes."""
+    ts = data.get("timeseries_page") or _empty_timeseries_page()
+    esc = html.escape
+    if not ts["available"]:
+        body = (
+            '  <section class="card">\n'
+            "    <h2>No archive time series in this database yet</h2>\n"
+            '    <p class="note">This page charts monthly counts per instrument model from the <code>timeseries</code> table: '
+            "NCBI SRA experiments, ENA runs and Europe PMC papers naming the model in Methods. The table is empty in the database "
+            "this site was built from. Run <code>litradar timeseries --all</code> first (it fills the table from the archives; a "
+            "first run over 36 months is a few thousand count requests, every later run refreshes only the newest three months), "
+            "then rebuild the site.</p>\n"
+            "  </section>\n"
+        )
+        lede = "Monthly archive deposits and papers per instrument model. Nothing to chart yet: run `litradar timeseries --all` first."
+        return _page("Time series", "timeseries.html", esc(lede), body, {"timeseries": ts},
+                     "litradar.renderTimeseries(litradar.pageData());", data["generated"])
+
+    months = ts["months"]
+    sources = ts["sources"]
+    radios = []
+    for i, s in enumerate(sources):
+        radios.append(
+            f'<label class="seg-item"><input type="radio" name="ts-source" value="{esc(s["id"])}"{" checked" if i == 0 else ""}> '
+            f'{esc(s["label"])}</label>'
+        )
+    units = "; ".join(f'{esc(s["label"])} = {esc(s["note"])}' for s in sources)
+    incomplete = ", ".join(esc(m) for m in ts["incomplete"])
+    downloads = []
+    if ts.get("csv"):
+        downloads.append(f'<a href="{esc(ts["csv"])}" download>CSV, long format (the committed file: <code>{esc(ts["csv"])}</code>)</a>')
+    else:
+        downloads.append("no committed CSV was found next to this build (<code>litradar timeseries --all</code> writes one under "
+                         "the digests directory)")
+    downloads.append(f'<a href="{esc(ts["json"])}">JSON (this page\'s data, derived from the database)</a>')
+    refreshed = f' Cache last refreshed {esc(ts["fetched_at"])}.' if ts.get("fetched_at") else ""
+    body = (
+        '  <section class="card">\n'
+        "    <h2>Measure and axis</h2>\n"
+        '    <div class="filters ts-controls">\n'
+        f'      <fieldset class="seg" id="ts-source"><legend>Measure</legend>{"".join(radios)}</fieldset>\n'
+        '      <fieldset class="seg" id="ts-scale"><legend>Axis</legend>'
+        '<label class="seg-item"><input type="radio" name="ts-scale" value="linear" checked> linear</label>'
+        '<label class="seg-item"><input type="radio" name="ts-scale" value="log"> log</label></fieldset>\n'
+        "    </div>\n"
+        f'    <p class="note"><span class="shade-key" aria-hidden="true"></span> Shaded months ({incomplete}) are <strong>incomplete '
+        "(deposit lag)</strong>: archives index deposits and papers for weeks after the month ends, and the weekly refresh re-fetches "
+        "the current month and the two before it, so those counts will still grow. One line per model, a dashed line for the vendor "
+        f"total. Units: {units}. On the log axis a month with zero is a gap, not a point.</p>\n"
+        f'    <p class="note ts-downloads">Download: {" · ".join(downloads)}.{refreshed}</p>\n'
+        "  </section>\n"
+    )
+    for v in ts["vendors"]:
+        model_names = ", ".join(esc(e["name"]) for e in v["entities"])
+        n = len(v["entities"])
+        body += (
+            f'  <section class="card ts-vendor" id="ts-{esc(v["slug"])}">\n'
+            f'    <h2>{esc(v["name"])}</h2>\n'
+            f'    <p class="note">{n} model{"s" if n != 1 else ""}: {model_names}. The table shows the last '
+            f'{ts["table_months"]} months of the selected measure; * marks an incomplete month.</p>\n'
+            f'    <div class="chart ts-chart"><canvas id="ts-{esc(v["slug"])}-chart" role="img" aria-label="{esc(v["name"])}: monthly counts per model"></canvas></div>\n'
+            f'    <div class="table-slot" id="ts-{esc(v["slug"])}-table"></div>\n'
+            "  </section>\n"
+        )
+    lede = (
+        f'{ts["series"]} monthly series for {ts["entities"]} instrument models from {len(ts["vendors"])} vendors, '
+        f'{months[0]} to {months[-1]}: what the public archives and the open-access literature say about which sequencers are '
+        "in use. Deposited experiments and runs are a census of machines producing public data, not of machines installed; "
+        "clinical and commercial sequencing is never deposited. Measure and axis switches apply to every chart on the page."
+    )
+    return _page("Time series", "timeseries.html", esc(lede), body, {"timeseries": ts},
+                 "litradar.renderTimeseries(litradar.pageData());", data["generated"])
+
+
+def _timeseries_csv_name(names: Sequence[str]) -> str:
+    """Pick the committed CSV to link: the `_all` selection first, then the latest `--to`, then the widest range."""
+    best = ""
+    best_key: Tuple[int, str, str] = (-1, "", "")
+    for name in names:
+        stem = name[:-4] if name.endswith(".csv") else name
+        parts = stem.split("_", 3)   # timeseries, from, to, selection
+        if len(parts) != 4 or parts[0] != "timeseries":
+            continue
+        _, start, end, selection = parts
+        key = (1 if selection == "all" else 0, end, "".join(chr(255 - ord(c)) for c in start))  # earlier start ranks higher
+        if key > best_key:
+            best, best_key = name, key
+    return best
+
+
+def _copy_timeseries_csv(src_dir: Optional[Path], out_dir: Path) -> Tuple[str, int]:
+    """Copy the committed time-series CSV into the site under the SAME relative path it has in the repository
+    (digests/timeseries/<file>), so the page's link resolves both in a checkout and on the published site.
+    Returns (relative path, bytes) or ('', 0) when there is nothing to copy."""
+    if src_dir is None:
+        return "", 0
+    src_dir = Path(src_dir)
+    if not src_dir.is_dir():
+        return "", 0
+    name = _timeseries_csv_name(sorted(p.name for p in src_dir.glob("timeseries_*.csv")))
+    if not name:
+        return "", 0
+    rel = f"digests/timeseries/{name}"
+    dest = out_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src_dir / name, dest)
+    return rel, dest.stat().st_size
+
+
 # ---------------------------------------------------------------------------- assets
 STYLES = """/* Chart surfaces and ink come from one place so light and dark swap in a single step. */
 :root {
@@ -1240,6 +1461,7 @@ STYLES = """/* Chart surfaces and ink come from one place so light and dark swap
   --series-8: #e34948;
   --good: #006300;
   --critical: #d03b3b;
+  --shade: rgba(11, 11, 11, 0.07);
   --radius: 10px;
 }
 @media (prefers-color-scheme: dark) {
@@ -1263,6 +1485,7 @@ STYLES = """/* Chart surfaces and ink come from one place so light and dark swap
     --series-8: #e66767;
     --good: #0ca30c;
     --critical: #d03b3b;
+    --shade: rgba(255, 255, 255, 0.08);
   }
 }
 :root[data-theme="dark"] {
@@ -1285,6 +1508,7 @@ STYLES = """/* Chart surfaces and ink come from one place so light and dark swap
   --series-8: #e66767;
   --good: #0ca30c;
   --critical: #d03b3b;
+  --shade: rgba(255, 255, 255, 0.08);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -1364,6 +1588,23 @@ ul.plain { list-style: none; padding: 0; margin: 0; font-size: 14px; line-height
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-secondary); margin-top: 10px; }
 .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; background: var(--swatch); vertical-align: middle; }
 .filters input[type="number"] { width: 6em; }
+/* archive time series page: segmented radio controls, the incomplete-months key, taller charts */
+.ts-controls { gap: 12px 24px; align-items: flex-start; }
+.seg { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.seg legend { float: left; color: var(--text-secondary); font-size: 13px; padding: 0; margin-right: 4px; }
+.seg-item {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 13px; padding: 4px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); background: var(--page);
+}
+.seg-item:has(input:checked) { color: var(--text-primary); border-color: var(--series-1); }
+.seg-item input { margin: 0; accent-color: var(--series-1); }
+.shade-key { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; border-radius: 3px; background: var(--shade); border: 1px solid var(--border); }
+.ts-chart { height: 340px; }
+@media (max-width: 720px) { .ts-chart { height: 260px; } }
+.ts-vendor .table-slot { margin-top: 8px; }
+.ts-vendor td.num.incomplete, .ts-vendor th.num.incomplete { background: var(--shade); }
+.ts-vendor tr.total td { font-weight: 600; border-top: 1px solid var(--axis); }
+.ts-downloads { overflow-wrap: anywhere; }
 """
 
 
@@ -2106,6 +2347,146 @@ var litradar = (function () {
     draw();
   }
 
+  /* ------------------------------------------------------- archive time series (timeseries.html) */
+  function renderTimeseries(data) {
+    var ts = data.timeseries || {};
+    if (!ts.available) { afterRender(); return; }
+    var months = ts.months || [];
+    var sources = ts.sources || [];
+    var incomplete = ts.incomplete || [];
+    var vendors = ts.vendors || [];
+    var tableMonths = ts.table_months || 12;
+    var state = { source: sources.length ? sources[0].id : "", scale: "linear" };
+    var firstIncomplete = -1;
+    for (var i = 0; i < months.length; i++) {
+      if (incomplete.indexOf(months[i]) !== -1) { firstIncomplete = i; break; }
+    }
+    function sourceMeta() {
+      for (var j = 0; j < sources.length; j++) { if (sources[j].id === state.source) { return sources[j]; } }
+      return { id: state.source, label: state.source, unit: "" };
+    }
+    /* null = never fetched (a gap); 0 is a real zero */
+    function values(entity) {
+      var arr = (entity.series || {})[state.source] || [];
+      return months.map(function (m, idx) { var v = arr[idx]; return (v === undefined || v === null) ? null : Number(v); });
+    }
+    function vendorTotal(vendor) {
+      var cols = vendor.entities.map(values);
+      return months.map(function (m, idx) {
+        var any = false, t = 0;
+        cols.forEach(function (col) { if (col[idx] !== null) { any = true; t += col[idx]; } });
+        return any ? t : null;
+      });
+    }
+    function plotValues(vals) {
+      /* a logarithmic axis has no zero: a zero month is a gap there, and the page says so */
+      return state.scale === "log" ? vals.map(function (v) { return v !== null && v > 0 ? v : null; }) : vals;
+    }
+    var shadePlugin = {
+      id: "litradarIncompleteShade",
+      beforeDatasetsDraw: function (chart) {
+        if (firstIncomplete < 0) { return; }
+        var x = chart.scales.x, area = chart.chartArea;
+        if (!x || !area) { return; }
+        var left = firstIncomplete > 0
+          ? (x.getPixelForValue(firstIncomplete - 1) + x.getPixelForValue(firstIncomplete)) / 2
+          : area.left;
+        left = Math.max(left, area.left);
+        var ctx = chart.ctx;
+        ctx.save();
+        ctx.fillStyle = cssVar("--shade") || "rgba(0,0,0,0.07)";
+        ctx.fillRect(left, area.top, area.right - left, area.bottom - area.top);
+        ctx.restore();
+      }
+    };
+    function lineDataset(label, vals, color, dashed) {
+      return {
+        label: label, data: plotValues(vals), borderColor: color, backgroundColor: color,
+        borderWidth: dashed ? 1.5 : 2, borderDash: dashed ? [6, 4] : [], pointRadius: 0, pointHoverRadius: 4,
+        pointHitRadius: 16, tension: 0, fill: false, spanGaps: false
+      };
+    }
+    function buildChart(canvas, vendor) {
+      var meta = sourceMeta();
+      var datasets = vendor.entities.map(function (e, idx) { return lineDataset(e.name, values(e), colorFor(idx), false); });
+      if (vendor.entities.length > 1) {
+        datasets.push(lineDataset("All " + vendor.name + " models", vendorTotal(vendor), cssVar("--text-secondary"), true));
+      }
+      var options = baseOptions({ legend: true, pointStyle: "line" });
+      options.plugins.tooltip.callbacks.title = function (items) {
+        var label = items.length ? items[0].label : "";
+        return incomplete.indexOf(label) !== -1 ? label + " (incomplete: deposit lag)" : label;
+      };
+      options.plugins.tooltip.callbacks.label = function (item) {
+        var v = item.parsed.y;
+        return " " + item.dataset.label + ": " + (v === null || v === undefined ? "no data" : v.toLocaleString("en-US") + " " + meta.unit);
+      };
+      if (state.scale === "log") {
+        options.scales.y = {
+          type: "logarithmic",
+          grid: { color: cssVar("--grid"), drawTicks: false },
+          ticks: { color: cssVar("--text-muted"), callback: function (v) { return compact(v); } },
+          border: { display: false }
+        };
+      }
+      return new Chart(canvas, { type: "line", data: { labels: months, datasets: datasets }, options: options, plugins: [shadePlugin] });
+    }
+    function renderTables() {
+      var meta = sourceMeta();
+      var last = months.slice(-tableMonths);
+      var offset = months.length - last.length;
+      vendors.forEach(function (vendor) {
+        var slot = document.getElementById("ts-" + vendor.slug + "-table");
+        if (!slot) { return; }
+        var headers = [{ label: "Model (" + meta.unit + ")" }].concat(last.map(function (m) {
+          return { label: incomplete.indexOf(m) !== -1 ? m + " *" : m, num: true, incomplete: incomplete.indexOf(m) !== -1 };
+        }));
+        function row(name, vals) {
+          return [name].concat(last.map(function (m, j) {
+            var v = vals[offset + j];
+            return v === null ? "" : v.toLocaleString("en-US");
+          }));
+        }
+        var rows = vendor.entities.map(function (e) { return row(e.name, values(e)); });
+        if (vendor.entities.length > 1) { rows.push(row("All " + vendor.name + " models", vendorTotal(vendor))); }
+        table(slot, headers, rows, { collapsible: false });
+        /* mark the incomplete columns and the total row for the stylesheet; text only, no markup */
+        var t = slot.querySelector("table");
+        if (t) {
+          headers.forEach(function (h, ci) {
+            if (!h.incomplete) { return; }
+            Array.prototype.forEach.call(t.querySelectorAll("tr"), function (tr) {
+              var cell = tr.children[ci];
+              if (cell) { cell.className = (cell.className ? cell.className + " " : "") + "incomplete"; }
+            });
+          });
+          if (vendor.entities.length > 1) {
+            var trs = t.querySelectorAll("tbody tr");
+            if (trs.length) { trs[trs.length - 1].className = "total"; }
+          }
+        }
+      });
+    }
+    vendors.forEach(function (vendor) {
+      register("ts-" + vendor.slug + "-chart", function (c) { return buildChart(c, vendor); });
+    });
+    renderTables();
+    function wire(fieldsetId, key) {
+      var box = document.getElementById(fieldsetId);
+      if (!box) { return; }
+      box.addEventListener("change", function (ev) {
+        var input = ev.target;
+        if (!input || input.type !== "radio" || !input.checked) { return; }
+        state[key] = input.value;
+        rebuildAll();
+        renderTables();
+      });
+    }
+    wire("ts-source", "source");
+    wire("ts-scale", "scale");
+    afterRender();
+  }
+
   function currentTheme() {
     try { return localStorage.getItem("litradar-theme") || "auto"; } catch (e) { return "auto"; }
   }
@@ -2149,20 +2530,29 @@ var litradar = (function () {
     renderCountries: renderCountries,
     renderSearch: renderSearch,
     renderCompanyDetail: renderCompanyDetail,
-    renderCompanyGraph: renderCompanyGraph
+    renderCompanyGraph: renderCompanyGraph,
+    renderTimeseries: renderTimeseries
   };
 })();
 """
 
 
 # ---------------------------------------------------------------------------- build
-def write_site(data: Dict[str, Any], out_dir: Path) -> Dict[str, int]:
-    """Write every page, data file and asset. Returns {relative path: bytes}."""
+def write_site(data: Dict[str, Any], out_dir: Path, timeseries_dir: Optional[Path] = None) -> Dict[str, int]:
+    """Write every page, data file and asset. Returns {relative path: bytes}. `timeseries_dir` is where
+    `litradar timeseries` wrote its CSVs (digests/timeseries in a checkout); the newest `_all` file is copied
+    into the site at the same relative path so timeseries.html can link it."""
     out_dir = Path(out_dir)
     (out_dir / "assets").mkdir(parents=True, exist_ok=True)
     (out_dir / "data").mkdir(parents=True, exist_ok=True)
 
     written: Dict[str, int] = {}
+    ts_page = data.get("timeseries_page") or _empty_timeseries_page()
+    data["timeseries_page"] = ts_page
+    csv_rel, csv_bytes = _copy_timeseries_csv(timeseries_dir, out_dir)
+    ts_page["csv"] = csv_rel
+    if csv_rel:
+        written[csv_rel] = csv_bytes
 
     def put(rel: str, text: str) -> None:
         path = out_dir / rel
@@ -2186,12 +2576,14 @@ def write_site(data: Dict[str, Any], out_dir: Path) -> Dict[str, int]:
         "data/subgroups.json": {"weeks": data["weeks"], "subgroups": data["subgroups"]},
         "data/countries.json": {"weeks": data["weeks"], "countries": data["countries"]},
         "data/papers.json": {"window": data["window"], "papers": data["papers"]},
+        "data/timeseries.json": dict(ts_page, generated=data["generated"]),
     }
     for rel, payload in data_files.items():
         put(rel, json.dumps(payload, ensure_ascii=False, default=str))
 
     put("index.html", _index_html(data))
     put("instruments.html", _instruments_html(data))
+    put("timeseries.html", _timeseries_html(data))
     put("companies.html", _companies_html(data))
     put("subgroups.html", _subgroups_html(data))
     put("countries.html", _countries_html(data))
@@ -2206,16 +2598,19 @@ def write_site(data: Dict[str, Any], out_dir: Path) -> Dict[str, int]:
 
 
 def build(db_path: Path, out_dir: Path, weeks: int = 52, max_papers: int = DEFAULT_MAX_PAPERS,
-          today: Optional[date] = None) -> Dict[str, Any]:
-    """Read the store and write the static site. Returns a manifest with per-file byte sizes."""
+          today: Optional[date] = None, config_dir: Optional[Path] = None,
+          timeseries_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Read the store and write the static site. Returns a manifest with per-file byte sizes.
+    `config_dir` labels the archive time series (models, vendors); `timeseries_dir` holds the committed CSV
+    that timeseries.html links (both optional; the page degrades to ids and to no CSV link)."""
     conn, tmp = connect_readonly(Path(db_path))
     try:
-        data = collect(conn, weeks=weeks, today=today, max_papers=max_papers)
+        data = collect(conn, weeks=weeks, today=today, max_papers=max_papers, config_dir=config_dir)
     finally:
         conn.close()
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
-    files = write_site(data, Path(out_dir))
+    files = write_site(data, Path(out_dir), timeseries_dir=timeseries_dir)
     # client-side search (search.html, search-index.json, search-entities.json): built by dashboard_search
     from .dashboard_search import write_search_site
 
@@ -2233,6 +2628,8 @@ def build(db_path: Path, out_dir: Path, weeks: int = 52, max_papers: int = DEFAU
             "countries": len(data["countries"]["table"]),
             "papers_indexed": len(data["papers"]),
             "timeseries_months": len(data["timeseries"]["months"]),
+            "timeseries_series": data["timeseries_page"]["series"],
+            "timeseries_vendors": len(data["timeseries_page"]["vendors"]),
         },
         "movers_window": data["movers_window"],
         "company_pages": {

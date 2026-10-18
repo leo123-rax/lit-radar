@@ -173,7 +173,8 @@ def test_empty_store_still_builds(tmp_path):
     out = tmp_path / "site-empty"
     report = dashboard.build(db, out, weeks=6, today=TODAY)
     assert report["counts"] == {"instruments": 0, "instruments_total": 0, "companies": 0, "subgroups": 0,
-                                "countries": 0, "papers_indexed": 0, "timeseries_months": 0}
+                                "countries": 0, "papers_indexed": 0, "timeseries_months": 0,
+                                "timeseries_series": 0, "timeseries_vendors": 0}
     assert report["skipped_queries"] == []           # a complete schema skips nothing
     overview = json.loads((out / "data" / "overview.json").read_text(encoding="utf-8"))
     assert overview["papers_per_week"]["total"] == [0] * 6

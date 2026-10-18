@@ -18,6 +18,21 @@ Failures are kept apart from zeros: a count request that fails (HTTP status, no 
 is reported under `backfill.failures` with its reason and never cached; the run's `errors` (exit 1) list
 only sources where EVERY request of the run failed, partial failures are `warnings`.
 
+One series per (source, entity): an entity's archive strings (`sra`, `ena` in config/archive_models.yaml)
+are OR-ed into ONE count request per month, exactly as its Europe PMC terms already were, so the request
+budget is one request per entity per source per month whatever the vocabulary looks like (ilmn-hiseq
+lists nine HiSeq strings and costs the same as Revio). The series key (`model` column) is the pipe-joined
+string list ("sequel ii|sequel iie"), which for a single string is the string itself. Verified live on
+2026-10-18 for 2025-06: SRA `("instrument sequel ii"[Properties] OR "instrument sequel iie"[Properties])`
+gave 5,139 = 3,474 + 1,665 (the two single-string counts), the querytranslation kept both [Properties]
+clauses, and a phrase with no records inside the OR is dropped from the translation and listed under
+warninglist.quotedphrasesnotfound while the other clauses stand; ENA
+`(instrument_model="Sequel II" OR instrument_model="Sequel IIe")` gave 5,190 = 3,493 + 1,697. Whole-string
+matching makes the strings disjoint, so the union equals the sum. A cache written per string by an
+earlier version is folded into entity rows by `consolidate_cache` (sum of the strings' counts for every
+month where all of them are cached; the per-string rows are then pruned so a SUM over the table never
+double-counts) - no request is spent on history.
+
 Every (source, entity, model, month) count is cached in the `timeseries` table of the radar database,
 so backfills are incremental: a month is fetched again only when it is missing, when it is recent
 enough that its count is still growing (the current month plus the `refresh_months` months before it),
@@ -73,7 +88,7 @@ from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import yaml
 
@@ -152,19 +167,32 @@ class ModelSpec:
     notes: str = ""
     launch: str = ""  # YYYY-MM the model was announced; months before it are stored as 0 without a request
 
-    def models_for(self, source: str) -> List[str]:
+    def terms_for(self, source: str) -> List[str]:
+        """The strings OR-ed into one count request per month for this source (empty = no series)."""
         if source == "sra":
-            return list(self.sra)
+            return [s for s in self.sra if s]
         if source == "ena":
-            return list(self.ena)
+            return [s for s in self.ena if s]
         if source == "epmc":
-            return [epmc_label(self.epmc_terms)] if self.epmc_terms else []
+            return [t for t in self.epmc_terms if t]
         return []
 
+    def series_key(self, source: str) -> str:
+        """The `model` column of this entity's series for a source: its strings pipe-joined ('' = no series)."""
+        return series_label_for(self.terms_for(source))
 
-def epmc_label(terms: Sequence[str]) -> str:
-    """The `model` column for a Europe PMC series: the OR-ed term set, pipe-joined."""
+    def models_for(self, source: str) -> List[str]:
+        """The series keys this entity has for a source: one (its OR-ed string set) or none."""
+        key = self.series_key(source)
+        return [key] if key else []
+
+
+def series_label_for(terms: Sequence[str]) -> str:
+    """The `model` column for a series: the OR-ed string set, pipe-joined (a single string is itself)."""
     return "|".join(t for t in terms if t)
+
+
+epmc_label = series_label_for  # the Europe PMC name this convention started under
 
 
 def _str_list(value: Any) -> List[str]:
@@ -255,11 +283,21 @@ def expand_vendor(token: str, instruments: Dict[str, Dict[str, str]], specs: Dic
 
 
 def resolve_entities(
-    entities: Sequence[str], vendors: Sequence[str], instruments: Dict[str, Dict[str, str]], specs: Dict[str, ModelSpec]
+    entities: Sequence[str],
+    vendors: Sequence[str],
+    instruments: Dict[str, Dict[str, str]],
+    specs: Dict[str, ModelSpec],
+    all_entities: bool = False,
 ) -> Tuple[List[str], List[str]]:
-    """Explicit --entity ids plus --vendor expansions, in config order; unknown ids become warnings."""
+    """Explicit --entity ids plus --vendor expansions, in config order; unknown ids become warnings.
+    `all_entities` (--all) selects every entity in archive_models.yaml; --entity / --vendor given with it
+    are redundant and noted as a warning, never an error."""
     wanted: List[str] = []
     warnings: List[str] = []
+    if all_entities:
+        if entities or vendors:
+            warnings.append("--all selects every entity in archive_models.yaml; --entity / --vendor were ignored")
+        return list(specs), warnings
     for e in entities:
         if e in specs:
             wanted.append(e)
@@ -282,8 +320,21 @@ def _to_int(value: Any) -> Optional[int]:
         return None
 
 
-def sra_term(model: str, start: str, end: str) -> str:
-    return f'{start.replace("-", "/")}:{end.replace("-", "/")}[PDAT] AND "instrument {model.lower()}"[Properties]'
+Models = Union[str, Sequence[str]]
+
+
+def _model_list(models: Models) -> List[str]:
+    """One string or a sequence of strings -> the non-empty list of strings (order kept, duplicates dropped)."""
+    items = [models] if isinstance(models, str) else list(models or [])
+    return list(OrderedDict.fromkeys(str(m) for m in items if m is not None and str(m) != ""))
+
+
+def sra_term(models: Models, start: str, end: str) -> str:
+    """esearch term: the month as a [PDAT] range AND the instrument string(s) as whole-value [Properties]
+    phrases; several strings are OR-ed inside parentheses (one request per entity, see the module doc)."""
+    phrases = [f'"instrument {m.lower()}"[Properties]' for m in _model_list(models)]
+    clause = phrases[0] if len(phrases) == 1 else "(" + " OR ".join(phrases) + ")"
+    return f'{start.replace("-", "/")}:{end.replace("-", "/")}[PDAT] AND {clause}'
 
 
 NO_ANSWER = "no answer (network failure, retries exhausted or host rate-limited)"
@@ -311,13 +362,16 @@ def _get_json_detail(http: Http, url: str, params: Dict[str, Any]) -> Tuple[Any,
     return data, ""
 
 
-def sra_count_detail(http: Http, model: str, start: str, end: str, api_key: str = "") -> Tuple[Optional[int], str]:
-    """(experiments with the given instrument_model made public in [start, end], or None, failure reason).
+def sra_count_detail(http: Http, model: Models, start: str, end: str, api_key: str = "") -> Tuple[Optional[int], str]:
+    """(experiments with the given instrument_model(s) made public in [start, end], or None, failure reason).
 
     A count is accepted only when esearch really evaluated the Properties clause: NCBI answers a misspelt
     field tag with HTTP 200, a count, an `errorlist` and a querytranslation rewritten to [All Fields], and
     that number is not a Properties count. A zero-deposit string keeps the [Properties] clause and adds
-    warninglist.quotedphrasesnotfound; that is a genuine 0."""
+    warninglist.quotedphrasesnotfound; that is a genuine 0 (inside an OR of several strings the empty phrase
+    is dropped from the translation and the remaining clauses stand, verified live 2026-10-18)."""
+    if not _model_list(model):
+        return None, "no SRA instrument strings configured"
     params: Dict[str, Any] = {"db": "sra", "term": sra_term(model, start, end), "retmax": 0, "retmode": "json"}
     key = usable_api_key(api_key)
     if key:
@@ -343,18 +397,24 @@ def sra_count_detail(http: Http, model: str, start: str, end: str, api_key: str 
     return (n, "") if n is not None else (None, f"non-numeric count {result.get('count')!r}")
 
 
-def sra_count(http: Http, model: str, start: str, end: str, api_key: str = "") -> Optional[int]:
-    """Experiments with the given instrument_model made public in [start, end]; None on failure (see *_detail)."""
+def sra_count(http: Http, model: Models, start: str, end: str, api_key: str = "") -> Optional[int]:
+    """Experiments with the given instrument_model(s) made public in [start, end]; None on failure (see *_detail)."""
     return sra_count_detail(http, model, start, end, api_key)[0]
 
 
-def ena_query(model: str, start: str, end: str) -> str:
-    return f'first_public>={start} AND first_public<={end} AND instrument_model="{model}"'
+def ena_query(models: Models, start: str, end: str) -> str:
+    """ENA portal query: the first_public range AND the instrument_model value(s); several values are OR-ed
+    inside parentheses (verified live 2026-10-18: the union equals the sum of the single-value counts)."""
+    values = [f'instrument_model="{m}"' for m in _model_list(models)]
+    clause = values[0] if len(values) == 1 else "(" + " OR ".join(values) + ")"
+    return f"first_public>={start} AND first_public<={end} AND {clause}"
 
 
-def ena_count_detail(http: Http, model: str, start: str, end: str) -> Tuple[Optional[int], str]:
-    """(ENA read_experiment rows, i.e. RUNS, with instrument_model == model and first_public in [start, end], or
-    None, failure reason). The endpoint counts experiment-run pairs, not distinct experiments."""
+def ena_count_detail(http: Http, model: Models, start: str, end: str) -> Tuple[Optional[int], str]:
+    """(ENA read_experiment rows, i.e. RUNS, with instrument_model in the given value(s) and first_public in
+    [start, end], or None, failure reason). The endpoint counts experiment-run pairs, not distinct experiments."""
+    if not _model_list(model):
+        return None, "no ENA instrument_model values configured"
     data, reason = _get_json_detail(http, ENA_COUNT, {"result": "read_experiment", "query": ena_query(model, start, end), "format": "json"})
     if reason:
         return None, reason
@@ -364,8 +424,8 @@ def ena_count_detail(http: Http, model: str, start: str, end: str) -> Tuple[Opti
     return (n, "") if n is not None else (None, f"non-numeric count {data.get('count')!r}")
 
 
-def ena_count(http: Http, model: str, start: str, end: str) -> Optional[int]:
-    """ENA runs (experiment-run rows) with instrument_model == model and first_public in [start, end]; None on failure."""
+def ena_count(http: Http, model: Models, start: str, end: str) -> Optional[int]:
+    """ENA runs (experiment-run rows) with instrument_model in the value(s) and first_public in [start, end]; None on failure."""
     return ena_count_detail(http, model, start, end)[0]
 
 
@@ -393,26 +453,95 @@ def epmc_count(http: Http, terms: Sequence[str], start: str, end: str) -> Option
     return epmc_count_detail(http, terms, start, end)[0]
 
 
+# ---- cache layout: one row per entity, not per vocabulary string -----------------------------
+def consolidate_cache(
+    store: Store,
+    specs: Dict[str, ModelSpec],
+    entity_ids: Sequence[str],
+    sources: Sequence[str] = SOURCES,
+    apply: bool = True,
+) -> Dict[str, Any]:
+    """Fold per-string cache rows (written by the one-request-per-string version of this module) into the
+    entity's series row, without a single request.
+
+    For every selected entity with two or more strings for a source, the entity row for a month is the SUM
+    of the strings' cached counts (whole-string matching makes the strings disjoint, so the sum is what the
+    OR-ed request returns; verified live, see the module doc). A month is derived only when EVERY string of
+    the current configuration is cached for it; a month with some strings missing is left to the backfill
+    (`partial`). An entity row that already exists is kept (it is at least as fresh). With `apply=True` the
+    per-string rows are then deleted in the same transaction as the derived rows are written, so a SUM over
+    the table never counts a month twice; with `apply=False` (dry run) nothing is written and the rows that
+    WOULD be derived come back under `virtual` for the planner. Single-string entities need nothing: their
+    series key is the string itself. Rows under strings no longer configured are not touched (they never
+    reach the outputs; prune them by hand, as before)."""
+    report: Dict[str, Any] = {"derived": 0, "pruned": 0, "partial": 0, "entities": [], "virtual": {}}
+    for eid in entity_ids:
+        spec = specs.get(eid)
+        if not spec:
+            continue
+        for source in sources:
+            terms = spec.terms_for(source)
+            if source == "epmc" or len(terms) < 2:
+                continue  # Europe PMC always was one row per entity; one string is its own key
+            key = series_label_for(terms)
+            rows = store.timeseries_rows(sources=[source], entity_ids=[eid])
+            per_month: Dict[str, Dict[str, int]] = {}
+            have_entity_row: Set[str] = set()
+            for r in rows:
+                if r["model"] == key:
+                    have_entity_row.add(str(r["month"]))
+                elif r["model"] in terms:
+                    per_month.setdefault(str(r["month"]), {})[str(r["model"])] = int(r["count"])
+            if not per_month:
+                continue
+            derived = 0
+            for month in sorted(per_month):
+                counts = per_month[month]
+                if month in have_entity_row:
+                    continue
+                if set(counts) != set(terms):
+                    report["partial"] += 1
+                    continue
+                total = sum(counts.values())
+                report["virtual"][(source, eid, key, month)] = total
+                if apply:
+                    store.put_timeseries_count(source, eid, key, month, total)
+                derived += 1
+            pruned = sum(len(c) for c in per_month.values())
+            if apply:
+                for term in terms:
+                    store.conn.execute("DELETE FROM timeseries WHERE source=? AND entity_id=? AND model=?", (source, eid, term))
+                store.commit()  # derived rows and the deletion land together
+            report["derived"] += derived
+            report["pruned"] += pruned
+            report["entities"].append({"entity_id": eid, "source": source, "derived": derived, "pruned": pruned})
+    return report
+
+
 # ---- backfill -------------------------------------------------------------------------------
 @dataclass
 class Job:
     source: str
     entity_id: str
-    model: str
+    model: str   # the series key: the entity's strings for this source, pipe-joined
     month: str
-    terms: List[str] = field(default_factory=list)  # Europe PMC only
+    terms: List[str] = field(default_factory=list)  # the strings OR-ed into the one request (every source)
 
 
 def plan_jobs(specs: Dict[str, ModelSpec], entity_ids: Sequence[str], months: Sequence[str], sources: Sequence[str]) -> List[Job]:
+    """One job per (source, entity, month): an entity with several archive strings is ONE request per month."""
     jobs: List[Job] = []
     for source in sources:
         for eid in entity_ids:
             spec = specs.get(eid)
             if not spec:
                 continue
-            for model in spec.models_for(source):
-                for month in months:
-                    jobs.append(Job(source, eid, model, month, list(spec.epmc_terms) if source == "epmc" else []))
+            terms = spec.terms_for(source)
+            if not terms:
+                continue
+            key = series_label_for(terms)
+            for month in months:
+                jobs.append(Job(source, eid, key, month, list(terms)))
     return jobs
 
 
@@ -429,12 +558,13 @@ def job_key(job: Job) -> str:
 def fetch_count_detail(http: Http, job: Job, api_key: str = "") -> Tuple[Optional[int], str]:
     """(one live count for a job or None, failure reason); dispatches on job.source."""
     start, end = month_bounds(job.month)
+    terms = job.terms or [job.model]
     if job.source == "sra":
-        return sra_count_detail(http, job.model, start, end, api_key)
+        return sra_count_detail(http, terms, start, end, api_key)
     if job.source == "ena":
-        return ena_count_detail(http, job.model, start, end)
+        return ena_count_detail(http, terms, start, end)
     if job.source == "epmc":
-        return epmc_count_detail(http, job.terms, start, end)
+        return epmc_count_detail(http, terms, start, end)
     return None, f"unknown source {job.source!r}"
 
 
@@ -453,6 +583,7 @@ def backfill(
     api_key: str = "",
     dry_run: bool = False,
     launches: Optional[Dict[str, str]] = None,
+    virtual_cache: Optional[Dict[Tuple[str, str, str, str], int]] = None,
 ) -> Dict[str, Any]:
     """Fetch and cache every job's count, committing each stored value on its own so an interrupted run
     (Ctrl-C, crash, exception) keeps everything fetched so far. Cached months older than the refresh
@@ -463,16 +594,21 @@ def backfill(
     vocabulary string (SRA then also reports warninglist.quotedphrasesnotfound), and overwriting history
     with zeros would hide it. `launches` (entity_id -> YYYY-MM) stores 0 without a request for months before
     a model was announced (`pre_launch` in the report): nothing can name or deposit from an instrument that
-    did not exist yet, and Europe PMC phrase matches before the launch were only ever false positives."""
+    did not exist yet, and Europe PMC phrase matches before the launch were only ever false positives.
+    `virtual_cache` ((source, entity_id, model, month) -> count) is consulted before the store: a dry run
+    passes the rows `consolidate_cache` WOULD derive, so the plan it prints is the plan the real run follows."""
     today = today or date.today()
     cutoff = refresh_cutoff(today, refresh_months)
     launches = launches or {}
+    virtual_cache = virtual_cache or {}
     report: Dict[str, Any] = {"jobs": len(jobs), "requests": 0, "cached": 0, "pre_launch": 0, "failed": [], "failures": [], "kept": [],
                               "by_source": {}, "cutoff": cutoff}
     try:
         for job in jobs:
             bs = report["by_source"].setdefault(job.source, {"requests": 0, "cached": 0, "failed": 0, "kept": 0, "pre_launch": 0})
-            cached = store.get_timeseries_count(job.source, job.entity_id, job.model, job.month)
+            cached: Optional[Dict[str, Any]] = store.get_timeseries_count(job.source, job.entity_id, job.model, job.month)
+            if cached is None and (job.source, job.entity_id, job.model, job.month) in virtual_cache:
+                cached = {"count": virtual_cache[(job.source, job.entity_id, job.model, job.month)]}
             if cached is not None and not force and job.month < cutoff:
                 report["cached"] += 1
                 bs["cached"] += 1
@@ -700,8 +836,11 @@ def run(
     http: Optional[Http] = None,
     store: Optional[Store] = None,
     today: Optional[date] = None,
+    all_entities: bool = False,
 ) -> Dict[str, Any]:
-    """Resolve entities, backfill the cache, and write CSV + Markdown (+ PNG when matplotlib exists)."""
+    """Resolve entities, fold any per-string cache rows into entity rows, backfill the cache, and write
+    CSV + Markdown (+ PNG when matplotlib exists). `all_entities` (--all) selects every entity in
+    archive_models.yaml; the output stem is then `timeseries_<from>_<to>_all`."""
     today = today or date.today()
     config_dir = Path(config_dir)
     specs_path = config_dir / "archive_models.yaml"
@@ -715,10 +854,10 @@ def run(
     if bad_sources:
         report["errors"].append(f"unknown sources {bad_sources}; choose from {list(SOURCES)}")
         return report
-    entity_ids, warnings = resolve_entities(entities, vendors, instruments, specs)
+    entity_ids, warnings = resolve_entities(entities, vendors, instruments, specs, all_entities=all_entities)
     report["warnings"].extend(warnings)
     if not entity_ids:
-        report["errors"].append("no entities selected: use --entity <id> (see `litradar entities`) and/or --vendor <name|ticker|id-prefix>")
+        report["errors"].append("no entities selected: use --all, --entity <id> (see `litradar entities`) and/or --vendor <name|ticker|id-prefix>")
         return report
     d_start, d_end = default_months(today)
     start, end = start or d_start, end or d_end
@@ -738,11 +877,16 @@ def run(
         return report
     jobs = plan_jobs(specs, entity_ids, months, sources)
     launches = {eid: specs[eid].launch for eid in entity_ids if specs[eid].launch}
-    report.update({"entities": entity_ids, "from": months[0], "to": months[-1], "months": len(months), "sources": list(sources)})
+    report.update({"entities": entity_ids, "from": months[0], "to": months[-1], "months": len(months), "sources": list(sources),
+                   "series": len({(j.source, j.entity_id, j.model) for j in jobs})})
     http = http or Http(contact_email=contact_email, cache_dir=None, ncbi_api_key=ncbi_api_key)
     store = store or Store(Path(db_path))
+    # a cache written per vocabulary string (earlier versions) is folded into entity rows first, so the
+    # backfill below asks the archives only for months no entity row covers; a dry run only plans with it
+    consolidated = consolidate_cache(store, specs, entity_ids, sources, apply=not dry_run)
+    report["consolidated"] = {k: consolidated[k] for k in ("derived", "pruned", "partial", "entities")}
     report["backfill"] = backfill(http, store, jobs, refresh_months=refresh_months, force=force, today=today, api_key=ncbi_api_key,
-                                  dry_run=dry_run, launches=launches)
+                                  dry_run=dry_run, launches=launches, virtual_cache=consolidated["virtual"] if dry_run else None)
     if dry_run:
         report["dry_run"] = True
         return report
@@ -756,7 +900,7 @@ def run(
     ]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = output_stem(months[0], months[-1], entities, vendors, entity_ids)
+    stem = output_stem(months[0], months[-1], () if all_entities else entities, () if all_entities else vendors, entity_ids)
     csv_path, md_path, png_path = out_dir / f"{stem}.csv", out_dir / f"{stem}.md", out_dir / f"{stem}.png"
     if csv_path.exists() or md_path.exists():
         report["warnings"].append(f"replacing the earlier outputs {stem}.csv/.md in {out_dir} (same months and selection)")

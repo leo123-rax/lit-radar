@@ -170,15 +170,109 @@ def test_epmc_count_payloads():
 
 
 # ---- planning, caching and the incremental stop -----------------------------------------------
-def test_plan_jobs_per_source_model_month():
+def test_plan_jobs_one_request_per_entity_source_month():
+    # an entity with two archive strings is ONE series (pipe-joined key) and ONE request per month per source,
+    # the same convention Europe PMC term sets always had
     jobs = ts.plan_jobs(_specs(), ["pacb-sequel-ii"], ["2024-01", "2024-02"], ["sra", "ena", "epmc"])
     assert [(j.source, j.model, j.month) for j in jobs] == [
-        ("sra", "sequel ii", "2024-01"), ("sra", "sequel ii", "2024-02"), ("sra", "sequel iie", "2024-01"), ("sra", "sequel iie", "2024-02"),
-        ("ena", "Sequel II", "2024-01"), ("ena", "Sequel II", "2024-02"), ("ena", "Sequel IIe", "2024-01"), ("ena", "Sequel IIe", "2024-02"),
+        ("sra", "sequel ii|sequel iie", "2024-01"), ("sra", "sequel ii|sequel iie", "2024-02"),
+        ("ena", "Sequel II|Sequel IIe", "2024-01"), ("ena", "Sequel II|Sequel IIe", "2024-02"),
         ("epmc", "Sequel II|Sequel IIe", "2024-01"), ("epmc", "Sequel II|Sequel IIe", "2024-02"),
     ]
-    assert jobs[-1].terms == ["Sequel II", "Sequel IIe"] and jobs[0].terms == []
+    assert jobs[0].terms == ["sequel ii", "sequel iie"] and jobs[2].terms == ["Sequel II", "Sequel IIe"] and jobs[-1].terms == ["Sequel II", "Sequel IIe"]
+    # a single string is its own key, so a cache written per string by the earlier version is still valid for it
+    single = ts.plan_jobs(_specs(), ["pacb-revio"], ["2024-01"], ["sra", "ena"])
+    assert [(j.model, j.terms) for j in single] == [("revio", ["revio"]), ("Revio", ["Revio"])]
     assert ts.plan_jobs(_specs(), ["unknown-id"], ["2024-01"], ["sra"]) == []
+    # the OR-ed request text, exactly as verified live on 2026-10-18
+    assert ts.sra_term(["sequel ii", "sequel iie"], "2025-06-01", "2025-06-30") == (
+        '2025/06/01:2025/06/30[PDAT] AND ("instrument sequel ii"[Properties] OR "instrument sequel iie"[Properties])'
+    )
+    assert ts.sra_term("revio", "2025-09-01", "2025-09-30") == '2025/09/01:2025/09/30[PDAT] AND "instrument revio"[Properties]'
+    assert ts.ena_query(["Sequel II", "Sequel IIe"], "2025-06-01", "2025-06-30") == (
+        'first_public>=2025-06-01 AND first_public<=2025-06-30 AND (instrument_model="Sequel II" OR instrument_model="Sequel IIe")'
+    )
+    assert ts.ena_query("Revio", "2024-01-01", "2024-01-31") == 'first_public>=2024-01-01 AND first_public<=2024-01-31 AND instrument_model="Revio"'
+    # no strings at all is a named failure, never a request
+    assert ts.sra_count_detail(FakeHttp([]), [], "2024-01-01", "2024-01-31") == (None, "no SRA instrument strings configured")
+    assert ts.ena_count_detail(FakeHttp([]), [], "2024-01-01", "2024-01-31") == (None, "no ENA instrument_model values configured")
+
+
+def test_consolidate_cache_folds_per_string_rows_into_entity_rows(tmp_path):
+    store = Store(tmp_path / "c.sqlite")
+    specs = _specs()
+    # the earlier layout: one row per vocabulary string; 2024-03 is partial (only one of the two strings cached)
+    for month, a, b in (("2024-01", 100, 7), ("2024-02", 120, 9)):
+        store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel ii", month, a)
+        store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel iie", month, b)
+    store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel ii", "2024-03", 130)
+    store.put_timeseries_count("ena", "pacb-sequel-ii", "Sequel II", "2024-01", 101)
+    store.put_timeseries_count("ena", "pacb-sequel-ii", "Sequel IIe", "2024-01", 8)
+    store.put_timeseries_count("sra", "pacb-revio", "revio", "2024-01", 38)              # single string: untouched
+    store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel (old spelling)", "2024-01", 5)  # unconfigured: untouched
+    store.commit()
+    # dry run: the plan sees the rows that would be derived, the table is not written
+    before = store.timeseries_rows()
+    rep = ts.consolidate_cache(store, specs, ["pacb-sequel-ii", "pacb-revio"], apply=False)
+    assert rep["derived"] == 3 and rep["pruned"] == 7 and rep["partial"] == 1
+    assert rep["virtual"] == {("sra", "pacb-sequel-ii", "sequel ii|sequel iie", "2024-01"): 107,
+                              ("sra", "pacb-sequel-ii", "sequel ii|sequel iie", "2024-02"): 129,
+                              ("ena", "pacb-sequel-ii", "Sequel II|Sequel IIe", "2024-01"): 109}
+    assert store.timeseries_rows() == before
+    jobs = ts.plan_jobs(specs, ["pacb-sequel-ii"], ["2024-01", "2024-02", "2024-03"], ["sra", "ena"])
+    plan = ts.backfill(FakeHttp([]), store, jobs, today=date(2026, 10, 17), dry_run=True, virtual_cache=rep["virtual"])
+    assert plan["cached"] == 3 and plan["requests"] == 3  # sra 2024-03 (partial) + ena 2024-02, 2024-03
+    # real: derived rows written, per-string rows of the configured strings gone, everything else kept
+    rep = ts.consolidate_cache(store, specs, ["pacb-sequel-ii", "pacb-revio"], apply=True)
+    assert rep["derived"] == 3 and rep["pruned"] == 7 and rep["partial"] == 1
+    assert [e["entity_id"] for e in rep["entities"]] == ["pacb-sequel-ii", "pacb-sequel-ii"]
+    rows = {(r["source"], r["model"], r["month"]): r["count"] for r in store.timeseries_rows()}
+    assert rows == {
+        ("sra", "sequel ii|sequel iie", "2024-01"): 107, ("sra", "sequel ii|sequel iie", "2024-02"): 129,
+        ("ena", "Sequel II|Sequel IIe", "2024-01"): 109,
+        ("sra", "revio", "2024-01"): 38, ("sra", "sequel (old spelling)", "2024-01"): 5,
+    }
+    # idempotent: a second pass finds nothing to fold
+    assert ts.consolidate_cache(store, specs, ["pacb-sequel-ii", "pacb-revio"]) == {"derived": 0, "pruned": 0, "partial": 0, "entities": [], "virtual": {}}
+    # an entity row that already exists is kept rather than re-derived
+    store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel ii", "2024-05", 1)
+    store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel iie", "2024-05", 1)
+    store.put_timeseries_count("sra", "pacb-sequel-ii", "sequel ii|sequel iie", "2024-05", 999)
+    store.commit()
+    rep = ts.consolidate_cache(store, specs, ["pacb-sequel-ii"])
+    assert rep["derived"] == 0 and rep["pruned"] == 2
+    assert store.get_timeseries_count("sra", "pacb-sequel-ii", "sequel ii|sequel iie", "2024-05")["count"] == 999
+
+
+def test_all_entities_and_warm_cache_request_budget(tmp_path):
+    specs = ts.load_archive_models(CONFIG / "archive_models.yaml")
+    instruments = ts.load_instrument_index(CONFIG / "instruments.yaml")
+    ids, warnings = ts.resolve_entities([], [], instruments, specs, all_entities=True)
+    assert ids == list(specs) and len(ids) == len(specs) >= 27 and warnings == []  # every archive-model entity, however many the gazetteer holds
+    ids2, warnings2 = ts.resolve_entities(["pacb-revio"], ["ont"], instruments, specs, all_entities=True)
+    assert ids2 == ids and warnings2 == ["--all selects every entity in archive_models.yaml; --entity / --vendor were ignored"]
+    # series arithmetic for the real configuration: one per entity per source that has strings
+    months = ts.month_range("2023-01", "2026-10")
+    jobs = ts.plan_jobs(specs, ids, months, ts.SOURCES)
+    series = {(j.source, j.entity_id, j.model) for j in jobs}
+    per_source = {s: sum(1 for k in series if k[0] == s) for s in ts.SOURCES}
+    assert per_source == {"sra": 24, "ena": 24, "epmc": 26} and len(series) == 74
+    # a warm cache with --refresh-months 2 asks only for the current month and the two before it:
+    # 74 series x 3 months = 222 requests, inside the (entities x sources x 3) = 243 budget
+    store = Store(tmp_path / "warm.sqlite")
+    for j in jobs:
+        store.put_timeseries_count(j.source, j.entity_id, j.model, j.month, 1)
+    store.commit()
+    today = date(2026, 10, 18)
+    plan = ts.backfill(FakeHttp([]), store, jobs, refresh_months=2, today=today, dry_run=True)
+    assert plan["cutoff"] == "2026-08" and plan["requests"] == 74 * 3 == 222 and plan["cached"] == len(jobs) - 222
+    assert plan["requests"] <= len(ids) * len(ts.SOURCES) * 3 == 243
+    # the same through run(): --all, dry run, no network, and the output stem is "_all"
+    rep = ts.run(CONFIG, tmp_path / "warm.sqlite", tmp_path / "out", all_entities=True, start="2023-01", end="2026-10",
+                 refresh_months=2, dry_run=True, http=FakeHttp([]), store=store, today=today)
+    assert rep["errors"] == [] and rep["entities"] == ids and rep["series"] == 74 and rep["dry_run"] is True
+    assert rep["backfill"]["requests"] == 222 and rep["backfill"]["cached"] == 3182 and rep["consolidated"]["derived"] == 0
+    assert ts.output_stem("2023-01", "2026-10", (), (), ids) == "timeseries_2023-01_2026-10_all"
 
 
 def test_backfill_caches_and_stops_asking_for_old_months(tmp_path):
@@ -574,17 +668,60 @@ def test_cli_dry_run_makes_no_requests(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "cli.sqlite"))
     monkeypatch.setenv("LITRADAR_OUT_DIR", str(tmp_path / "digests"))
-    rc = main(["timeseries", "--vendor", "pacb", "--from", "2024-01", "--to", "2024-03", "--sources", "sra,ena", "--dry-run"])
+    rc = main(["timeseries", "--vendor", "pacb", "--from", "2024-01", "--to", "2024-03", "--sources", "sra,ena", "--dry-run", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
     import json
 
     rep = json.loads(out)
     assert rep["dry_run"] is True and rep["entities"][:1] == ["pacb-rs-ii"] and "pacb-revio" in rep["entities"]
-    # 6 PacBio entities with 8 archive model strings per source (rs ii, rs, sequel, sequel ii, sequel iie, revio, vega, onso)
-    # x 3 months x 2 sources = 48 planned requests, minus the 6 Vega months before its 2024-11 launch (stored as 0, no request)
-    assert rep["backfill"]["requests"] == 42 and rep["backfill"]["cached"] == 0 and rep["backfill"]["pre_launch"] == 6
+    # 6 PacBio entities = 6 series per source (one request per entity, however many strings it lists)
+    # x 3 months x 2 sources = 36 planned requests, minus the 6 Vega months before its 2024-11 launch (stored as 0, no request)
+    assert rep["backfill"]["requests"] == 30 and rep["backfill"]["cached"] == 0 and rep["backfill"]["pre_launch"] == 6
+    assert rep["series"] == 12 and rep["consolidated"] == {"derived": 0, "pruned": 0, "partial": 0, "entities": []}
+    # without --json the summary lines carry the same digits
+    rc = main(["timeseries", "--vendor", "pacb", "--from", "2024-01", "--to", "2024-03", "--sources", "sra,ena", "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0 and out.startswith("timeseries: 6 entities, 12 series, 3 months (2024-01..2024-03), sources sra,ena\n")
+    assert "dry run: would make 30 requests; 0 cached, 6 pre-launch zeros, 0 failed, 0 kept; refresh cutoff " in out
+    assert "(sra 15 requests / 0 cached, ena 15 requests / 0 cached)" in out
+    # --all plans every entity; --all with --vendor warns and still selects everything
+    rc = main(["timeseries", "--all", "--vendor", "pacb", "--from", "2024-01", "--to", "2024-01", "--sources", "sra", "--dry-run", "--json"])
+    rep = json.loads(capsys.readouterr().out)
+    # every entity is selected; one request per SRA series for the single month, minus the pre-launch zeros (Vega, launched 2024-11)
+    assert rc == 0 and len(rep["entities"]) >= 27 and rep["backfill"]["pre_launch"] == 1
+    assert rep["backfill"]["requests"] == rep["series"] - rep["backfill"]["pre_launch"]
+    assert any("--all selects every entity" in w for w in rep["warnings"])
     assert main(["timeseries", "--from", "2024-01", "--to", "2024-01", "--dry-run"]) == 1  # no entities selected
+
+
+def test_weekly_workflow_refreshes_the_cache_after_the_radar_run():
+    """weekly.yml: one `timeseries --all` step after `litradar run` and before the database is compressed, allowed to
+    fail without failing the digest, no `${{ }}` in its shell, every action still pinned to a full SHA."""
+    import re
+
+    import yaml
+
+    path = ROOT / ".github" / "workflows" / "weekly.yml"
+    wf = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = wf["jobs"]["radar"]["steps"]
+    runs = [s.get("run", "") for s in steps]
+    radar_i = next(i for i, r in enumerate(runs) if "python -m litradar run " in r)
+    ts_i = next(i for i, r in enumerate(runs) if "python -m litradar timeseries --all --refresh-months 2 --no-chart" in r)
+    compress_i = next(i for i, r in enumerate(runs) if "zstd -T0" in r)
+    assert radar_i < ts_i < compress_i
+    step = steps[ts_i]
+    assert step["continue-on-error"] is True and "${{" not in step["run"] and "set -euo pipefail" in step["run"]
+    assert re.search(r"timeout -s INT -k 60 \d+m python -m litradar timeseries --all --refresh-months 2 --no-chart", step["run"])
+    assert "222" in path.read_text(encoding="utf-8")   # the documented weekly request budget
+    assert wf["jobs"]["radar"]["permissions"] == {"contents": "read"}
+    pin = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+    for job in wf["jobs"].values():
+        for s in job.get("steps", []):
+            if s.get("uses"):
+                assert pin.match(s["uses"]), s["uses"]
+    # the on-demand job is untouched: still one vendor into a scratch database, nothing committed
+    assert "--vendor \"$VENDOR_INPUT\"" in wf["jobs"]["timeseries"]["steps"][-2]["run"]
 
 
 def test_check_config_validates_archive_models(capsys):
