@@ -51,9 +51,8 @@ from urllib.request import Request, pathname2url, urlopen
 
 from . import __version__
 from . import query as Q
-from .store import Store
+from .store import FTS_COLUMNS, Store  # the FTS columns `in=` accepts, the gazetteer's `mentions` included
 
-FTS_COLUMNS: Tuple[str, ...] = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body")
 ENTITY_KINDS: Tuple[str, ...] = ("instrument", "company")
 MAX_LIMIT = 200  # per-paper endpoints (/search, /top, /entities)
 MAX_COUNT_LIMIT = 500  # aggregate endpoints (/instruments, /companies, /archive, /news)
@@ -67,7 +66,7 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
 _ENTITY_PATH_RE = re.compile(r"^/entities/([a-z]+)/(.+)/papers$")
 
 ENDPOINTS: List[Dict[str, str]] = [
-    {"path": "/search", "params": "q (required), since, in, limit", "returns": "full-text hits with snippet, instrument and company chips"},
+    {"path": "/search", "params": "q (required), since, in, limit", "returns": "full-text hits with snippet (paper text; `section` names its column), instrument and company chips"},
     {"path": "/papers/{id}", "params": "", "returns": "paper, mentions, score, tracked_authors"},
     {"path": "/entities/{kind}/{id}/papers", "params": "since, limit", "returns": "papers mentioning one instrument or company id"},
     {"path": "/instruments", "params": "since, until, limit", "returns": "instrument counts in the window"},
@@ -821,7 +820,7 @@ code { font-size: .88em; background: var(--line); padding: 0 4px; border-radius:
 <body>
 <main>
 <h1>Literature radar search</h1>
-<p class="sub" id="stats">Full-text search over stored papers: titles, abstracts, Methods, funding, competing interests, affiliations and open-access bodies.</p>
+<p class="sub" id="stats">Full-text search over stored papers: titles, abstracts, Methods, funding, competing interests, affiliations and open-access bodies, plus the gazetteer's attributions (mentions: entity names, matched aliases and ids).</p>
 <form id="f" autocomplete="off">
   <input id="q" type="search" placeholder='e.g. methods:Xenium  or  "spatial transcriptomics" NEAR(single-cell)  or  NovaSeq*' autofocus>
   <select id="since" title="published since">
@@ -838,7 +837,7 @@ JSON: <a href="/api">/api</a> · <a href="/stats">/stats</a> · <a href="/digest
 </main>
 <script nonce="__NONCE__">
 (function () {
-  var COLS = ["title", "abstract", "methods", "funding", "coi", "affiliations", "body"];
+  var COLS = ["title", "abstract", "methods", "funding", "coi", "affiliations", "body", "mentions"];
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, attrs, children) {
     var n = document.createElement(tag);

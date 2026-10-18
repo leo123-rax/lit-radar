@@ -13,11 +13,13 @@ The first three are read-only and all three run the same FTS5 query language aga
 differ in one convenience: the **CLI** (and the watchlist) treats plain text as a phrase, the **API** and
 **Datasette** take the query exactly as written. See "Plain text versus FTS5 syntax" below.
 
-**What is searched is stored text.** The gazetteer matcher behind `litradar entity`, the digest and the
-`/entities` endpoint also resolves aliases (a paper that says "Next GEM 5' reagent kit" is attributed to
-Chromium), so an entity can have mentions that no text search for its name will find. Ask by entity id
-(`litradar entity txg-chromium`, `/entities/instrument/txg-chromium/papers`) when you want the matcher's
-view; search when you want the words.
+**What is searched is stored text, plus the gazetteer's attributions.** The matcher behind `litradar entity`,
+the digest and the `/entities` endpoint resolves aliases (a paper that says "Next GEM 5' reagent kit" is
+attributed to Chromium); what it attributed is indexed as the `mentions` column (section 1), so a search for
+an entity's name or id also finds papers whose text never spells it out, and such a hit says so
+(`section: mentions`, see section 2). Ask by entity id (`litradar entity txg-chromium`,
+`/entities/instrument/txg-chromium/papers`) when you want the matcher's view with sections and counts; search
+when you want the words.
 
 ## 1. What is indexed
 
@@ -32,6 +34,12 @@ view; search when you want the words.
 | `coi` | competing-interests / disclosures | `coi:Illumina` - employees, consultants, equity |
 | `affiliations` | author affiliation strings | `affiliations:"Genomics Inc"` - industry authors |
 | `body` | the rest of the open-access full text | everything else |
+| `mentions` | **not paper text**: what the gazetteer attributed to the paper - every matched instrument and company as canonical name, matched alias and id, `;`-joined (`Chromium ; Next GEM ; txg-chromium`) | `mentions:txg-chromium`, `mentions:"Next GEM"` - the matcher's view, by id or alias |
+
+`mentions` is maintained from the mentions table whenever a paper is (re)matched, and it is searched by
+default like every other column: a plain `Chromium` finds a paper that only says "Next GEM", because the
+canonical name is indexed. `--in title,abstract` (CLI) or `in=title,abstract` (API) keeps a search to paper
+text; `--in mentions` asks only the matcher.
 
 Tokenizer facts that change how you write queries:
 
@@ -66,7 +74,14 @@ Tokenizer facts that change how you write queries:
 | a literal quote inside a phrase | `"said ""hi"""` | double the quote character |
 
 Ranking: results are ordered by `bm25(papers_fts)` (lower is better); the API returns it as `rank`.
-Snippets mark matched tokens with `[` and `]`.
+
+Snippets are 18-token excerpts with the matched tokens in `[` and `]`, cut from the paper's own text: among
+`title`, `abstract`, `methods`, `funding`, `coi`, `affiliations` and `body`, the column whose best window holds
+the most matches wins, the earlier column on a tie, and `section` names it (the CLI prints it as `[methods]`
+before the excerpt, the search page as "matched in methods"). Only a paper that matched through the
+`mentions` column alone - nothing in its text matched, the gazetteer attributed the entity through an alias -
+shows that column's `;`-joined entries, with `section: mentions`. Snippets are computed for the returned rows
+after ranking, so a broad query costs no more than a narrow one.
 
 **Section filter versus column filter.** `--in methods,coi` (CLI) or `in=methods,coi` (API) wraps your
 whole query as `{methods coi}: (query)`; writing `methods:` inside the query does the same for one
@@ -144,7 +159,7 @@ Properties:
 
 | Endpoint | Parameters | Returns |
 |---|---|---|
-| `/search` | `q` (required, FTS5 as written), `since`, `in` (comma list of columns), `limit` (default 50, max 200), `mentions=0` (also `false`/`no`) to skip chips | `{query, since, sections, limit, count, results[]}`; each hit: `id, doi, title, journal, pub_date, url, kind, source, snippet, rank, instruments[], companies[]`; an FTS5 syntax error is a `400` with SQLite's message |
+| `/search` | `q` (required, FTS5 as written), `since`, `in` (comma list of columns, `mentions` included), `limit` (default 50, max 200), `mentions=0` (also `false`/`no`) to skip chips | `{query, since, sections, limit, count, results[]}`; each hit: `id, doi, title, journal, pub_date, url, kind, source, snippet, section, rank, instruments[], companies[]` (`section` = the column the snippet was cut from, section 2); an FTS5 syntax error is a `400` with SQLite's message |
 | `/papers/{id}` or `/papers?id=` | id may be URL-encoded (`doi%3A10.1000%2Fabc`) or raw | the paper with `authors[]` (no e-mail field), `affiliations[]`, `sections{}`, `topics[]`, `extra{}` (no `emails`), plus `mentions[]`, `score{heuristic, llm, final, reasons}`, `tracked_authors[]`; unknown id: `404` |
 | `/entities/{kind}/{id}/papers` | `kind` = `instrument` or `company` (anything else: `400`); `since`; `limit` (max 200) | `{kind, entity_id, entity{name, vendor, ticker, category}, since, limit, count, results[]}`; one row per paper with `sections[]`, `mentions`, `snippet`. An id with no stored mention is `404 unknown instrument id '...'` (the message says when the id exists under the other kind); the API has no gazetteer, so a valid entry nothing has cited yet is also a 404 |
 | `/instruments` | `since`, `until`, `limit` (default 60, max 500) | instrument counts: `entity_id, entity_name, vendor, ticker, category, papers, mentions, sections[], example_title, example_url` |

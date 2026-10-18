@@ -86,6 +86,12 @@ def mention_role(section: str, snippet: Optional[str]) -> str:
 FTS_COLUMNS = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body", "mentions")
 # the `mentions` column is maintained from the mentions table; the others are text columns of the paper
 FTS_TEXT_COLUMNS = FTS_COLUMNS[:-1]
+FTS_TABLE_COLUMNS = ("id",) + FTS_COLUMNS  # declaration order in FTS_DDL = the column numbers FTS5 functions take
+SNIPPET_TOKENS = 18  # width of a search snippet, in FTS5 tokens
+# Search snippets are highlighted with these control characters inside SQL and swapped for the public '[' / ']'
+# once the column is chosen: paper text contains '[' itself (citation numbers such as "[12]"), so counting the
+# public markers would mistake a bracketed reference for a match.
+_SNIP_L, _SNIP_R = "\x02", "\x03"
 FTS_DDL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
   id UNINDEXED, {", ".join(FTS_COLUMNS)},
@@ -324,6 +330,33 @@ def mentions_text(rows: Iterable[Sequence[Any]]) -> str:
             if tok:
                 seen.setdefault(tok, None)
     return " ; ".join(seen)
+
+
+def choose_snippet(per_column: Sequence[str]) -> Tuple[Optional[str], str]:
+    """Pick one search snippet from FTS5's per-column snippets (ordered as FTS_COLUMNS, matches highlighted with
+    `_SNIP_L` / `_SNIP_R`). Returns ``(column, text)`` with the public ``[`` ``]`` markers.
+
+    The text columns (title, abstract, methods, funding, coi, affiliations, body) come first: the one whose window
+    highlights the most matched tokens wins, the earlier column on a tie. The `mentions` column (the gazetteer's
+    ' ; '-joined names, aliases and ids, which is not paper text) is shown only when no text column matched, i.e.
+    the paper was found through an attribution alone. FTS5's own column choice (`snippet(..., -1, ...)`) prefers
+    the column whose window packs the most phrase instances, and the short, repetitive mentions text wins that
+    contest for almost every entity name, which is why it is scored separately here. A row with no highlight
+    anywhere falls back to the first non-empty text column, unmarked."""
+    texts = list(per_column) + [""] * (len(FTS_COLUMNS) - len(per_column))
+    best: Optional[str] = None
+    best_hits = 0
+    for col, text in zip(FTS_TEXT_COLUMNS, texts):
+        hits = text.count(_SNIP_L)
+        if hits > best_hits:
+            best, best_hits = col, hits
+    if best is None:
+        if _SNIP_L in texts[FTS_COLUMNS.index("mentions")]:
+            best = "mentions"
+        else:
+            best = next((col for col, text in zip(FTS_TEXT_COLUMNS, texts) if text.strip()), None)
+    text = texts[FTS_COLUMNS.index(best)] if best else ""
+    return best, text.replace(_SNIP_L, "[").replace(_SNIP_R, "]")
 
 
 def _category_clause(categories: Optional[Sequence[str]], platform_only: Optional[bool]) -> Tuple[str, List[Any]]:
@@ -1422,6 +1455,12 @@ class Store:
     def search(self, query: str, since: Optional[str] = None, limit: int = 50, sections: Sequence[str] = (), fallback: bool = True) -> List[Dict[str, Any]]:
         """Full-text search. `sections` restricts to FTS columns (e.g. ['methods'] or ['mentions']).
 
+        Each row carries ``snippet``, an excerpt of SNIPPET_TOKENS tokens with the matched tokens in ``[`` ``]``,
+        and ``section``, the FTS column it was cut from. The snippet is paper text whenever paper text matched
+        (see :func:`choose_snippet` for the choice between columns); a paper found only through the gazetteer's
+        `mentions` column shows that column with ``section == 'mentions'``. Snippets are computed for the
+        returned rows alone, after ranking, not for every matching paper.
+
         When `query` is not valid FTS5 syntax (unbalanced parentheses, an unknown column such as
         ``nosuchcol:Xenium``) the search is retried as a quoted phrase and ``self.last_search_fallback`` holds
         the FTS5 error message, so a caller can tell the user what happened instead of showing a silent empty
@@ -1437,7 +1476,7 @@ class Store:
         else:
             fts_query = query
         sql = """SELECT p.id, p.doi, p.title, p.journal, p.pub_date, p.url, p.kind, p.source,
-                        snippet(papers_fts, -1, '[', ']', ' … ', 18) AS snippet, bm25(papers_fts) AS rank
+                        papers_fts.rowid AS fts_rowid, bm25(papers_fts) AS rank
                  FROM papers_fts JOIN papers p ON p.rowid = papers_fts.rowid
                  WHERE papers_fts MATCH ?"""
         params: List[Any] = [fts_query]
@@ -1447,7 +1486,7 @@ class Store:
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
         try:
-            return _rows(self.conn.execute(sql, params))
+            return self._search_rows(sql, params)
         except sqlite3.OperationalError as exc:
             if not fallback:
                 raise
@@ -1456,10 +1495,33 @@ class Store:
             phrase = '"' + query.replace('"', " ") + '"'
             params[0] = f"{{{' '.join(sections)}}}: ({phrase})" if sections else phrase
             try:
-                return _rows(self.conn.execute(sql, params))
+                return self._search_rows(sql, params)
             except sqlite3.OperationalError as exc2:
                 log.warning("search fell back to a phrase query and still failed: %s", exc2)
                 return []
+
+    def _search_rows(self, sql: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
+        """Run a ranked search statement (``params[0]`` is the FTS5 query, each row has `fts_rowid`) and attach
+        `snippet` + `section` to the rows it returned; `fts_rowid` is consumed."""
+        rows = _rows(self.conn.execute(sql, params))
+        chosen = self.snippets(str(params[0]), [r["fts_rowid"] for r in rows])
+        for r in rows:
+            r["section"], r["snippet"] = chosen.get(r.pop("fts_rowid"), (None, ""))
+        return rows
+
+    def snippets(self, fts_query: str, rowids: Sequence[int]) -> Dict[int, Tuple[Optional[str], str]]:
+        """``{papers_fts rowid: (section, snippet)}`` for the given rows of a MATCH on `fts_query`: every FTS
+        column's best window is cut by FTS5 and :func:`choose_snippet` picks the column, so paper text beats the
+        `mentions` column whenever paper text matched. One statement over the listed rows only (``MATCH ... AND
+        rowid IN (...)``), which is what makes snippets affordable after ranking and LIMIT."""
+        ids = list(dict.fromkeys(int(r) for r in rowids))
+        if not ids:
+            return {}
+        # FTS5 numbers every declared column, the UNINDEXED `id` included, so `title` is column 1, not 0
+        cuts = ", ".join(f"snippet(papers_fts, {FTS_TABLE_COLUMNS.index(c)}, ?, ?, ' … ', {SNIPPET_TOKENS})" for c in FTS_COLUMNS)
+        sql = f"SELECT rowid, {cuts} FROM papers_fts WHERE papers_fts MATCH ? AND rowid IN ({', '.join('?' * len(ids))})"
+        marks: List[Any] = [_SNIP_L, _SNIP_R] * len(FTS_COLUMNS)
+        return {row[0]: choose_snippet(row[1:]) for row in self.conn.execute(sql, marks + [fts_query] + ids)}
 
     def entity_papers(self, entity_id: str, since: Optional[str] = None, limit: int = 100, distinct: bool = False) -> List[Dict[str, Any]]:
         """Papers mentioning an entity, newest first.
