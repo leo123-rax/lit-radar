@@ -243,6 +243,26 @@ renderer always states the bucket rule; the sentence reconciling it with the dig
 (`digest_window_note(since, until)`) is printed only when passed as `window_note=`, which neither
 caller does today.
 
+## Coverage helpers shared with other modules
+
+Two pieces of the coverage logic are public so the rule is implemented once and other sections cannot drift from it:
+
+* `paper_week_comparability(store, until, weeks=13, min_week_fraction=0.25, min_source_coverage=0.75)` runs the
+  comparable-week rule alone (no deltas, no entity families): which of the `weeks` seven-day buckets before the one
+  ending on `until` have a source mix that covers the current week's. It returns `{until, week_start, weeks,
+  weeks_with_papers, comparable_weeks, dropped_source_mix, current_week_sources, week_bounds, min_week_fraction,
+  min_source_coverage}`; `week_bounds` maps every bucket index to its `[start, end]` so a caller with its own week
+  keys can line them up. `litradar.concepts.burst_report` uses it (ending the buckets on the Sunday of the current
+  ISO week, so bucket *k* is the ISO week `Monday − 7k`) to decide whether its burst z-scores mean anything; with
+  fewer than eight comparable baseline weeks the concepts section becomes a frequency list that names the step
+  (docs/concepts.md).
+* `period_coverage(covered_from, start, end)` generalises the 'last week' coverage check to any period: how many days
+  of `start`..`end` a layer that began on `covered_from` covers, and whether that is `partial`. `compute_trends` uses it
+  for the previous week against the earliest run / backfill; `Store.new_entities_report` uses it per mention section
+  (parsed Methods and COI text begin on the day full-text parsing began) against the period a digest window is
+  compared with, and `litradar.discovery` per evidence type, so a first appearance that is really a channel's first
+  parse is withheld or labelled rather than printed as new (docs/store.md §6, docs/discovery.md).
+
 ## Limitations
 
 * Trends are computed on the current contents of the store. A paper published three weeks ago but

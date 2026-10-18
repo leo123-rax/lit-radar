@@ -26,6 +26,15 @@ Burst score: for each term with >= `min_papers` papers in the current 4 weeks, c
 total with the trailing 26-week baseline (weekly mean and std with a Poisson-style floor) and add a
 novelty bonus when the term was first seen in the last 8 weeks. Terms first seen in the current 4
 weeks are also ranked separately as "new this month".
+
+Only baseline weeks that are *comparable* with the current week enter the mean and std: the trends
+module's coverage-step rule (`litradar.trends.paper_week_comparability`, imported, not re-implemented)
+drops weeks whose source mix does not cover the current week's (a capped single-source backfill under a
+multi-source live week). With fewer than `WEAK_BASELINE_WEEKS` comparable weeks the report is a
+`frequency_list` (`mode_reason` "coverage_step" or "few_weeks") and the rendered section says so in
+plain words; a z-score against incomparable weeks would measure the step in coverage, not the literature.
+Records that are deposits rather than papers (`litradar.worktype`, e.g. instrument-facility data
+records arriving without a work_type) are never counted.
 """
 from __future__ import annotations
 
@@ -43,9 +52,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import yaml
 
+from . import worktype
 from .extract.gazetteer import _is_ambiguous, load_entries
 from .models import is_paper_record
 from .store import Store
+from .trends import paper_week_comparability
 
 log = logging.getLogger(__name__)
 
@@ -863,13 +874,19 @@ def _is_paper(row: Dict[str, Any]) -> bool:
     except ValueError:
         extra = {}
     work_type = extra.get("work_type") if isinstance(extra, dict) else None
-    return is_paper_record(work_type if isinstance(work_type, str) else None, row.get("title"))
+    work_type = work_type if isinstance(work_type, str) else None
+    if not is_paper_record(work_type, row.get("title")):
+        return False
+    # a deposit that arrived without a work_type (a live OpenAlex pull, a facility repository such as the DOE / EMSL
+    # data records) is recognised from its DOI prefix, venue or title (`litradar.worktype`)
+    return not worktype.is_deposit(worktype.classify(str(row.get("title") or ""), str(row.get("abstract") or ""),
+                                                     str(row.get("doi") or ""), str(row.get("journal") or ""), work_type or ""))
 
 
 def _paper_rows(store: Store, first_week: str, last_week: str) -> List[Dict[str, Any]]:
     last_day = (datetime.strptime(last_week, "%Y-%m-%d").date() + timedelta(days=6)).isoformat()
     cur = store.conn.execute(
-        """SELECT id, title, abstract, sections_json, pub_date, first_seen, extra_json FROM papers
+        """SELECT id, title, abstract, sections_json, pub_date, first_seen, extra_json, doi, journal FROM papers
            WHERE (pub_date >= ? AND pub_date <= ?)
               OR (pub_date = '' AND substr(first_seen,1,10) >= ? AND substr(first_seen,1,10) <= ?)""",
         (first_week, last_day, first_week, last_day),
@@ -1014,6 +1031,33 @@ def _term_details(store: Store, term: str, cur_weeks: Sequence[str], excl: Optio
     return {"examples": examples, "instruments": instruments, "companies": companies, "subgroups": subgroups}
 
 
+def _baseline_comparability(store: Store, cur_monday: str, base_weeks: Sequence[str], current_weeks: int) -> Dict[str, Any]:
+    """Which baseline ISO weeks (Monday keys) are comparable with the current ISO week, by the trends rule.
+
+    `paper_week_comparability` buckets seven-day weeks ending on a date; with the date set to the Sunday of the
+    current ISO week, bucket k is the ISO week starting `cur_monday - 7k days`, so its verdicts map one-to-one onto
+    the Monday keys the concept tables use. The rule itself is not re-implemented here."""
+    monday = datetime.strptime(cur_monday, "%Y-%m-%d").date()
+    window_end = (monday + timedelta(days=6)).isoformat()
+    n_weeks = len(base_weeks) + max(1, current_weeks) - 1
+    info = paper_week_comparability(store, window_end, weeks=max(1, n_weeks))
+    monday_of = {k: (monday - timedelta(days=7 * k)).isoformat() for k in range(0, n_weeks + 1)}
+    base = set(base_weeks)
+    comparable = {monday_of[k] for k in info["comparable_weeks"] if k in monday_of}
+    dropped = [
+        {"week": monday_of[d["week"]], "total": d["total"], "covered_share": d["covered_share"], "missing": d["missing"]}
+        for d in info["dropped_source_mix"] if d["week"] in monday_of and monday_of[d["week"]] in base
+    ]
+    return {
+        "current_week": cur_monday,
+        "current_week_sources": info["current_week_sources"],
+        "comparable_mondays": comparable & base,
+        "dropped": sorted(dropped, key=lambda d: d["week"]),
+        "min_source_coverage": info["min_source_coverage"],
+        "min_week_fraction": info["min_week_fraction"],
+    }
+
+
 def burst_report(
     store: Store,
     until: str,
@@ -1051,6 +1095,14 @@ def burst_report(
     active_weeks = {r["week"] for r in rows}
     base_active = [w for w in base_weeks if w in active_weeks]
     cur_active = [w for w in cur_weeks if w in active_weeks]
+    # the coverage step (litradar.trends): a baseline week whose source mix does not cover the current week's (a
+    # capped single-source backfill under a multi-source live week) is not comparable with it, and a z-score against
+    # such weeks measures the step in coverage, not a change in the literature. The trends rule works on seven-day
+    # buckets ending on a date; ending them on the Sunday of the current ISO week makes bucket k the ISO week
+    # `cur_weeks[-1] - 7k days`, so the verdicts map one-to-one onto the Monday keys used here.
+    comparability = _baseline_comparability(store, cur_weeks[-1], base_weeks, current_weeks)
+    comparable_mondays = comparability["comparable_mondays"]
+    base_comparable = [w for w in base_active if w in comparable_mondays]
     counts: Dict[str, Dict[str, int]] = defaultdict(dict)
     display: Dict[str, str] = {}
     for r in rows:
@@ -1069,12 +1121,16 @@ def burst_report(
                               "first_seen_label": first_seen_label(fs)})
         if cur_total < min_papers:
             continue
-        series = [by_week.get(w, 0) for w in base_active]
+        # the z is measured against the comparable baseline weeks only; the papers/week over every baseline week
+        # that holds papers is kept alongside so a frequency list can still show what the (incomparable) past looked like
+        series = [by_week.get(w, 0) for w in base_comparable]
+        all_series = [by_week.get(w, 0) for w in base_active]
         is_new = bool(fs) and fs >= novelty_cut
         s = score_term(cur_total, series, len(cur_active) or 1, is_new)
         s.update({
             "term": term, "display": display.get(term, term), "papers": cur_total, "first_seen": fs, "is_new": is_new,
             "first_seen_label": first_seen_label(fs),
+            "baseline_mean_all_weeks": round(sum(all_series) / float(len(all_series)), 3) if all_series else 0.0,
             "series": [by_week.get(w, 0) for w in all_weeks],
         })
         scored.append(s)
@@ -1120,14 +1176,27 @@ def burst_report(
     for d in risers + new_terms:
         if d["term"] in defs:
             d["definition"] = defs[d["term"]]
-    weak = len(base_active) < WEAK_BASELINE_WEEKS
+    weak = len(base_comparable) < WEAK_BASELINE_WEEKS
+    # why the report is a frequency list: "few_weeks" = too few baseline weeks hold papers at all; "coverage_step" =
+    # enough weeks hold papers but too few are comparable with the current week (the trends rule); None in burst mode
+    mode_reason = None if not weak else ("few_weeks" if len(base_active) < WEAK_BASELINE_WEEKS else "coverage_step")
     return {
         "until": until, "current_weeks": cur_weeks, "baseline_weeks": base_weeks,
         "baseline_active_weeks": len(base_active), "current_active_weeks": len(cur_active),
+        "baseline_comparable_weeks": len(base_comparable),
         "weak_baseline": weak,
-        # "frequency_list": too few baseline weeks for z-scores to mean anything, the ranking is count-driven and the
-        # report says so; "burst": the baseline supports burst detection
+        # "frequency_list": too few comparable baseline weeks for z-scores to mean anything, the ranking is
+        # count-driven and the report says so; "burst": the baseline supports burst detection
         "mode": "frequency_list" if weak else "burst",
+        "mode_reason": mode_reason,
+        "comparability": {
+            "rule": "litradar.trends.paper_week_comparability",
+            "current_week": comparability["current_week"],
+            "current_week_sources": comparability["current_week_sources"],
+            "dropped_source_mix": comparability["dropped"],  # baseline Monday keys that hold papers but are not comparable
+            "min_source_coverage": comparability["min_source_coverage"],
+            "min_week_fraction": comparability["min_week_fraction"],
+        },
         "corpus_start_week": corpus_start_week, "history_weeks": history_weeks,
         "params": {"min_papers": min_papers, "min_new_papers": min_new_papers, "novelty_weeks": novelty_weeks, "std_floor": STD_FLOOR, "novelty_bonus": NOVELTY_BONUS},
         "candidates": len(scored), "risers": risers, "new_terms": new_terms, "new_terms_total": n_new_total,
@@ -1383,12 +1452,16 @@ def render_report_markdown(
     cw = report["current_weeks"]
     window_end = (datetime.strptime(cw[-1], "%Y-%m-%d").date() + timedelta(days=6)).isoformat()
     freq_mode = report.get("mode") == "frequency_list" or bool(report.get("weak_baseline"))
+    n_active = int(report["baseline_active_weeks"])
+    n_comparable = int(report.get("baseline_comparable_weeks", n_active))
+    coverage_step = freq_mode and (report.get("mode_reason") == "coverage_step")
     show_first_seen = freq_mode if first_seen_column is None else bool(first_seen_column)
     md.append(
         f"Technical phrases (methods, assays, modalities, model classes) extracted from titles, abstracts and parsed Methods with no ML, "
         f"counted as distinct papers per week and compared with a trailing {len(report['baseline_weeks'])}-week baseline. "
         f"Product and company names from the gazetteers are excluded. Current window: {cw[0]} to {window_end} ({len(cw)} weeks); "
-        f"baseline weeks with data: {report['baseline_active_weeks']}. Score = z-score against the baseline plus a novelty bonus for terms first seen in the last {report['params']['novelty_weeks']} weeks.\n"
+        f"baseline weeks with data: {n_active}" + (f" ({n_comparable} comparable with the current week)" if n_comparable != n_active else "")
+        + f". Score = z-score against the comparable baseline weeks plus a novelty bonus for terms first seen in the last {report['params']['novelty_weeks']} weeks.\n"
     )
     if freq_mode:
         start = report.get("corpus_start_week") or "?"
@@ -1396,11 +1469,29 @@ def render_report_markdown(
             f"'First seen in corpus' is the ISO week (Monday) a term first appeared in the counted corpus; '≤ {start} (corpus start)' means it was already "
             "present in the first counted week, so its true first appearance is unknown. " if show_first_seen else ""
         )
-        md.append(
-            f"_Weak baseline — this is a **frequency list, not burst detection**: only {report['baseline_active_weeks']} baseline week(s) hold papers "
-            f"({WEAK_BASELINE_WEEKS} are needed before z-scores mean anything), so the Score column is driven by raw paper counts and almost every term counts as new. "
-            f"{column_note}Treat this section as a candidate list until the corpus holds {WEAK_BASELINE_WEEKS}+ weeks._\n"
-        )
+        if coverage_step:
+            comp = report.get("comparability") or {}
+            sources = comp.get("current_week_sources") or {}
+            src_s = ", ".join(f"{k} {int(v):,}" for k, v in list(sources.items())[:6]) or "no recorded source"
+            dropped = comp.get("dropped_source_mix") or []
+            missing: Counter = Counter(m for d in dropped for m in (d.get("missing") or []))
+            miss_s = ", ".join(k for k, _ in missing.most_common(4)) or "the current week's sources"
+            share = float(comp.get("min_source_coverage") or 0.0)
+            md.append(
+                f"_Coverage step — this is a **frequency list, not burst detection**: {n_active} baseline week(s) hold papers but only {n_comparable} "
+                f"of them are comparable with the current week ({WEAK_BASELINE_WEEKS} are needed). The current week ({comp.get('current_week') or cw[-1]}, Monday) "
+                f"is fed by {src_s}; the {len(dropped)} baseline week(s) left out lack {miss_s} (a baseline week is comparable when the sources represented in it "
+                f"supply {share:.0%} of the current week's papers — the rule the 'What changed' section applies). A z-score against those weeks would measure "
+                f"the step in coverage, not a change in the literature, so the Score column is driven by raw paper counts, 'Baseline /wk' shows the incomparable "
+                f"weeks for information only, and 'new' mostly marks terms first counted since the step. {column_note}Treat this section as a candidate list until "
+                f"{WEAK_BASELINE_WEEKS}+ comparable weeks exist._\n"
+            )
+        else:
+            md.append(
+                f"_Weak baseline — this is a **frequency list, not burst detection**: only {n_active} baseline week(s) hold papers "
+                f"({WEAK_BASELINE_WEEKS} are needed before z-scores mean anything), so the Score column is driven by raw paper counts and almost every term counts as new. "
+                f"{column_note}Treat this section as a candidate list until the corpus holds {WEAK_BASELINE_WEEKS}+ weeks._\n"
+            )
     risers = report["risers"][:top]
     rows = []
     for d in risers:
@@ -1410,10 +1501,12 @@ def render_report_markdown(
         row = [d["display"], d["papers"]]
         if show_first_seen:
             row.append(d.get("first_seen_label") or d.get("first_seen") or "?")
-        row += [f"{d['baseline_mean']:.1f}", d["score"], flag, _spark(d.get("series") or []), subs, co]
+        baseline = d.get("baseline_mean_all_weeks", d["baseline_mean"]) if coverage_step else d["baseline_mean"]
+        row += [f"{float(baseline):.1f}", d["score"], flag, _spark(d.get("series") or []), subs, co]
         rows.append(row)
     headers = ["Concept", "Papers (window)"] + (["First seen in corpus"] if show_first_seen else []) + [
-        "Baseline /wk", "Score (count-driven)" if freq_mode else "Score", "", "Trend", "Subgroups", "Co-mentioned"]
+        "Baseline /wk (not comparable)" if coverage_step else "Baseline /wk",
+        "Score (count-driven)" if freq_mode else "Score", "", "Trend", "Subgroups", "Co-mentioned"]
     md.append("### Top risers\n")
     md.append(_table(headers, rows))
     new_terms = report["new_terms"][:top]

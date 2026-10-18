@@ -90,14 +90,18 @@ how the code enforces them are in `docs/LEGAL.md`; the short version is `docs/AC
   ticker, paper count and an example; **lab infrastructure and consumables** (QC, library prep,
   PCR, automation, imaging, cytometry, bioprocess) in a separate table so they do not crowd it.
 * **Instruments behind newly public sequencing data**: NCBI SRA + ENA experiments by declared
-  instrument model, vendor share and library strategies. These count experiments, not machines,
+  instrument model, vendor share and library strategies, each row with the share its single largest
+  study supplies (named at 50 % or more, with a footnote), so one 35,000-experiment submission is read
+  as that study and not as a fleet-wide shift. These count experiments, not machines,
   and lag the experiment by months. The study-level GEO census (Series × platform) sits in the same
   table, flagged as studies; proteomics datasets per declared mass spectrometer (PRIDE) and
   single-cell / spatial assays (CELLxGENE) get their own sub-tables; native Chinese experiments from
   NGDC GSA and GSA-Human join the census when the run pulled them.
 * **Companies in the literature**: how each company appears (as author, as funder or
   competing-interest disclosure, as subject, as supplier of a named instrument), typed so
-  institutes and pharma disclosures are not read as vendors; first-time appearances.
+  institutes and pharma disclosures are not read as vendors; first-time appearances by publication
+  date, labelled with the channel they came from, and withheld for a channel (parsed Methods or COI
+  text) whose own history is shorter than the comparison window.
 * **Tracked researchers**: new papers and preprints by the people in `config/subgroups.yaml`,
   grouped by subgroup; name-only matches are marked provisional until an OpenAlex id is set.
 * **Trade press & company news**: grouped by company, from the GDELT DOC 2.0 API (one query per

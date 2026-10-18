@@ -64,6 +64,10 @@ TRACKED_HINTS = {
 }
 SUMMARY_CHARS = 420  # abstract / fallback summary length in the top list
 _COI_SECTIONS = ("coi", "funding", "ack")
+# a census row is "concentrated" when one study / project supplies at least this share of its experiments: the
+# table names the study next to the share and a footnote says so, because one bulk submission otherwise reads as a
+# fleet-wide shift in library strategy or instrument use
+CONCENTRATION_SHARE = 0.5
 
 _URL_RE = re.compile(r"^https?://[^\s<>\"'`]+$", re.I)
 _WS_RE = re.compile(r"\s+")
@@ -147,15 +151,88 @@ def _vendor_share_table(rows: List[Dict[str, Any]]) -> str:
     return _table(["Vendor / platform", "Experiments", "Share"], [[k, v, f"{100.0 * v / total:.1f}%"] for k, v in sorted(vend.items(), key=lambda kv: -kv[1])])
 
 
-def _archive_table(rows: List[Dict[str, Any]], n: int, first_col: str = "Instrument model", unit: str = "Experiments", show_archive: bool = False) -> str:
-    headers = [first_col, "Vendor", "Ticker", unit, "Studies"] + (["Archive"] if show_archive else [])
+def _largest_study_cell(r: Dict[str, Any]) -> str:
+    """'99% SRP601550' when one study is at least CONCENTRATION_SHARE of the row, else the share alone ('9%'), '' without data."""
+    share = r.get("largest_study_share")
+    if share is None:
+        return ""
+    cell = f"{100.0 * float(share):.0f}%"
+    return f"{cell} {r.get('largest_study') or ''}".rstrip() if float(share) >= CONCENTRATION_SHARE else cell
+
+
+def _concentration_note(rows: List[Dict[str, Any]], label_key: str, noun: str) -> str:
+    """The footnote naming every row whose largest single study / project is at least CONCENTRATION_SHARE of it."""
+    heavy = [r for r in rows if (r.get("largest_study_share") or 0) >= CONCENTRATION_SHARE and int(r.get("experiments") or 0) > 0]
+    if not heavy:
+        return ""
+    parts = []
+    for r in heavy:
+        title = (r.get("largest_study_title") or "").strip()
+        title_s = f", '{esc(title[:70])}{'…' if len(title) > 70 else ''}'" if title else ""
+        parts.append(f"{esc(r.get(label_key) or '(not declared)')} is {100.0 * float(r['largest_study_share']):.0f}% one study "
+                     f"({esc(r.get('largest_study') or '?')}{title_s}: {int(r['largest_study_experiments']):,} of {int(r['experiments']):,} {noun})")
+    return (f"_Concentration: {'; '.join(parts)}. One submission of that size moves a row's count the way a fleet-wide change would; read those "
+            "rows as that study, not as the field._\n")
+
+
+def _archive_table(rows: List[Dict[str, Any]], n: int, first_col: str = "Instrument model", unit: str = "Experiments", show_archive: bool = False,
+                   concentration: bool = False) -> str:
+    headers = [first_col, "Vendor", "Ticker", unit, "Studies"] + (["Largest study"] if concentration else []) + (["Archive"] if show_archive else [])
     body = []
     for r in rows[:n]:
         cells = [r["instrument_model"] or "(not declared)", r.get("vendor") or "", r.get("ticker") or "", r["experiments"], r["studies"]]
+        if concentration:
+            cells.append(_largest_study_cell(r))
         if show_archive:
             cells.append(r.get("archive") or "")
         body.append(cells)
     return _table(headers, body)
+
+
+def _strategy_item(s: Dict[str, Any]) -> str:
+    """'Bisulfite-Seq (36,077; 99% one study, SRP601550)' when concentrated, else 'WGS (26,249)'."""
+    item = f"{esc(s['library_strategy'] or 'n/a')} ({int(s['experiments']):,}"
+    share = s.get("largest_study_share")
+    if share is not None and float(share) >= CONCENTRATION_SHARE:
+        item += f"; {100.0 * float(share):.0f}% one study, {esc(s.get('largest_study') or '?')}"
+    return item + ")"
+
+
+_CHANNEL_WITHHELD_NAMES = {"methods": "Methods text", "funding/COI": "funding, competing-interest or acknowledgement statements",
+                           "title/abstract": "titles and abstracts", "affiliations": "author affiliations"}
+
+
+def _first_appearance_lines(report: Dict[str, Any], kind: str, with_counts: bool, limit: int = 30) -> List[str]:
+    """The 'First appearance in the corpus this window' line for a `Store.new_entities_report`, each entity labelled by
+    the channel it first appeared in, and the note on first appearances withheld because their channel's history is
+    shorter than the comparison window (every supplier named only in Methods is 'new' on the day full-text parsing
+    began). Nothing is printed when the corpus holds no history before the window."""
+    out: List[str] = []
+    if not report or not report.get("has_history"):
+        return out
+    rows = report.get("rows") or []
+    if rows:
+        def item(r: Dict[str, Any]) -> str:
+            return f"{esc(r['entity_name'])} ({int(r['papers'])}; {esc(r['channel'])})" if with_counts else f"{esc(r['entity_name'])} ({esc(r['channel'])})"
+        more = f" … and {len(rows) - limit} more" if len(rows) > limit else ""
+        out.append("**First appearance in the corpus this window** (by publication date; the channel it first appeared in is given): "
+                   + ", ".join(item(r) for r in rows[:limit]) + more + "\n")
+    withheld = report.get("withheld") or {}
+    if withheld:
+        channels = report.get("channels") or {}
+        parts = []
+        for label, n in withheld.items():
+            ch = channels.get(label) or {}
+            short = ch.get("short_sections") or {}
+            start = min(short.values()) if short else (ch.get("history_from") or "?")
+            where = ", ".join(sorted(short)) if short else _CHANNEL_WITHHELD_NAMES.get(label, label)
+            noun = kind if int(n) == 1 else {"company": "companies"}.get(kind, kind + "s")
+            parts.append(f"{int(n)} {noun} named only in {esc(where)} text (parsed since {esc(start)})")
+        period = report.get("comparison_period") or {}
+        out.append(f"_First appearances withheld: {'; '.join(parts)}. That channel's history is shorter than the comparison period "
+                   f"({esc(period.get('start') or '?')} to {esc(period.get('end') or '?')}), so 'first' there means 'first since that channel was parsed', "
+                   "not new to the literature._\n")
+    return out
 
 
 def fallback_summary(store: Store, paper: Dict[str, Any], max_chars: int = SUMMARY_CHARS) -> Tuple[str, str]:
@@ -286,14 +363,15 @@ def render(
     archive_singlecell = store.archive_instrument_counts(since, until, archives=("cellxgene",))
     strategies = store.archive_strategy_counts(since, until, archives=SEQUENCING_ARCHIVES)
     companies = store.company_counts(since, until, limit=int(dcfg.get("companies_table_n", 40)))
-    new_companies = list(store.new_entities(since, "company"))
-    new_instruments = list(store.new_entities(since, "instrument"))
+    # first appearances by publication date, labelled by channel; channels whose history is shorter than the
+    # comparison window (parsed Methods / COI text since full-text parsing began) are withheld, not listed as new
+    new_companies = store.new_entities_report(since, "company", until)
+    new_instruments = store.new_entities_report(since, "instrument", until)
     tracked = store.tracked_hits_in_window(since, until)
     news = store.news_in_window(since, limit=news_n * 4, exclude_feeds=SIGNAL_FEEDS)
     signals = store.news_in_window(since, limit=signals_n * 4 * len(SIGNAL_FEEDS), feeds=SIGNAL_FEEDS)
     counts = store.counts()
     in_window = store.papers_in_window(since, until)
-    has_history = store.has_history_before(since)
     n_inst = store.distinct_entities_in_window(since, until, "instrument")
     n_platforms = store.distinct_entities_in_window(since, until, "instrument", platform_only=True)
     n_infra = max(0, n_inst - n_platforms)
@@ -406,21 +484,27 @@ def render(
     ))
     if n_infra > len(infra):
         md.append(f"_… and {n_infra - len(infra)} more product line(s) named in the window; the table shows the {len(infra)} with most papers (digest.lab_tools_table_n)._\n")
-    if new_instruments and has_history:
-        md.append("**First appearance in the corpus this window:** " + ", ".join(f"{esc(r['entity_name'])} ({int(r['papers'])})" for r in new_instruments[:20]) + "\n")
+    md.extend(_first_appearance_lines(new_instruments, "instrument", with_counts=True))
 
     # ---- archives
     archives_present = {a for r in archive for a in (r.get("archive") or "").split(",") if a}
     archive_label = ", ".join(SEQUENCING_ARCHIVE_LABELS[a] for a in SEQUENCING_ARCHIVES if a in archives_present) or ", ".join(SEQUENCING_ARCHIVE_LABELS.values())
     md.append(f"## Instruments behind newly public sequencing data ({archive_label})\n")
-    md.append("Each row is a sequencing *experiment* (SRA / ENA) or *series x platform* (GEO) released in the window, with the instrument model the submitter declared (SRA covers submissions worldwide; ENA adds European and Japanese records SRA has not mirrored yet; GEO is the study-level view behind most published expression and single-cell datasets). This is a census of what machines are producing data right now, independent of what gets written up. Deposits lag sequencing by months to years, and clinical or commercial sequencing is never deposited. Models the gazetteer cannot map are grouped under their declared platform, e.g. 'Illumina (model unspecified)'.\n")
+    md.append("Each row is a sequencing *experiment* (SRA / ENA) or *series x platform* (GEO) released in the window, with the instrument model the submitter declared (SRA covers submissions worldwide; ENA adds European and Japanese records SRA has not mirrored yet; GEO is the study-level view behind most published expression and single-cell datasets). This is a census of what machines are producing data right now, independent of what gets written up. Deposits lag sequencing by months to years, and clinical or commercial sequencing is never deposited. Models the gazetteer cannot map are grouped under their declared platform, e.g. 'Illumina (model unspecified)'. "
+              f"'Largest study' is the share of a row's experiments that its single biggest study / project supplies (the accession is named at {100 * CONCENTRATION_SHARE:.0f}% or more): a census row carried by one bulk submission is that submission, not the field.\n")
     if archive:
         md.append(_vendor_share_table(archive))
-        md.append(_archive_table(archive, int(dcfg.get("archive_table_n", 30)), show_archive=True))
+        md.append(_archive_table(archive, int(dcfg.get("archive_table_n", 30)), show_archive=True, concentration=True))
+        note = _concentration_note(archive[:int(dcfg.get("archive_table_n", 30))], "instrument_model", "experiments")
+        if note:
+            md.append(note)
     else:
         md.append("_nothing in this window_\n")
     if strategies:
-        md.append("Library strategies: " + ", ".join(f"{esc(s['library_strategy'] or 'n/a')} ({int(s['experiments'])})" for s in strategies) + "\n")
+        md.append("Library strategies: " + ", ".join(_strategy_item(s) for s in strategies) + "\n")
+        note = _concentration_note(strategies, "library_strategy", "experiments")
+        if note:
+            md.append(note)
     md.append("### Proteomics instruments behind new datasets (PRIDE)\n")
     md.append("One row per mass spectrometer declared on proteomics datasets made public in the window (one record per dataset x instrument).\n")
     md.append(_archive_table(archive_proteomics, int(dcfg.get("archive_table_n", 30)), unit="Datasets"))
@@ -458,8 +542,7 @@ def render(
         md.append("**AI tools and software used:** " + _company_line(ai_tools) + "\n")
     if unlisted:
         md.append("**Company-type institutions not in the gazetteer (candidates to add):** " + ", ".join(f"{esc(c['entity_name'])} ({int(c['papers'])})" for c in unlisted[:30]) + "\n")
-    if new_companies and has_history:
-        md.append("**First appearance in the corpus this window:** " + ", ".join(esc(r["entity_name"]) for r in new_companies[:30]) + "\n")
+    md.extend(_first_appearance_lines(new_companies, "company", with_counts=False))
 
     # ---- tracked researchers
     md.append("## Tracked researchers\n")
@@ -624,8 +707,10 @@ def render(
         "instruments": instruments, "platforms": platforms, "lab_tools": infra,
         "platforms_total": n_platforms, "lab_tools_total": n_infra,
         "archive": archive, "archive_proteomics": archive_proteomics, "archive_singlecell": archive_singlecell,
+        "archive_strategies": strategies,
         "companies": companies, "company_groups": {"main": [c["entity_id"] for c in main], "pharma": [c["entity_id"] for c in pharma],
                                                    "institutes": [c["entity_id"] for c in institutes], "ai_tools": [c["entity_id"] for c in ai_tools]},
+        "first_appearances": {"company": new_companies, "instrument": new_instruments},
         "tracked": tracked, "signals": signals,
         "counts": counts, "run": run_report,
     }

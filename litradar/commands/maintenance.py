@@ -1,11 +1,16 @@
 """`litradar maintenance`: store housekeeping that the weekly run never does on its own.
 
-  litradar maintenance [--stats-by-table] [--purge-sra-placeholders] [--refresh-entity-names] [--fts-rebuild] [--vacuum] [--json]
+  litradar maintenance [--stats-by-table] [--purge-sra-placeholders] [--relabel-deposits] [--refresh-entity-names] [--fts-rebuild] [--vacuum] [--json]
 
   --stats-by-table         row counts and on-disk bytes per table / index (the default when no action is given)
   --purge-sra-placeholders delete archive_records rows whose accession is a synthetic `SRA-UID-...` placeholder
                            (written by an older SRA parser when the experiment accession was missing; they carry
                            no study, platform or library strategy and cannot be de-duplicated against ENA)
+  --relabel-deposits       deposit records that arrived without an OpenAlex work_type (live pulls do not record
+                           one) and are recognised from their DOI prefix, venue or title (`litradar.worktype`:
+                           instrument-facility data records, dataset / software / supplementary deposits) get the
+                           matching work_type written into extra_json, and every tracked-author hit sitting on a
+                           deposit record is deleted (a deposit credits each facility user as an author)
   --refresh-entity-names   rewrite entity_name / ticker (and vendor / category for instruments) of every stored
                            mention from the current gazetteers: ids are stable, display names are not, and the
                            rows `rematch` keeps because their text is not stored would otherwise show the old name
@@ -13,8 +18,8 @@
   --vacuum                 return freed pages to the operating system (rewrites the file; needs free disk space
                            of about the file's size)
 
-Actions run in that order (purge, refresh, rebuild, vacuum) and the stats, when asked for, describe the store
-afterwards. Every number printed is measured on this database, nothing is estimated.
+Actions run in that order (purge, relabel, refresh, rebuild, vacuum) and the stats, when asked for, describe the
+store afterwards. Every number printed is measured on this database, nothing is estimated.
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ from ..config import Settings
 from ..extract.gazetteer import Entry, Gazetteer
 from ..store import Store
 
-ACTIONS = ("purge_sra_placeholders", "refresh_entity_names", "fts_rebuild", "vacuum", "stats_by_table")
+ACTIONS = ("purge_sra_placeholders", "relabel_deposits", "refresh_entity_names", "fts_rebuild", "vacuum", "stats_by_table")
 
 
 def gazetteer_entries(settings: Settings) -> List[Entry]:
@@ -36,8 +41,9 @@ def gazetteer_entries(settings: Settings) -> List[Entry]:
     return out
 
 
-def run_maintenance(store: Store, purge_sra_placeholders: bool = False, refresh_entity_names: bool = False, fts_rebuild: bool = False,
-                    vacuum: bool = False, stats_by_table: bool = False, entries: Optional[Sequence[Entry]] = None) -> Dict[str, Any]:
+def run_maintenance(store: Store, purge_sra_placeholders: bool = False, relabel_deposits: bool = False, refresh_entity_names: bool = False,
+                    fts_rebuild: bool = False, vacuum: bool = False, stats_by_table: bool = False,
+                    entries: Optional[Sequence[Entry]] = None) -> Dict[str, Any]:
     """Run the requested actions on `store` and return what happened, as plain data. `entries` are the gazetteer
     entries `refresh_entity_names` rewrites from (the CLI passes the configured gazetteers)."""
     report: Dict[str, Any] = {"actions": []}
@@ -47,6 +53,15 @@ def run_maintenance(store: Store, purge_sra_placeholders: bool = False, refresh_
         report["purge_sra_placeholders"] = {"found": before, "deleted": deleted, "remaining": store.count_sra_placeholders(),
                                             "archive_records": store.counts()["archive_records"]}
         report["actions"].append("purge_sra_placeholders")
+    if relabel_deposits:
+        hits_before = store.count_deposit_tracked_hits()
+        relabelled = store.relabel_deposit_records()
+        deleted = store.purge_deposit_tracked_hits()
+        report["relabel_deposits"] = {"papers_relabelled": relabelled, "papers_relabelled_total": sum(relabelled.values()),
+                                      "tracked_hits_found": hits_before, "tracked_hits_deleted": deleted,
+                                      "tracked_hits_remaining": store.count_deposit_tracked_hits(),
+                                      "tracked_author_hits": store.counts()["tracked_author_hits"]}
+        report["actions"].append("relabel_deposits")
     if refresh_entity_names:
         entries = list(entries or [])
         report["refresh_entity_names"] = {"entries": len(entries), "rows_updated": store.refresh_entity_metadata(entries)}
@@ -70,6 +85,12 @@ def format_report(report: Dict[str, Any]) -> str:
     if p:
         lines.append(f"SRA placeholder rows: {p['found']:,} found, {p['deleted']:,} deleted, {p['remaining']:,} remaining "
                      f"({p['archive_records']:,} archive records left)")
+    d = report.get("relabel_deposits")
+    if d:
+        per_label = ", ".join(f"{k} {v:,}" for k, v in d["papers_relabelled"].items() if v) or "none"
+        lines.append(f"deposit records relabelled with a work_type: {d['papers_relabelled_total']:,} ({per_label}); tracked-author hits on deposit "
+                     f"records: {d['tracked_hits_found']:,} found, {d['tracked_hits_deleted']:,} deleted, {d['tracked_hits_remaining']:,} remaining "
+                     f"({d['tracked_author_hits']:,} tracked-author hits left)")
     r = report.get("refresh_entity_names")
     if r:
         lines.append(f"entity names refreshed from {r['entries']:,} gazetteer entries: {r['rows_updated']:,} mention row(s) updated")
@@ -90,6 +111,9 @@ def format_report(report: Dict[str, Any]) -> str:
         if s.get("sra_placeholders"):
             lines.append(f"ATTENTION: {s['sra_placeholders']:,} SRA placeholder rows (accession 'SRA-UID-...') in archive_records; "
                          "run `litradar maintenance --purge-sra-placeholders`")
+        if s.get("deposit_tracked_hits"):
+            lines.append(f"ATTENTION: {s['deposit_tracked_hits']:,} tracked-author hit(s) sit on deposit records (dataset / software / facility "
+                         "data deposits credit every depositor as an author); run `litradar maintenance --relabel-deposits`")
         if not s.get("bytes_available"):
             lines.append("(this SQLite build has no dbstat table: bytes per object are unavailable)")
         lines.append(f"{'object':44} {'type':6} {'rows':>10} {'bytes':>14}")
@@ -98,7 +122,7 @@ def format_report(report: Dict[str, Any]) -> str:
             size = f"{o['bytes']:,}" if o["bytes"] is not None else "n/a"
             lines.append(f"{o['name']:44} {o['type']:6} {rows:>10} {size:>14}")
     if not lines:
-        lines.append("nothing to do (choose --stats-by-table, --purge-sra-placeholders, --refresh-entity-names, --fts-rebuild and/or --vacuum)")
+        lines.append("nothing to do (choose --stats-by-table, --purge-sra-placeholders, --relabel-deposits, --refresh-entity-names, --fts-rebuild and/or --vacuum)")
     return "\n".join(lines)
 
 
@@ -118,10 +142,12 @@ def cmd_maintenance(args) -> int:
 
 
 def register(sub) -> None:
-    p = sub.add_parser("maintenance", help="store housekeeping: table stats, purge SRA placeholder rows, refresh entity names, rebuild the FTS index, VACUUM")
+    p = sub.add_parser("maintenance", help="store housekeeping: table stats, purge SRA placeholder rows, relabel deposit records, refresh entity names, rebuild the FTS index, VACUUM")
     p.add_argument("--stats-by-table", action="store_true", dest="stats_by_table", help="row counts and bytes per table / index (default action)")
     p.add_argument("--purge-sra-placeholders", action="store_true", dest="purge_sra_placeholders",
                    help="delete archive_records rows with a synthetic 'SRA-UID-...' accession and report how many")
+    p.add_argument("--relabel-deposits", action="store_true", dest="relabel_deposits",
+                   help="write the work_type onto deposit records recognised by DOI prefix / venue / title and delete tracked-author hits on deposit records")
     p.add_argument("--refresh-entity-names", action="store_true", dest="refresh_entity_names",
                    help="rewrite stored mentions' entity_name / ticker (and vendor / category for instruments) from the current gazetteers")
     p.add_argument("--fts-rebuild", action="store_true", dest="fts_rebuild", help="drop and re-create papers_fts from the papers table")

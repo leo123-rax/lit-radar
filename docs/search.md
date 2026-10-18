@@ -83,9 +83,12 @@ Tokenizer facts that change how you write queries:
 
 **Ordering.** Research papers come first; records that are not papers follow, each with a `record_type`
 saying why (`letter`, `editorial`, `dataset`, `software`, `deposit` for a general repository such as Zenodo or
-figshare, `protocol`, `supplement`, `dissertation`, `peer_review`, `paratext`; `null` for a paper). The rule is
+figshare, `facility_deposit` for an instrument-facility data record (DOE PNNL / EMSL, "Data for EMSL Project ..."),
+`protocol`, `supplement`, `dissertation`, `peer_review`, `paratext`; `null` for a paper). The rule is
 `litradar/worktype.py` (OpenAlex `work_type`, repository DOI prefixes and venues, NEJM DOI codes, "To the
-Editor:" / "Reply to" / "Supplementary ... from" cues), applied as one SQL expression. Within each group the
+Editor:" / "Reply to" / "Supplementary ... from" / "Data for EMSL Project" cues), applied as one SQL expression
+(`sql_predicate(alias, labels=None)`; `labels=worktype.DEPOSIT_LABELS` gives the deposit-only form the tracked-author
+gate and `litradar maintenance --relabel-deposits` use). Within each group the
 `sort` decides: `relevance` (default) is `bm25(papers_fts, ...)` with the title weighted 4, abstract and entity
 mentions 2, Methods / funding / COI / affiliations 1 and body 0.5 (lower `rank` is better); `score` is the stored
 rank score (`score`; unscored rows last); `date` is newest first. bm25 normalises by document length, so a

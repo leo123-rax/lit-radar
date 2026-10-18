@@ -38,7 +38,7 @@ import os
 import re
 import sqlite3
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -227,6 +227,16 @@ FULLTEXT_SECTIONS = ("methods", "funding", "coi", "ack", "data_availability", "b
 SECTION_ORDER = ("title", "abstract", "methods", "body", "funding", "coi", "ack", "data_availability", "affiliations")
 # the archive window clause, shared by every digest query: published in the window, or undated and first seen in it
 _WINDOW = "((p.pub_date >= ? AND p.pub_date <= ?) OR (p.pub_date = '' AND substr(p.first_seen,1,10) >= ?))"
+
+# mention sections grouped into the channels a first appearance is labelled by (`Store.new_entities_report`): what a
+# paper is about, what it used, who paid or declared an interest, who wrote it. Each channel exists only for records
+# whose text or metadata carries it, so each has its own history start.
+MENTION_CHANNELS: Dict[str, Tuple[str, ...]] = {
+    "title/abstract": ("title", "abstract"),
+    "methods": ("methods",),
+    "funding/COI": ("funding", "coi", "ack"),
+    "affiliations": ("affiliations",),
+}
 
 # archive `platform` strings (SRA/ENA controlled vocabulary, plus the other archives' labels) -> vendor label used
 # when the instrument_model string could not be mapped to a gazetteer entry
@@ -962,11 +972,20 @@ class Store:
         return n
 
     # ---- tracked authors ----------------------------------------------------------------
-    def add_tracked_author_hit(self, paper_id: str, author_name: str, subgroup: str, matched_by: str) -> None:
+    def add_tracked_author_hit(self, paper_id: str, author_name: str, subgroup: str, matched_by: str) -> bool:
+        """Record a tracked-author hit; returns False (and writes nothing) when the stored record is a deposit
+        (`worktype.DEPOSIT_LABELS`: a dataset, software, protocol or supplementary deposit, an instrument-facility
+        data record), which credits every depositor or facility user as an author and is nobody's new paper. The
+        pipeline applies the same gate before it gets here; this one holds for every other writer."""
+        row = self.conn.execute("SELECT title, abstract, doi, journal, extra_json FROM papers WHERE id=?", (paper_id,)).fetchone()
+        if row is not None and worktype.is_deposit(worktype.record_type_of(
+                {"title": row[0], "abstract": row[1], "doi": row[2], "journal": row[3], "extra_json": row[4]})):
+            return False
         self.conn.execute(
             "INSERT OR IGNORE INTO tracked_author_hits (paper_id, author_name, subgroup, matched_by) VALUES (?,?,?,?)",
             (paper_id, author_name, subgroup, matched_by),
         )
+        return True
 
     # ---- runs ---------------------------------------------------------------------------
     def record_run(self, started: str, since: str, until: str, counts: Dict[str, Any]) -> None:
@@ -1276,47 +1295,162 @@ class Store:
             r["example_title"], r["example_url"] = (ex[0], ex[1]) if ex else ("", "")
         return rows
 
-    def new_entities(self, since: str, kind: str) -> List[Dict[str, Any]]:
-        """Entities whose FIRST appearance in the store falls on/after `since` (new entrants)."""
-        cur = self.conn.execute(
-            """SELECT m.entity_id, m.entity_name, m.ticker, MIN(substr(p.first_seen,1,10)) AS first_seen, COUNT(DISTINCT m.paper_id) AS papers
-               FROM mentions m JOIN papers p ON p.id=m.paper_id WHERE m.kind=?
-               GROUP BY m.entity_id HAVING first_seen >= ? ORDER BY papers DESC""",
-            (kind, since),
-        )
-        return _rows(cur)
+    def new_entities(self, since: str, kind: str, until: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Entities whose first appearance in the corpus falls inside the window (new entrants): the rows of
+        `new_entities_report`, which labels each first appearance by channel and withholds the channels whose history
+        is shorter than the comparison window. `until` defaults to the seventh day from `since`."""
+        return self.new_entities_report(since, kind, until)["rows"]
+
+    def new_entities_report(self, since: str, kind: str, until: Optional[str] = None) -> Dict[str, Any]:
+        """First appearances of `kind` entities in the window `since`..`until`, by publication date, labelled by the
+        channel they first appeared in, with the channels whose history is too short to tell withheld.
+
+        A mention channel (title / abstract; Methods; funding, COI and acknowledgement statements; author
+        affiliations) exists only for the records whose text or metadata carries it: parsed Methods and COI text
+        begin on the day full-text parsing began, so every supplier named only in Methods looks "new" on that day.
+        For each section the history start is the earliest event date (`pub_date`, else the ingestion day) of any
+        mention of this kind in it; the section takes part only when `litradar.trends.period_coverage` says it fully
+        covers the comparison period (the stretch of the window's length right before `since`). An entity is new when
+        its earliest mention over the participating sections falls inside the window; an entity whose mentions are all
+        in sections that do not take part is counted under `withheld` by channel instead of being listed.
+
+        Returns `{rows, withheld, channels, has_history, since, until, comparison_period}`: `rows` are
+        `{entity_id, entity_name, ticker, first_seen, channel, papers}` (papers = distinct papers over every section,
+        all time) sorted by papers; `channels` maps each channel label to `{sections, history_from, covers}`;
+        `has_history` is True when the corpus holds a mention of this kind dated before `since` in a participating
+        section (so "first appearance" means something)."""
+        # trends imports nothing from the store; a local import keeps the dependency one-way
+        from .trends import period_coverage
+
+        since = str(since)[:10]
+        if until:
+            until = str(until)[:10]
+        else:
+            until = (date.fromisoformat(since) + timedelta(days=6)).isoformat()
+        length = (date.fromisoformat(until) - date.fromisoformat(since)).days + 1
+        prev_end = (date.fromisoformat(since) - timedelta(days=1)).isoformat()
+        prev_start = (date.fromisoformat(since) - timedelta(days=max(1, length))).isoformat()
+        event = "COALESCE(NULLIF(p.pub_date,''), substr(p.first_seen,1,10))"
+        starts = {str(sec): str(d) for sec, d in self.conn.execute(
+            f"SELECT m.section, MIN({event}) FROM mentions m JOIN papers p ON p.id=m.paper_id WHERE m.kind=? GROUP BY m.section", (kind,)) if d}
+        channel_of = {sec: label for label, secs in MENTION_CHANNELS.items() for sec in secs}
+        covers = {sec: not period_coverage(start, prev_start, prev_end)["partial"] for sec, start in starts.items()}
+        channels: Dict[str, Dict[str, Any]] = {}
+        for label, secs in MENTION_CHANNELS.items():
+            present = [s for s in secs if s in starts]
+            if present:
+                # a channel can be half covered: funding statements ride on metadata back through the backfill while
+                # COI / acknowledgement text exists only since full-text parsing began; `short_sections` names the latter
+                channels[label] = {"sections": present, "history_from": min(starts[s] for s in present),
+                                   "covers": all(covers[s] for s in present),
+                                   "short_sections": {s: starts[s] for s in present if not covers[s]}}
+        per_entity: Dict[str, Dict[str, str]] = {}
+        meta: Dict[str, Tuple[str, str]] = {}
+        for eid, name, ticker, sec, first in self.conn.execute(
+                f"""SELECT m.entity_id, MAX(m.entity_name), MAX(COALESCE(m.ticker, '')), m.section, MIN({event})
+                    FROM mentions m JOIN papers p ON p.id=m.paper_id WHERE m.kind=? GROUP BY m.entity_id, m.section""", (kind,)):
+            if first:
+                per_entity.setdefault(str(eid), {})[str(sec)] = str(first)
+                meta[str(eid)] = (name or eid, ticker or "")
+        rows: List[Dict[str, Any]] = []
+        withheld: Dict[str, int] = {}
+        has_history = False
+        for eid, by_sec in per_entity.items():
+            usable = {s: d for s, d in by_sec.items() if covers.get(s)}
+            if usable:
+                sec = min(usable, key=lambda s: (usable[s], s))
+                first = usable[sec]
+                if first < since:
+                    has_history = True
+                elif first <= until:
+                    rows.append({"entity_id": eid, "entity_name": meta[eid][0], "ticker": meta[eid][1], "first_seen": first,
+                                 "channel": channel_of.get(sec, sec), "papers": 0})
+            elif min(by_sec.values()) >= since:
+                sec = min(by_sec, key=lambda s: (by_sec[s], s))
+                label = channel_of.get(sec, sec)
+                withheld[label] = withheld.get(label, 0) + 1
+        if rows:
+            ids = [r["entity_id"] for r in rows]
+            counts = {}
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                counts.update({str(e): int(n) for e, n in self.conn.execute(
+                    f"SELECT entity_id, COUNT(DISTINCT paper_id) FROM mentions WHERE kind=? AND entity_id IN ({','.join('?' * len(chunk))}) GROUP BY entity_id",
+                    (kind, *chunk))})
+            for r in rows:
+                r["papers"] = counts.get(r["entity_id"], 0)
+            rows.sort(key=lambda r: (-r["papers"], r["first_seen"], r["entity_id"]))
+        return {"rows": rows, "withheld": dict(sorted(withheld.items())), "channels": channels, "has_history": has_history,
+                "since": since, "until": until, "comparison_period": {"start": prev_start, "end": prev_end}}
+
+    def _largest_studies(self, key_sql: str, where_sql: str, params: Sequence[Any]) -> Dict[Tuple, Dict[str, Any]]:
+        """{key tuple: {accession, experiments, title}} of the single study / project with most experiments per group
+        (`key_sql` = the grouping columns), over archive rows that carry a study accession."""
+        out: Dict[Tuple, Dict[str, Any]] = {}
+        n_keys = len(key_sql.split(","))
+        for row in self.conn.execute(
+                f"""SELECT {key_sql}, study_accession, COUNT(*) AS n, MAX(COALESCE(study_title, '')) FROM archive_records
+                    WHERE {where_sql} AND study_accession IS NOT NULL AND study_accession != ''
+                    GROUP BY {key_sql}, study_accession ORDER BY n DESC, study_accession""", list(params)):
+            key = tuple(row[:n_keys])
+            if key not in out:  # first row per key is the largest (ORDER BY n DESC)
+                out[key] = {"accession": str(row[n_keys]), "experiments": int(row[n_keys + 1]), "title": str(row[n_keys + 2] or "")}
+        return out
+
+    @staticmethod
+    def _attach_concentration(row: Dict[str, Any], largest: Optional[Dict[str, Any]]) -> None:
+        """Add the concentration measure to a census row: `largest_study` (accession), `largest_study_experiments`,
+        `largest_study_share` (0..1 of the row's experiments; None when the row has none) and `largest_study_title`."""
+        total = int(row.get("experiments") or 0)
+        n = int(largest["experiments"]) if largest else 0
+        row["largest_study"] = largest["accession"] if largest else ""
+        row["largest_study_experiments"] = n
+        row["largest_study_share"] = round(n / total, 3) if total else None
+        row["largest_study_title"] = largest["title"] if largest else ""
 
     def archive_instrument_counts(self, since: str, until: str, archives: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
         """Experiments per declared instrument model in the window, optionally restricted to some archives.
 
         Rows carry `archive` (comma-joined archives the model appeared in), `vendor_mapped` (False when the gazetteer
         could not map the model) and a `vendor` that is never blank: unmapped models are labelled from the raw
-        platform string, e.g. 'Illumina (model unspecified)'."""
-        sql = """SELECT instrument_model, platform, vendor, ticker, entity_id, COUNT(*) AS experiments,
-                        COUNT(DISTINCT study_accession) AS studies, GROUP_CONCAT(DISTINCT archive) AS archives
-                 FROM archive_records WHERE first_public >= ? AND first_public <= ?"""
+        platform string, e.g. 'Illumina (model unspecified)'. Each row also carries the concentration measure
+        (`largest_study`, `largest_study_experiments`, `largest_study_share`, `largest_study_title`): the share of
+        the row's experiments that one study / project (`study_accession`) contributes, so a single 35,000-experiment
+        submission is not read as a fleet-wide shift."""
+        where = "first_public >= ? AND first_public <= ?"
         params: List[Any] = [since, until]
         if archives:
-            sql += f" AND archive IN ({','.join('?' * len(archives))})"
+            where += f" AND archive IN ({','.join('?' * len(archives))})"
             params += list(archives)
-        sql += " GROUP BY instrument_model, vendor ORDER BY experiments DESC"
+        sql = f"""SELECT instrument_model, platform, vendor, ticker, entity_id, COUNT(*) AS experiments,
+                         COUNT(DISTINCT NULLIF(study_accession, '')) AS studies, GROUP_CONCAT(DISTINCT archive) AS archives
+                  FROM archive_records WHERE {where} GROUP BY instrument_model, vendor ORDER BY experiments DESC"""
         rows = _rows(self.conn.execute(sql, params))
+        largest = self._largest_studies("instrument_model, vendor", where, params)
         for r in rows:
             r["archive"] = r.get("archives") or ""
             r["vendor_mapped"] = bool(r.get("vendor"))
+            self._attach_concentration(r, largest.get((r.get("instrument_model"), r.get("vendor"))))
             r["vendor"] = archive_vendor_label(r.get("vendor"), r.get("platform"), r.get("instrument_model"))
             r["ticker"] = r.get("ticker") or ""
         return rows
 
     def archive_strategy_counts(self, since: str, until: str, limit: int = 15, archives: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
-        sql = "SELECT library_strategy, COUNT(*) AS experiments FROM archive_records WHERE first_public >= ? AND first_public <= ?"
+        """Experiments per declared library strategy in the window (`library_strategy`, `experiments`, `studies`), with
+        the same concentration measure as `archive_instrument_counts` (`largest_study`, `largest_study_experiments`,
+        `largest_study_share`, `largest_study_title`)."""
+        where = "first_public >= ? AND first_public <= ?"
         params: List[Any] = [since, until]
         if archives:
-            sql += f" AND archive IN ({','.join('?' * len(archives))})"
+            where += f" AND archive IN ({','.join('?' * len(archives))})"
             params += list(archives)
-        sql += " GROUP BY library_strategy ORDER BY experiments DESC LIMIT ?"
-        params.append(limit)
-        return _rows(self.conn.execute(sql, params))
+        sql = f"""SELECT library_strategy, COUNT(*) AS experiments, COUNT(DISTINCT NULLIF(study_accession, '')) AS studies
+                  FROM archive_records WHERE {where} GROUP BY library_strategy ORDER BY experiments DESC LIMIT ?"""
+        rows = _rows(self.conn.execute(sql, params + [limit]))
+        largest = self._largest_studies("library_strategy", where, params)
+        for r in rows:
+            self._attach_concentration(r, largest.get((r.get("library_strategy"),)))
+        return rows
 
     def tracked_hits_in_window(self, since: str, until: str) -> List[Dict[str, Any]]:
         cur = self.conn.execute(
@@ -1386,6 +1520,43 @@ class Store:
                                 (SRA_PLACEHOLDER_PREFIX.replace("_", "\\_").replace("%", "\\%") + "%",))
         self.conn.commit()
         return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
+
+    # deposit labels whose records get an OpenAlex-style `work_type` when relabelled, so `is_paper_record` (and every
+    # consumer that reads work_type alone) excludes them without consulting the DOI / venue rules again. The general
+    # repositories (Zenodo, figshare: label `deposit`) and protocols are left alone: there the missing work_type is the
+    # very thing that cannot be inferred.
+    DEPOSIT_RELABEL_TYPES = {"facility_deposit": "dataset", "dataset": "dataset", "software": "software", "supplement": "supplementary-materials"}
+
+    def count_deposit_tracked_hits(self) -> int:
+        """Tracked-author hits that sit on deposit records (`worktype.DEPOSIT_LABELS`, evaluated in SQL)."""
+        pred = worktype.sql_predicate("p", labels=worktype.DEPOSIT_LABELS)
+        return int(self.conn.execute(
+            f"SELECT COUNT(*) FROM tracked_author_hits t JOIN papers p ON p.id = t.paper_id WHERE {pred} = 1").fetchone()[0])
+
+    def purge_deposit_tracked_hits(self) -> int:
+        """Delete tracked-author hits that sit on deposit records; returns how many went."""
+        pred = worktype.sql_predicate("p", labels=worktype.DEPOSIT_LABELS)
+        cur = self.conn.execute(f"DELETE FROM tracked_author_hits WHERE paper_id IN (SELECT p.id FROM papers p WHERE {pred} = 1)")
+        self.conn.commit()
+        return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
+
+    def relabel_deposit_records(self) -> Dict[str, int]:
+        """Write an OpenAlex-style `extra_json.work_type` onto deposit records that arrived without one (live pulls do
+        not record a type), per `DEPOSIT_RELABEL_TYPES`; returns {label: rows updated}. Rows that already carry a
+        work_type are left as they are."""
+        out: Dict[str, int] = {}
+        for label, work_type in self.DEPOSIT_RELABEL_TYPES.items():
+            pred = worktype.sql_predicate("p", labels=(label,))
+            cur = self.conn.execute(
+                f"""UPDATE papers SET extra_json = json_set(CASE WHEN json_valid(extra_json) THEN extra_json ELSE '{{}}' END, '$.work_type', ?),
+                           updated_at = ?
+                    WHERE rowid IN (SELECT p.rowid FROM papers p WHERE {pred} = 1
+                                    AND lower(coalesce(json_extract(p.extra_json, '$.work_type'), '')) = '')""",
+                (work_type, _now()),
+            )
+            out[label] = int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
+        self.conn.commit()
+        return out
 
     def refresh_entity_metadata(self, entries: Iterable[Any]) -> int:
         """Rewrite the denormalised columns of stored mentions from the current gazetteer entries.
@@ -1483,6 +1654,7 @@ class Store:
             "objects": tables, "bytes_available": bytes_available, "page_size": page_size, "page_count": page_count,
             "freelist_count": freelist, "freelist_bytes": freelist * page_size, "file_bytes": self.file_size(),
             "sra_placeholders": self.count_sra_placeholders(),
+            "deposit_tracked_hits": self.count_deposit_tracked_hits(),
         }
 
     # ---- search -------------------------------------------------------------------------
