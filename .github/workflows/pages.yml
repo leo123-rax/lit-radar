@@ -4,6 +4,9 @@
 # digest just published, and on demand (workflow_dispatch). The database is restored from the
 # `radar.sqlite.zst` asset on the rolling `db-latest` release that the weekly and daily workflows
 # publish; nothing here fetches from any API and nothing here writes to the repository.
+# Besides the dashboard, the site carries `feed.xml`: an Atom feed of the newest digests, built from
+# the committed `digests/*.md` in this checkout (`litradar deliver --feed`), so anyone can subscribe
+# with a feed reader and no credential. See docs/delivery.md.
 #
 # The build is not in the `lit-radar-db` concurrency group, so a manual dispatch could in principle
 # download the asset while the daily job replaces it (--clobber). A torn or missing download fails
@@ -104,6 +107,15 @@ jobs:
           set -euo pipefail
           case "$WEEKS_INPUT" in ''|*[!0-9]*) echo "::error::weeks must be an integer, got '$WEEKS_INPUT'"; exit 1;; esac
           python -m litradar dashboard --db data/radar.sqlite --out site --weeks "$WEEKS_INPUT"
+      - name: Write the Atom feed of recent digests into the site (digests/ from this checkout)
+        # After the dashboard build, which only adds files to site/ (it never clears the directory), and
+        # before the upload. The feed is a convenience: a problem here is a ::warning:: from the command
+        # and must not keep the dashboard from deploying, hence continue-on-error.
+        if: steps.db.outputs.found == 'true'
+        continue-on-error: true
+        env:
+          LITRADAR_PAGES_URL: ${{ vars.LITRADAR_PAGES_URL }}   # optional: custom dashboard URL for the feed's links
+        run: python -m litradar deliver --feed site/feed.xml
       - name: Configure Pages
         if: steps.db.outputs.found == 'true'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0

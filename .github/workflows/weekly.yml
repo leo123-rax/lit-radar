@@ -22,6 +22,9 @@
 # value) so a fork owner can see in the log what is missing.
 # Before compressing, the FTS5 index is merged ('optimize') and the file VACUUMed: re-upserting the
 # overlap window rewrites FTS segments that otherwise never merge and the snapshot grows with no new content.
+# Delivery without credentials: after the digest commit the publish job opens (or updates) the GitHub
+# Issue "Weekly digest <date>" with the job's own token (issues: write), so repository watchers get the
+# digest by e-mail; a delivery error is a warning, never a failed run. See docs/delivery.md.
 name: weekly-digest
 on:
   schedule:
@@ -181,11 +184,13 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write                # release assets + digest commit; this job holds NO API keys
+      issues: write                  # the "Weekly digest <date>" issue (zero-credential delivery, docs/delivery.md)
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       COMMIT_DIGESTS: ${{ vars.LITRADAR_COMMIT_DIGESTS }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      LITRADAR_PAGES_URL: ${{ vars.LITRADAR_PAGES_URL }}   # optional: custom dashboard URL for the issue's links
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -215,6 +220,7 @@ jobs:
           done
           echo "uploaded $new_size bytes to $STATE_RELEASE and $month"
       - name: Commit the digest (skipped in forks unless the LITRADAR_COMMIT_DIGESTS variable is "true")
+        id: commit
         run: |
           set -euo pipefail
           is_fork=$(gh api "repos/$GH_REPO" --jq .fork)
@@ -229,6 +235,31 @@ jobs:
           if git diff --cached --quiet; then echo "digest unchanged"; exit 0; fi
           git commit -m "digest: $(date -u +%F)" -m "$RUN_URL"
           git push || { git pull --rebase && git push; }
+          # the dated file this run rendered (newest YYYY-MM-DD.md in the artifact) is what the issue step delivers;
+          # the outputs stay unset on every early exit above, so no commit means no issue
+          digest_date=$( (ls incoming/digests | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$' || true) | sort | tail -1 | sed 's/\.md$//')
+          if [ -n "$digest_date" ]; then
+            echo "written=true" >> "$GITHUB_OUTPUT"
+            echo "date=$digest_date" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Deliver the digest as a GitHub Issue (watchers get it by e-mail; docs/delivery.md)
+        # Only after the digest was committed and pushed, because the issue links to the file. A delivery
+        # problem is reported as a ::warning:: by the command and must never fail the run or undo the commit,
+        # hence continue-on-error. The step output is not user input; it is still passed through env:.
+        # The job has no Python toolchain, so the package is installed into a throw-away virtualenv here.
+        if: steps.commit.outputs.written == 'true'
+        continue-on-error: true
+        env:
+          DIGEST_DATE: ${{ steps.commit.outputs.date }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST_DATE" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *) echo "::warning::unexpected digest date '$DIGEST_DATE'; the issue was not delivered"; exit 0 ;;
+          esac
+          python3 -m venv .deliver-venv
+          .deliver-venv/bin/python -m pip install -q -e .
+          .deliver-venv/bin/python -m litradar deliver --issue --date "$DIGEST_DATE"
 
   timeseries:
     name: monthly instrument time series for one vendor
