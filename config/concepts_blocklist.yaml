@@ -1,0 +1,116 @@
+# Clinical / anatomy blocklist for the emerging-concepts surfacer (litradar/concepts.py, loaded by load_exclusions).
+#
+# The surfacer promises methods, assays, modalities and model classes. Disease names, anatomy, study populations,
+# outcome measures and regulators are real biomedical phrases that its capitalised-run and hyphen channels pick up
+# from titles, so they are dropped at extraction time. This file ADDS to the built-in lists in concepts.py
+# (CLINICAL_PHRASES / CLINICAL_HEAD_WORDS); it never removes anything. Curated seed anchors (-seq, -omics, editing,
+# organoid, ...) are exempt, so "disease model" or "patient-derived organoid" still count.
+#
+#   clinical_phrases    whole phrases, matched after normalisation (lower case, dashes to spaces, plural of the
+#                       last word singularised): "Prefrontal Cortex" and "prefrontal cortices" both hit "prefrontal cortex"
+#   clinical_head_words a phrase whose LAST word is listed is clinical ("tumor hypoxia", "renal artery");
+#                       "disease", "cancer" and "tumor" are deliberately absent because "minimal residual disease",
+#                       "cancer genome atlas" and "circulating tumor DNA" are concepts the radar tracks
+#   generic_phrases     boilerplate that is not a concept in any channel (added to the exact exclusion set)
+#
+# Edit freely, then run `litradar concepts --force` so every week is recounted with the new rules.
+
+clinical_phrases:
+  # anatomy and tissues
+  - prefrontal cortex
+  - cerebral cortex
+  - visual cortex
+  - motor cortex
+  - white matter
+  - gray matter
+  - grey matter
+  - cerebrospinal fluid
+  - spinal cord
+  - optic nerve
+  - retinal ganglion cell
+  - dorsal root ganglion
+  - bone marrow
+  - peripheral blood
+  - lymph node
+  - skeletal muscle
+  - adipose tissue
+  - small intestine
+  - large intestine
+  - left ventricle
+  - right ventricle
+  - renal tubule
+  - proximal tubule
+  - hair follicle
+  - blood brain barrier
+  # study populations, settings and outcome measures
+  - intensive care unit
+  - emergency department
+  - primary care
+  - overall survival
+  - progression free survival
+  - disease free survival
+  - event free survival
+  - quality of life
+  - body mass index
+  - blood pressure
+  - adverse event
+  - adverse events
+  - case control
+  - cross sectional
+  - propensity score
+  - standard of care
+  - real world evidence
+  # infections and common conditions seen as capitalised runs in titles
+  - coronavirus disease
+  - severe acute respiratory syndrome
+  - human immunodeficiency virus
+  - hepatitis b virus
+  - hepatitis c virus
+  - mycobacterium tuberculosis
+  - plasmodium falciparum
+  - staphylococcus aureus
+  - escherichia coli
+  - pseudomonas aeruginosa
+
+clinical_head_words:
+  - cortex
+  - hippocampus
+  - cerebellum
+  - ventricle
+  - nerve
+  - artery
+  - vein
+  - marrow
+  - gland
+  - follicle
+  - survival
+  - mortality
+  - morbidity
+  - hospitalization
+  - hospitalisation
+  - incidence
+  - prevalence
+  - pneumonia
+  - tuberculosis
+  - malaria
+  - influenza
+  - hepatitis
+  - lupus
+  - psoriasis
+  - dermatitis
+  - anemia
+  - anaemia
+  - thrombosis
+  - aneurysm
+  - ischemia
+  - ischaemia
+  - hypoxia
+  - inflammation
+  - lesion
+  - nephropathy
+  - neuropathy
+  - retinopathy
+  - cardiomyopathy
+  - participants
+
+generic_phrases: []

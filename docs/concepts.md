@@ -64,6 +64,23 @@ the report is flagged **weak baseline**: the z-scores then mostly reflect raw co
 is "new", so read the list as candidates, not as bursts. A separate **new this month** list ranks terms
 whose very first appearance in the corpus falls inside the current window (at least 3 papers).
 
+### Frequency-list mode (fewer than 8 baseline weeks)
+
+`burst_report` labels every report with `mode`: `"burst"` when the baseline supports burst detection,
+`"frequency_list"` when fewer than `WEAK_BASELINE_WEEKS` (8) baseline weeks hold papers. In frequency-list mode
+the rendered section says so in plain words — *"this is a frequency list, not burst detection"* — renames the Score
+column *Score (count-driven)*, and adds a **First seen in corpus** column: the ISO week (Monday) in which the term
+first appeared in the counted corpus, or `≤ <week> (corpus start)` when the term was already present in the first
+counted week, so its true first appearance is unknown. The report carries the data behind the column
+(`corpus_start_week`, `history_weeks` = counted weeks before the current window, and `first_seen` /
+`first_seen_label` per riser and per new term), so `--json` consumers can rebuild it.
+
+The column follows the mode automatically; `render_report_markdown(report, first_seen_column=True | False)` and
+`render_concepts_markdown(..., first_seen_column=...)` force it on or off in either mode. A `--since-baseline`
+command-line switch maps onto `first_seen_column=True`; the one-line wiring belongs in `litradar/commands/concepts.py`
+(`render_report_markdown(report, top=..., first_seen_column=bool(args.since_baseline))`) and is not part of this
+module.
+
 ## Output
 
 Markdown (default or `--out`): a *Top risers* table (concept, papers in window, baseline per week, score,
@@ -81,6 +98,26 @@ Wiring into the weekly digest is one line in `litradar/digest/render.py`, before
 from ..concepts import render_concepts_markdown
 md.append(render_concepts_markdown(store, since, until, top=int(dcfg.get("concepts_n", 15))))
 ```
+
+## Blocklist file (`config/concepts_blocklist.yaml`)
+
+`load_exclusions(config_dir)` reads `concepts_blocklist.yaml` from the config directory (`load_blocklist` does the
+parsing) and adds its lists to the built-in ones; the file never removes anything, and a config directory without it
+behaves exactly as before. Three keys, all optional lists of strings:
+
+| key | effect | matching |
+|---|---|---|
+| `clinical_phrases` | whole phrases dropped from every non-seed channel | after `normalize_term` (lower case, dashes to spaces, last word singularised): `Prefrontal Cortex` and `prefrontal cortices` both hit `prefrontal cortex` |
+| `clinical_head_words` | a phrase whose **last** word is listed is clinical (`tumor hypoxia`, `renal artery`) | the head is compared after normalisation; the spelling as written is kept too |
+| `generic_phrases` | boilerplate that is not a concept in any channel | added to `Exclusions.exact` |
+
+The shipped file seeds anatomy (`prefrontal cortex`, `bone marrow`, `blood brain barrier`, ...), study settings and
+outcome measures (`intensive care unit`, `overall survival`, `body mass index`, ...), common pathogens and
+conditions (`escherichia coli`, `hepatitis b virus`, ...) and head words such as `cortex`, `survival`, `pneumonia`,
+`ischemia`, `lesion`. `Exclusions.clinical_phrases`, `Exclusions.clinical_head_words` and `Exclusions.blocklist_path`
+expose what was loaded; `is_clinical_phrase(key, excl)` applies built-ins plus the file. A file that is not a mapping
+of lists raises `ValueError` naming it. As with the Python lists, run `litradar concepts --force` after editing so
+every week is recounted.
 
 ## Optional Claude pass (`--llm`)
 
@@ -105,11 +142,12 @@ without calling the model again.
 
 * A term is counted once per paper, however often it appears; abstracts contribute for every paper,
   Methods only when open full text was parsed, so Methods-only vocabulary is under-counted.
-* Disease names, anatomy, study populations and regulators are not concepts here: a small blocklist
+* Disease names, anatomy, study populations and regulators are not concepts here: a built-in blocklist
   (`CLINICAL_PHRASES`: amyotrophic lateral sclerosis, autism spectrum disorder, Parkinson's disease,
   healthy controls, natural killer, drug administration, ...) plus a head-word rule (`CLINICAL_HEAD_WORDS`:
   a phrase ending in disease / disorder / syndrome / carcinoma / patients / controls / ... ) drops them at
-  extraction; curated seeds are exempt. Fragments are dropped at report time: a term that is a strict
+  extraction; curated seeds are exempt. **`config/concepts_blocklist.yaml` extends both lists without a code
+  change** (see below). Fragments are dropped at report time: a term that is a strict
   sub-phrase of another counted term with at least as many papers this month ("dependent acquisition"
   inside "data dependent acquisition", "dna double strand" inside "dna double strand break") is the parent
   seen through the 4-token window, and the report lists them under `fragments_dropped`.

@@ -80,6 +80,34 @@ on baseline average, and ranks by `z` when it exists, otherwise by the week-over
 renderer bolds notable rows. On a cold start the tables therefore show the largest counts, and the
 header states that z-scores are suppressed.
 
+## Backfills: publication-date weeks, not ingestion
+
+Every weekly series in this module is bucketed by the **event date** (`pub_date`, or `first_seen` only when a
+record has no date), never by the ingestion timestamp. A backfill (`litradar backfill`, or any import that writes
+papers with old publication dates) therefore fills the baseline weeks and makes z-scores available in the same run,
+although every one of its rows was ingested today. Verified on a copy of a one-week store (3,562 papers, all
+`first_seen` on one day): inserting 360 synthetic papers with `pub_date` spread over the twelve preceding weeks, 12 of
+them per week naming one instrument, plus 40 current-week papers naming it, took `history.paper_weeks_with_data` from
+1 to 13 and `z_available_papers` from false to true, and the instrument's row read `current 40, mean 11.08,
+std 3.33, z +8.69, notable`. The partial-week rule did not drop any backfilled week: it compares each week with the
+median of the *other* weeks, so a block of equally sized backfilled weeks is never "partial" next to one much larger
+live week.
+
+Two things do depend on how the rows arrived, and both are handled:
+
+* **Coverage of "last week".** `history.previous_week_coverage` is computed from the earliest `runs.since`; without
+  more information a corpus whose first run pulled 2026-10-10..17 looks as if it covered one day of the previous
+  week and the week-over-week tables are suppressed or flagged. A recorded backfill is read from `backfill_progress`
+  (its earliest month, as `backfill_from`), and coverage extends back to it, so the flag disappears. The sources are
+  reported in `history.coverage_sources = {"runs_since", "backfill_from"}`. Rows inserted by other means carry no
+  such record; their weeks still count in the baseline, but the coverage note then relies on the `runs` table alone.
+* **"New this week".** First appearances are detected by `first_seen` (new to *this database*), which is meaningless
+  right after a backfill because everything was ingested this week. The cold-start flag catches that case, and when
+  earlier weeks nevertheless hold publication-dated papers the renderer prints a specific note ("every paper in this
+  corpus was ingested this week although N earlier weeks hold publication-dated papers (a first run after a
+  backfill) ...") instead of the first-week message; `history.ingested_this_week_only_with_history` carries the same
+  fact for JSON consumers. The z-scores and movers above that note are unaffected.
+
 ## Output structure (`compute_trends`)
 
 ```json
@@ -184,7 +212,7 @@ trends:
   earlier week is not reported as a conversion (there is no persisted "already reported" state, so
   the alternative would be re-reporting old pairs every time a preprint is re-upserted).
 * `first_seen` is an ingestion timestamp, so "new this week" means new to *this* database, not new
-  to the world.
+  to the world; after a backfill the list is omitted with a note until the next weekly run (see "Backfills").
 * Conversions depend on sources that expose a `published_doi` (bioRxiv / medRxiv) and on the journal
   version being in the store under its DOI id; conversions whose journal version was never ingested
   are not visible.

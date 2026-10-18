@@ -384,14 +384,17 @@ CLINICAL_HEAD_WORDS: Set[str] = {
 }
 
 
-def is_clinical_phrase(key: str) -> bool:
-    """True for a normalised key that names a disease, anatomy, a cohort or a regulator rather than a method."""
+def is_clinical_phrase(key: str, excl: Optional[Exclusions] = None) -> bool:
+    """True for a normalised key that names a disease, anatomy, a cohort or a regulator rather than a method.
+
+    The built-in lists above are the floor; `excl` (from `load_exclusions`) adds the phrases and head words of
+    config/concepts_blocklist.yaml."""
     if not key:
         return False
-    if key in CLINICAL_PHRASES:
+    if key in CLINICAL_PHRASES or (excl is not None and key in excl.clinical_phrases):
         return True
     head = key.rsplit(" ", 1)[-1]
-    return head in CLINICAL_HEAD_WORDS
+    return head in CLINICAL_HEAD_WORDS or (excl is not None and head in excl.clinical_head_words)
 
 
 def _is_numeric(tok: str) -> bool:
@@ -414,6 +417,9 @@ class Exclusions:
     exact: Set[str] = field(default_factory=set)       # any alias, matched as a whole phrase
     contained: Set[str] = field(default_factory=set)   # unambiguous aliases, dropped when they appear inside a phrase
     subgroups: Dict[str, Tuple[str, List[str]]] = field(default_factory=dict)  # id -> (name, normalised keywords)
+    clinical_phrases: Set[str] = field(default_factory=set)      # config/concepts_blocklist.yaml, on top of CLINICAL_PHRASES
+    clinical_head_words: Set[str] = field(default_factory=set)   # ... on top of CLINICAL_HEAD_WORDS
+    blocklist_path: str = ""                                     # the blocklist file that was loaded ('' = none)
 
     def blocks(self, key: str) -> bool:
         if not key:
@@ -464,9 +470,45 @@ _WEAK_OVERLAP: Set[str] = {
 }
 
 
+BLOCKLIST_FILE = "concepts_blocklist.yaml"
+
+
+def load_blocklist(config_dir: Path) -> Dict[str, Any]:
+    """The clinical / anatomy blocklist in config/concepts_blocklist.yaml as normalised sets:
+    {"clinical_phrases", "clinical_head_words", "generic_phrases", "path"}. All sets are empty and `path` is ''
+    when the file is absent; a file that is not a mapping of lists raises ValueError naming it."""
+    path = Path(config_dir) / BLOCKLIST_FILE
+    out: Dict[str, Any] = {"clinical_phrases": set(), "clinical_head_words": set(), "generic_phrases": set(), "path": ""}
+    if not path.exists():
+        return out
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping with clinical_phrases / clinical_head_words / generic_phrases lists")
+    for key in ("clinical_phrases", "clinical_head_words", "generic_phrases"):
+        items = data.get(key) or []
+        if not isinstance(items, list):
+            raise ValueError(f"{path}: {key} must be a list")
+        for s in items:
+            raw = str(s).strip().lower()
+            k = normalize_term(raw)
+            if not k:
+                continue
+            out[key].add(k)
+            if key == "clinical_head_words":
+                out[key].add(raw)  # the head is compared after normalisation, but keep the spelling as written too
+    out["path"] = str(path)
+    return out
+
+
 def load_exclusions(config_dir: Path) -> Exclusions:
     ex = Exclusions()
     config_dir = Path(config_dir)
+    bl = load_blocklist(config_dir)
+    ex.clinical_phrases = set(bl["clinical_phrases"])
+    ex.clinical_head_words = set(bl["clinical_head_words"])
+    ex.exact |= set(bl["generic_phrases"])
+    ex.blocklist_path = bl["path"]
     for fname, kind in (("instruments.yaml", "instrument"), ("companies.yaml", "company")):
         path = config_dir / fname
         if not path.exists():
@@ -604,7 +646,7 @@ def _emit(out: Dict[str, Candidate], tokens: Sequence[str], channel: str, excl: 
         return
     if key in GENERIC_PHRASES or (excl is not None and excl.blocks(key)):
         return
-    if channel != "seed" and is_clinical_phrase(key):
+    if channel != "seed" and is_clinical_phrase(key, excl):
         return  # disease names, anatomy, cohorts and regulators are not methods, assays, modalities or model classes
     if key not in out:
         out[key] = Candidate(key=key, display=display, channel=channel, acronym=acronym)
@@ -957,6 +999,16 @@ def burst_report(
     first_seen: Dict[str, str] = {}
     for term, wk in store.conn.execute("SELECT term, MIN(week) FROM concept_counts GROUP BY term"):
         first_seen[term] = wk
+    # the first counted week of the whole corpus and how many counted weeks precede the current window: a term
+    # already present in the first week has an unknown true first appearance ("<= corpus start")
+    corpus_start_week = min(first_seen.values()) if first_seen else ""
+    history_weeks = int(store.conn.execute("SELECT COUNT(DISTINCT week) FROM concept_counts WHERE week < ?", (cur_weeks[0],)).fetchone()[0] or 0)
+
+    def first_seen_label(fs: str) -> str:
+        if not fs:
+            return "?"
+        return f"≤ {fs} (corpus start)" if corpus_start_week and fs <= corpus_start_week else fs
+
     active_weeks = {r["week"] for r in rows}
     base_active = [w for w in base_weeks if w in active_weeks]
     cur_active = [w for w in cur_weeks if w in active_weeks]
@@ -974,7 +1026,8 @@ def burst_report(
         fs = first_seen.get(term, "")
         is_new_month = bool(fs) and fs >= cur_weeks[0]
         if is_new_month and cur_total >= min_new_papers:
-            new_terms.append({"term": term, "display": display.get(term, term), "papers": cur_total, "first_seen": fs})
+            new_terms.append({"term": term, "display": display.get(term, term), "papers": cur_total, "first_seen": fs,
+                              "first_seen_label": first_seen_label(fs)})
         if cur_total < min_papers:
             continue
         series = [by_week.get(w, 0) for w in base_active]
@@ -982,6 +1035,7 @@ def burst_report(
         s = score_term(cur_total, series, len(cur_active) or 1, is_new)
         s.update({
             "term": term, "display": display.get(term, term), "papers": cur_total, "first_seen": fs, "is_new": is_new,
+            "first_seen_label": first_seen_label(fs),
             "series": [by_week.get(w, 0) for w in all_weeks],
         })
         scored.append(s)
@@ -1027,10 +1081,15 @@ def burst_report(
     for d in risers + new_terms:
         if d["term"] in defs:
             d["definition"] = defs[d["term"]]
+    weak = len(base_active) < WEAK_BASELINE_WEEKS
     return {
         "until": until, "current_weeks": cur_weeks, "baseline_weeks": base_weeks,
         "baseline_active_weeks": len(base_active), "current_active_weeks": len(cur_active),
-        "weak_baseline": len(base_active) < WEAK_BASELINE_WEEKS,
+        "weak_baseline": weak,
+        # "frequency_list": too few baseline weeks for z-scores to mean anything, the ranking is count-driven and the
+        # report says so; "burst": the baseline supports burst detection
+        "mode": "frequency_list" if weak else "burst",
+        "corpus_start_week": corpus_start_week, "history_weeks": history_weeks,
         "params": {"min_papers": min_papers, "min_new_papers": min_new_papers, "novelty_weeks": novelty_weeks, "std_floor": STD_FLOOR, "novelty_bonus": NOVELTY_BONUS},
         "candidates": len(scored), "risers": risers, "new_terms": new_terms, "new_terms_total": n_new_total,
         "fragments_dropped": fragments,
@@ -1274,20 +1333,34 @@ def _spark(series: Sequence[int]) -> str:
     return "".join(bars[min(len(bars) - 1, int(round((v / float(hi)) * (len(bars) - 1))))] for v in series)
 
 
-def render_report_markdown(report: Dict[str, Any], top: int = 15, heading: str = "## Emerging concepts", with_examples: bool = True) -> str:
+def render_report_markdown(
+    report: Dict[str, Any], top: int = 15, heading: str = "## Emerging concepts", with_examples: bool = True,
+    first_seen_column: Optional[bool] = None,
+) -> str:
+    """Markdown for a `burst_report`. With fewer than WEAK_BASELINE_WEEKS baseline weeks (`report["mode"] ==
+    "frequency_list"`) the header says plainly that the table is a frequency list, and a "First seen in corpus"
+    column is added; `first_seen_column` forces the column on (True) or off (False) whatever the mode."""
     md: List[str] = [heading + "\n"]
     cw = report["current_weeks"]
     window_end = (datetime.strptime(cw[-1], "%Y-%m-%d").date() + timedelta(days=6)).isoformat()
+    freq_mode = report.get("mode") == "frequency_list" or bool(report.get("weak_baseline"))
+    show_first_seen = freq_mode if first_seen_column is None else bool(first_seen_column)
     md.append(
         f"Technical phrases (methods, assays, modalities, model classes) extracted from titles, abstracts and parsed Methods with no ML, "
         f"counted as distinct papers per week and compared with a trailing {len(report['baseline_weeks'])}-week baseline. "
         f"Product and company names from the gazetteers are excluded. Current window: {cw[0]} to {window_end} ({len(cw)} weeks); "
         f"baseline weeks with data: {report['baseline_active_weeks']}. Score = z-score against the baseline plus a novelty bonus for terms first seen in the last {report['params']['novelty_weeks']} weeks.\n"
     )
-    if report.get("weak_baseline"):
+    if freq_mode:
+        start = report.get("corpus_start_week") or "?"
+        column_note = (
+            f"'First seen in corpus' is the ISO week (Monday) a term first appeared in the counted corpus; '≤ {start} (corpus start)' means it was already "
+            "present in the first counted week, so its true first appearance is unknown. " if show_first_seen else ""
+        )
         md.append(
-            f"_Weak baseline: only {report['baseline_active_weeks']} baseline week(s) hold papers, so the z-scores mostly reflect raw counts and almost every term counts as new. "
-            f"Treat this section as a candidate list until the corpus holds {WEAK_BASELINE_WEEKS}+ weeks._\n"
+            f"_Weak baseline — this is a **frequency list, not burst detection**: only {report['baseline_active_weeks']} baseline week(s) hold papers "
+            f"({WEAK_BASELINE_WEEKS} are needed before z-scores mean anything), so the Score column is driven by raw paper counts and almost every term counts as new. "
+            f"{column_note}Treat this section as a candidate list until the corpus holds {WEAK_BASELINE_WEEKS}+ weeks._\n"
         )
     risers = report["risers"][:top]
     rows = []
@@ -1295,9 +1368,15 @@ def render_report_markdown(report: Dict[str, Any], top: int = 15, heading: str =
         subs = ", ".join(d.get("subgroups") or []) or "—"
         co = ", ".join(x["name"] for x in (d.get("instruments") or [])[:3] + (d.get("companies") or [])[:2]) or "—"
         flag = "new" if d.get("is_new") else ""
-        rows.append([d["display"], d["papers"], f"{d['baseline_mean']:.1f}", d["score"], flag, _spark(d.get("series") or []), subs, co])
+        row = [d["display"], d["papers"]]
+        if show_first_seen:
+            row.append(d.get("first_seen_label") or d.get("first_seen") or "?")
+        row += [f"{d['baseline_mean']:.1f}", d["score"], flag, _spark(d.get("series") or []), subs, co]
+        rows.append(row)
+    headers = ["Concept", "Papers (window)"] + (["First seen in corpus"] if show_first_seen else []) + [
+        "Baseline /wk", "Score (count-driven)" if freq_mode else "Score", "", "Trend", "Subgroups", "Co-mentioned"]
     md.append("### Top risers\n")
-    md.append(_table(["Concept", "Papers (window)", "Baseline /wk", "Score", "", "Trend", "Subgroups", "Co-mentioned"], rows))
+    md.append(_table(headers, rows))
     new_terms = report["new_terms"][:top]
     md.append("### New this month\n")
     n_new_in_risers = sum(1 for d in risers if d.get("first_seen") and d["first_seen"] >= cw[0])
@@ -1324,9 +1403,12 @@ def render_report_markdown(report: Dict[str, Any], top: int = 15, heading: str =
     return "\n".join(md)
 
 
-def render_concepts_markdown(store: Store, since: str, until: str, top: int = 15, config_dir: Optional[Path] = None) -> str:
+def render_concepts_markdown(
+    store: Store, since: str, until: str, top: int = 15, config_dir: Optional[Path] = None, first_seen_column: Optional[bool] = None,
+) -> str:
     """Digest section. The current window is the digest window widened to at least 4 whole weeks; counts are
-    computed incrementally on first use (one pass over papers the store has not counted yet)."""
+    computed incrementally on first use (one pass over papers the store has not counted yet). `first_seen_column`
+    is passed to `render_report_markdown` (None = shown automatically in frequency-list mode)."""
     try:
         d0 = datetime.strptime(since[:10], "%Y-%m-%d").date()
         d1 = datetime.strptime(until[:10], "%Y-%m-%d").date()
@@ -1338,4 +1420,4 @@ def render_concepts_markdown(store: Store, since: str, until: str, top: int = 15
     excl = load_exclusions(cfg)
     ensure_counts(store, until, weeks_total=BASELINE_WEEKS + current_weeks, excl=excl)
     report = burst_report(store, until, baseline_weeks=BASELINE_WEEKS, current_weeks=current_weeks, top=top, excl=excl)
-    return render_report_markdown(report, top=top)
+    return render_report_markdown(report, top=top, first_seen_column=first_seen_column)

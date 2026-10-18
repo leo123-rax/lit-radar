@@ -137,11 +137,17 @@ def test_top_list_shows_journal_version_and_marks_the_preprint(tmp_path):
     st.save_score(pre.id, 6.0, None, 6.0, "r")
     st.save_score(art.id, 5.0, None, 5.0, "r")
     st.commit()
+    # with ranking v2 off the stored scores are listed unchanged (rendered first: the v2 render below refreshes them)
+    legacy = render(st, *WINDOW, {"ranking": {"v2": {"enabled": False}}})["markdown"]
+    assert "_Nature (also as preprint 2026-10-11), 2026-10-15 · score 6.0_" in legacy
     out = render(st, *WINDOW, {})
     md = out["markdown"]
     top = md[md.index("## Top"): md.index("## Platforms")]
     assert "The journal version title" in top and "Preprint title that is long enough" not in top.split("### Preprints")[0]
-    assert "_Nature (also as preprint 2026-10-11), 2026-10-15 · score 6.0_" in top
+    # ranking v2 recomputes the score at render time and tags the subgroup: the preprint takes Nature's tier through its
+    # published version (5.0) plus the conversion point (1.0) = 6.0 of 16 raw -> 3.75, and the article inherits the
+    # better of the two scores as before
+    assert "_Nature (also as preprint 2026-10-11), 2026-10-15 · score 3.8 · other_" in top
     assert "### Preprints that appeared as journal articles this window" in top and "linked by the publisher" in top
     assert out["summary"]["top"][0]["preprints"][0]["id"] == pre.id
     assert out["summary"]["preprint_conversions"][0]["article_id"] == art.id

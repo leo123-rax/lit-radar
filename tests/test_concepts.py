@@ -368,3 +368,76 @@ def test_fragments_of_a_counted_parent_phrase_are_dropped_from_the_report(tmp_pa
     assert {"data dependent acquisition", "dna double strand break", "spatial transcriptomics", "spatial transcriptomics atlas"} <= terms
     assert report["fragments_dropped"] == {"dependent acquisition": "data dependent acquisition", "dna double strand": "dna double strand break"}
     st.close()
+
+
+# ---- blocklist file and frequency-list mode -----------------------------------------------------
+def test_blocklist_file_extends_the_clinical_lists(tmp_path):
+    shipped = C.load_exclusions(CONFIG)
+    assert shipped.blocklist_path.endswith("concepts_blocklist.yaml") and "prefrontal cortex" in shipped.clinical_phrases
+    assert C.is_clinical_phrase("prefrontal cortex", shipped) and C.is_clinical_phrase("tumor hypoxia", shipped)
+    assert not C.is_clinical_phrase("prefrontal cortex")  # the built-in lists alone do not know it
+    assert not C.is_clinical_phrase("spatial transcriptomics", shipped) and not C.is_clinical_phrase("minimal residual disease", shipped)
+    text = "Prefrontal Cortex recordings and Tumor Hypoxia were compared with Spatial Transcriptomics in Hair Follicles."
+    out = C.extract_terms(text, shipped)
+    assert "prefrontal cortex" not in out and "tumor hypoxia" not in out and "hair follicle" not in out and "spatial transcriptomics" in out
+    # a custom directory: its own file adds phrases, head words and generic phrases; normalisation applies
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "concepts_blocklist.yaml").write_text(
+        "clinical_phrases: ['Left Ventricles', 'wobble-gene']\nclinical_head_words: ['Participants']\ngeneric_phrases: ['Study Protocols']\n", encoding="utf-8"
+    )
+    custom = C.load_exclusions(cfg)  # no gazetteers there: only the blocklist
+    assert custom.clinical_phrases == {"left ventricle", "wobble gene"} and {"participant", "participants"} <= custom.clinical_head_words
+    assert C.is_clinical_phrase("left ventricle", custom) and C.is_clinical_phrase("trial participant", custom) and custom.blocks("study protocol")
+    cands = {}
+    C._emit(cands, ["Left", "Ventricles"], "term", custom)
+    C._emit(cands, ["Trial", "Participants"], "term", custom)
+    C._emit(cands, ["Left", "Ventricles"], "seed", custom)  # curated seeds stay exempt
+    assert set(cands) == {"left ventricle"}
+    # absent file: empty sets, no path; malformed file: a ValueError naming it
+    empty = C.load_blocklist(tmp_path / "nowhere")
+    assert empty == {"clinical_phrases": set(), "clinical_head_words": set(), "generic_phrases": set(), "path": ""}
+    (cfg / "concepts_blocklist.yaml").write_text("- just\n- a list\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="concepts_blocklist.yaml"):
+        C.load_blocklist(cfg)
+    (cfg / "concepts_blocklist.yaml").write_text("clinical_phrases: not-a-list\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="clinical_phrases must be a list"):
+        C.load_blocklist(cfg)
+
+
+def test_frequency_list_mode_says_so_and_adds_the_first_seen_column(tmp_path):
+    st = Store(tmp_path / "short.sqlite")
+    C.ensure_schema(st)
+    cur = C.weeks_ending(UNTIL, 4)
+    rows = []
+    for wk in cur:  # two terms every week of a corpus that is only five weeks old
+        rows += [("organoid intelligence", wk, 3, "organoid intelligence"), ("spatial proteomics", wk, 2, "spatial proteomics")]
+    start = C.weeks_ending(UNTIL, 5)[0]
+    rows.append(("spatial proteomics", start, 1, "spatial proteomics"))  # present since the first counted week
+    st.conn.executemany("INSERT INTO concept_counts (term, week, papers, display, computed_at) VALUES (?,?,?,?,?)", [r + ("now",) for r in rows])
+    st.conn.commit()
+    report = C.burst_report(st, UNTIL, baseline_weeks=26, current_weeks=4, min_papers=5, with_details=False)
+    assert report["mode"] == "frequency_list" and report["weak_baseline"] is True and report["history_weeks"] == 1
+    assert report["corpus_start_week"] == start
+    by_term = {d["term"]: d for d in report["risers"]}
+    assert by_term["spatial proteomics"]["first_seen_label"] == f"≤ {start} (corpus start)"
+    assert by_term["organoid intelligence"]["first_seen_label"] == cur[0]  # a real first appearance inside the corpus
+    md = C.render_report_markdown(report, top=5, with_examples=False)
+    assert "**frequency list, not burst detection**" in md and "only 1 baseline week(s) hold papers" in md
+    assert "| Concept | Papers (window) | First seen in corpus | Baseline /wk | Score (count-driven) |" in md
+    assert f"| spatial proteomics | 8 | ≤ {start} (corpus start) |" in md and f"| organoid intelligence | 12 | {cur[0]} |" in md
+    off = C.render_report_markdown(report, top=5, with_examples=False, first_seen_column=False)
+    assert "First seen in corpus" not in off and "frequency list" in off  # the mode is still stated
+    # a strong baseline: burst mode, no column unless forced (what a --since-baseline switch would do)
+    strong = _seed_db(tmp_path / "long.sqlite")
+    excl = C.load_exclusions(CONFIG)
+    C.ensure_counts(strong, UNTIL, weeks_total=30, excl=excl)
+    rep2 = C.burst_report(strong, UNTIL, baseline_weeks=26, current_weeks=4, min_papers=5, top=10, excl=excl)
+    assert rep2["mode"] == "burst" and rep2["history_weeks"] == 26
+    md2 = C.render_report_markdown(rep2, top=5, with_examples=False)
+    assert "First seen in corpus" not in md2 and "frequency list" not in md2 and "| Score |" in md2
+    forced = C.render_report_markdown(rep2, top=5, with_examples=False, first_seen_column=True)
+    assert "| Concept | Papers (window) | First seen in corpus | Baseline /wk | Score |" in forced
+    assert "First seen in corpus" in C.render_concepts_markdown(strong, "2026-10-11", UNTIL, top=5, config_dir=CONFIG, first_seen_column=True)
+    st.close()
+    strong.close()

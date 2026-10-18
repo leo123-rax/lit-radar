@@ -241,6 +241,24 @@ def _coverage_start(conn: sqlite3.Connection) -> Optional[str]:
     return value
 
 
+def _backfill_start(conn: sqlite3.Connection) -> Optional[str]:
+    """First day of the earliest month a backfill recorded in `backfill_progress` (YYYY-MM-DD), or None when no
+    backfill ran or the table is missing. A backfill fills earlier weeks by publication date, so the weeks it
+    covers count as fetched-for even though no `runs` row has an early `since`."""
+    try:
+        row = conn.execute("SELECT MIN(month) FROM backfill_progress WHERE month IS NOT NULL AND month != ''").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    value = str(row[0])[:7] + "-01"
+    try:
+        _parse_date(value)
+    except ValueError:
+        return None
+    return value
+
+
 def _weekly_totals(conn: sqlite3.Connection, params: Dict[str, Any], weeks: int) -> Tuple[Dict[int, int], Dict[int, int]]:
     papers: Dict[int, int] = {}
     for wk, n in conn.execute(_PW + "SELECT wk, COUNT(*) FROM pw GROUP BY wk", params):
@@ -524,8 +542,14 @@ def compute_trends(
     first_seen_min = conn.execute("SELECT MIN(substr(first_seen, 1, 10)) FROM papers").fetchone()[0]
     cold_start = first_seen_min is None or first_seen_min >= week_start
     # how much of 'last week' the runs that built this store actually covered: a corpus whose first run pulled
-    # 2026-10-10..17 has one day of the 2026-10-04..10 bucket, and week-over-week movers against it are artefacts
-    covered_from = _coverage_start(conn)
+    # 2026-10-10..17 has one day of the 2026-10-04..10 bucket, and week-over-week movers against it are artefacts.
+    # A recorded backfill (backfill_progress) extends the coverage back to its first month: its papers carry old
+    # publication dates and land in the baseline weeks by pub_date, whatever their ingestion day.
+    runs_since = _coverage_start(conn)
+    backfill_from = _backfill_start(conn)
+    covered_from = runs_since
+    if backfill_from and (covered_from is None or backfill_from < covered_from):
+        covered_from = backfill_from
     if covered_from is None or covered_from <= prev_start:
         prev_days_covered = 7
     elif covered_from > prev_end:
@@ -568,6 +592,11 @@ def compute_trends(
             "previous_week_partial_papers": any(d["week"] == 1 for d in dropped_papers),
             "previous_week_partial_archive": any(d["week"] == 1 for d in dropped_archive),
             "previous_week_coverage": previous_week_coverage,
+            # where the coverage came from: the earliest `runs.since` and the first backfilled month (None = none)
+            "coverage_sources": {"runs_since": runs_since, "backfill_from": backfill_from},
+            # every paper was ingested this week although earlier weeks hold publication-dated data (first run after
+            # a backfill): z-scores are fine, "new this week" is not
+            "ingested_this_week_only_with_history": bool(cold_start and len(active_papers) > 0),
         },
         "thresholds": {"notable_z": notable_z, "min_count": min_count, "std_floor": STD_FLOOR},
         "cold_start": cold_start,
@@ -772,7 +801,15 @@ def render_trends_markdown(
 
     md.append(f"{hh} New this week\n")
     ne = trends["new_entities"]
-    if trends["cold_start"]:
+    if trends["cold_start"] and hist.get("ingested_this_week_only_with_history"):
+        md.append(
+            f"_Every paper in this corpus was ingested this week although {_plural(hist['paper_weeks_with_data'], 'earlier week')} hold "
+            "publication-dated papers (a first run after a backfill): 'new to the corpus' cannot yet be told apart from 'new to the "
+            f"database', so the list is omitted ({len(ne['instrument'])} instruments, {len(ne['company'])} companies, {len(ne['journal'])} journals "
+            "would all count as new). The week-over-week and baseline statistics above are by publication date and are not affected; "
+            "this list becomes meaningful from the next weekly run._\n"
+        )
+    elif trends["cold_start"]:
         md.append(
             f"_First week of data in this corpus: every entity is new ({len(ne['instrument'])} instruments, {len(ne['company'])} companies, "
             f"{len(ne['journal'])} journals, {len(ne['archive_instrument'])} archive instrument models), so the list is omitted. "
