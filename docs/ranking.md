@@ -83,7 +83,8 @@ Defaults live in `DEFAULT_WEIGHTS`; `ranking.weights` in config/radar.yaml overr
 | preprint published | +1.0 | `published_doi` on a preprint | `preprint published as a journal article (Nature Methods) (+1.0)` |
 | news co-mention | +1.0 | this window's `news_items`: a company the paper is about or authored from (title, abstract, affiliations), the vendor of a platform it names, or a platform named in a headline; a supplier named only in Methods does not count | `in the news this window: 10x Genomics, Xenium (+1.0)` |
 | first concept | +1.0 | `concept_papers` / `concept_counts`: a concept whose first counted week is the current window, once the corpus holds `ranking.v2.concept_history_weeks` (4) earlier weeks of counts | `first corpus appearance: 'spatial proteomics' (+1.0)` |
-| notice penalty | -4.0 | titles matching `NOTICE_RE` ("Author Correction:", "Erratum", "Retraction", ...) and preprints whose record type is `withdrawn` | `correction / retraction notice (−4.0)` |
+| notice penalty | -4.0 | titles matching `NOTICE_RE` ("Author Correction:", "Erratum", "Retraction", ...), an OpenAlex `work_type` of `erratum` / `retraction`, and preprints whose record type is `withdrawn` | `correction / retraction notice (−4.0)` |
+| not a research paper | -4.0 (`non_research_penalty`), and the venue prior falls to the unranked floor (+0.5) | `litradar/worktype.py`: OpenAlex `work_type` (`dataset`, `software`, `supplementary-materials`, `dissertation`, `peer-review`, `paratext`, `editorial`, `letter`), repository DOI prefixes and venues (Zenodo, figshare, MassIVE, PRIDE, Dryad, Mendeley Data, Dataverse, Code Ocean, protocols.io ...), NEJM DOI codes (`nejmc` letter, `nejme` / `nejmp` editorial), and the cues "To the Editor:", "Reply to", "Comment on", "Supplementary Figure ... from", "MassIVE MSV", "github.com/" | `letter / correspondence, not a research paper (−4.0)`, `dataset deposit, not a research paper (−4.0)`, `journal tier A; prior withheld: letter / correspondence, not a research paper (+0.5)` |
 | full text | 0 | `fulltext_available` | (off by default: data availability is not quality) |
 
 What changed from v1 and why:
@@ -102,6 +103,18 @@ What changed from v1 and why:
   earns a second point; a paper merely run on one does not.
 * **Signals already in the store are used:** citation velocity (age-aware, so a backfilled 2024 paper with hundreds
   of citations is not "early"), preprint-to-journal conversion, news co-mention, first-in-corpus concepts.
+* **A record that is not a paper is not ranked as one.** OpenAlex topic feeds return everything with a DOI: on a
+  backfilled corpus a top-25 list carried a letter to the editor in a tier-A journal (5.3, of which +5.0 was the
+  venue prior, kept alive by a tools-company affiliation) and two dataset deposits labelled "(preprint)" with a
+  tracked author each. `litradar/worktype.py::classify` recognises letters, editorials, dataset / software /
+  protocol deposits, supplementary files, dissertations, peer-review reports and front matter from what is already
+  stored (OpenAlex `work_type`, repository DOI prefixes and venues, NEJM DOI codes, title and abstract cues); such a
+  record loses its venue prior and takes `non_research_penalty` (−4.0), and the "why it matters" line says what it
+  is ("... letter / correspondence, not a research paper"). The same rule orders `litradar search` (research papers
+  first) and is one SQL expression there (`worktype.sql_predicate`). `Pipeline.rank` scores with a minimal record
+  (title, abstract, kind), so there only the text cues fire; `rerank_window` sees the full row at digest time. The
+  upstream filter (`type:article|preprint` on the OpenAlex queries, docs/DESIGN.md section 6) would keep most of
+  these records out of the store altogether and is tracked separately.
 
 ### Context, re-ranking and persistence
 

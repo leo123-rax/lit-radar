@@ -317,20 +317,51 @@ def list_companies(store_or_conn, entries: Sequence[Dict[str, Any]], since: str,
 
 
 def monthly_series(conn: sqlite3.Connection, entity_id: str, months: Sequence[str]) -> List[Dict[str, Any]]:
-    """Distinct papers and summed mentions per calendar month for one company, zero-filled over `months`."""
+    """Distinct papers, summed mentions and distinct `subject` papers (named in the title or abstract) per calendar
+    month for one company, zero-filled over `months`. `subject` is the like-for-like series: every source fills
+    title and abstract, while Methods / funding / affiliation mentions exist only where full text or rich metadata
+    was harvested (see `coverage_note`)."""
     if not months:
         return []
     d = date_sql()
     lo, hi = f"{months[0]}-01", f"{months[-1]}-31"
     got = {
-        m: (int(n or 0), int(k or 0))
-        for m, n, k in conn.execute(
-            f"SELECT substr({d},1,7) AS month, COUNT(DISTINCT m.paper_id), SUM(m.count) FROM mentions m JOIN papers p ON p.id=m.paper_id "
+        m: (int(n or 0), int(k or 0), int(s or 0))
+        for m, n, k, s in conn.execute(
+            f"SELECT substr({d},1,7) AS month, COUNT(DISTINCT m.paper_id), SUM(m.count), "
+            f"COUNT(DISTINCT CASE WHEN m.section IN ('title', 'abstract') THEN m.paper_id END) "
+            f"FROM mentions m JOIN papers p ON p.id=m.paper_id "
             f"WHERE m.kind='company' AND m.entity_id=? AND {d} >= ? AND {d} <= ? GROUP BY month",
             (entity_id, lo, hi),
         ).fetchall()
     }
-    return [{"month": m, "papers": got.get(m, (0, 0))[0], "mentions": got.get(m, (0, 0))[1]} for m in months]
+    return [{"month": m, "papers": got.get(m, (0, 0, 0))[0], "mentions": got.get(m, (0, 0, 0))[1], "subject": got.get(m, (0, 0, 0))[2]} for m in months]
+
+
+MIN_COVERAGE_PAPERS = 5   # a month needs this many papers before its section mix counts
+COVERAGE_GAP = 0.25       # difference in the share of papers matched only outside title/abstract that makes the series not like-for-like
+
+
+def coverage_note(monthly: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A caveat when the monthly totals are not like-for-like, else None.
+
+    For every month with at least MIN_COVERAGE_PAPERS papers the share of papers matched *only* outside the title
+    and abstract (Methods, funding, affiliations) is computed; when the busiest-coverage month and the thinnest
+    differ by COVERAGE_GAP or more, the totals compare months of unequal section coverage (an abstract-only
+    backfill month against a week harvested with full text) and the `subject` series should be read instead.
+    Returns ``{"note", "basis", "deep_share": {month: share}}``."""
+    busy = [m for m in monthly if int(m.get("papers") or 0) >= MIN_COVERAGE_PAPERS]
+    if len(busy) < 2:
+        return None
+    share = {m["month"]: round(1.0 - int(m.get("subject") or 0) / int(m["papers"]), 3) for m in busy}
+    hi = max(busy, key=lambda m: share[m["month"]])
+    lo = min(busy, key=lambda m: share[m["month"]])
+    if share[hi["month"]] - share[lo["month"]] < COVERAGE_GAP:
+        return None
+    note = (f"section coverage differs across months: in {hi['month']} {int(hi['papers']) - int(hi.get('subject') or 0)} of {hi['papers']} papers were "
+            f"matched only outside the title/abstract (Methods, funding, affiliations) vs {int(lo['papers']) - int(lo.get('subject') or 0)} of {lo['papers']} "
+            f"in {lo['month']}; the monthly totals are not like-for-like, compare the title/abstract series (`subject`) instead")
+    return {"note": note, "basis": "title/abstract", "deep_share": share}
 
 
 def comentioned(conn: sqlite3.Connection, entity_id: str, kind: str, since: str, until: str, limit: int = 12) -> List[Dict[str, Any]]:
@@ -388,12 +419,14 @@ def company_detail(store_or_conn, entry: Dict[str, Any], today: Optional[date] =
                                  "news": _news_for(entry, _news_sets(conn, since, until))}
     since, until = window(longest, today)
     axis = month_axis(today, months)
+    monthly = monthly_series(conn, entry["id"], axis)
     return {
         **entry,
         "slug": page_slug(entry["id"]),
         "today": today.isoformat(),
         "windows": wins,
-        "monthly": monthly_series(conn, entry["id"], axis),
+        "monthly": monthly,
+        "coverage": coverage_note(monthly),
         "instruments": comentioned(conn, entry["id"], "instrument", since, until, top),
         "companies": comentioned(conn, entry["id"], "company", since, until, top),
         "recent_papers": recent_papers(conn, entry["id"], since, until, papers_limit),

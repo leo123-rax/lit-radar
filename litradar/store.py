@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from . import worktype
 from .extract.gazetteer import family_label
 from .models import ArchiveRecord, Mention, NewsItem, Paper, normalize_doi
 from .policy import fulltext_storage_level
@@ -76,6 +77,11 @@ def mention_role(section: str, snippet: Optional[str]) -> str:
 FTS_COLUMNS = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body", "mentions")
 # the `mentions` column is maintained from the mentions table; the others are text columns of the paper
 FTS_TEXT_COLUMNS = FTS_COLUMNS[:-1]
+# bm25 column weights for `Store.search`, in FTS_COLUMNS order: a hit in the title or abstract (what the paper is
+# about) counts for more than one in the open-access body text (where a platform is mentioned in passing)
+FTS_BM25_WEIGHTS = (4.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.5, 2.0)
+SEARCH_SORTS = ("relevance", "score", "date")
+_SEARCH_OVERFETCH = 5  # rows read per row returned when identical titles are folded
 FTS_DDL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
   id UNINDEXED, {", ".join(FTS_COLUMNS)},
@@ -240,6 +246,34 @@ def _now() -> str:
 def _rows(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _title_key(title: Any) -> str:
+    return re.sub(r"\s+", " ", str(title or "")).strip().lower()
+
+
+def _finish_search_rows(rows: List[Dict[str, Any]], limit: int, collapse: bool) -> List[Dict[str, Any]]:
+    """Label each search hit (`record_type`: why it is not a research paper, else None), fold identical titles when
+    `collapse`, drop the helper columns and cut to `limit`."""
+    out: List[Dict[str, Any]] = []
+    first_by_title: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        key = _title_key(r.get("title"))
+        if collapse and key and key in first_by_title:
+            first_by_title[key]["duplicates"] += 1
+            continue
+        rtype = worktype.classify(str(r.get("title") or ""), str(r.get("abstract_head") or ""), str(r.get("doi") or ""),
+                                  str(r.get("journal") or ""), str(r.get("work_type") or "")) if r.get("non_research") else None
+        r["record_type"] = rtype.label if rtype else None
+        r["duplicates"] = 0
+        for helper in ("non_research", "work_type", "abstract_head"):
+            r.pop(helper, None)
+        if collapse and key:
+            first_by_title[key] = r
+        out.append(r)
+        if not collapse and len(out) >= limit:
+            break
+    return out[:limit]
 
 
 def _json_dict(text: Optional[str]) -> Dict[str, Any]:
@@ -1222,8 +1256,17 @@ class Store:
         }
 
     # ---- search -------------------------------------------------------------------------
-    def search(self, query: str, since: Optional[str] = None, limit: int = 50, sections: Sequence[str] = (), fallback: bool = True) -> List[Dict[str, Any]]:
+    def search(self, query: str, since: Optional[str] = None, limit: int = 50, sections: Sequence[str] = (), fallback: bool = True,
+               sort: str = "relevance", collapse: bool = True) -> List[Dict[str, Any]]:
         """Full-text search. `sections` restricts to FTS columns (e.g. ['methods'] or ['mentions']).
+
+        Ordering. Research papers come first; letters to the editor, editorials, dataset / software / protocol
+        deposits, supplementary files, dissertations and peer-review reports (`litradar.worktype`) follow, each
+        row saying why in ``record_type`` (None for a paper). Within each group `sort` decides: ``relevance``
+        (default) is bm25 with the title and abstract weighted (``FTS_BM25_WEIGHTS``; lower ``rank`` is better),
+        ``score`` is the stored rank score (``score``, unscored rows last), ``date`` is newest first. With
+        `collapse` (default) rows that share a title, which is how a dataset deposited in 24 versions appears,
+        fold into the best-placed one and its ``duplicates`` counts the rows folded; `limit` counts rows returned.
 
         When `query` is not valid FTS5 syntax (unbalanced parentheses, an unknown column such as
         ``nosuchcol:Xenium``) the search is retried as a quoted phrase and ``self.last_search_fallback`` holds
@@ -1233,24 +1276,31 @@ class Store:
         bad = [s for s in sections if s not in FTS_COLUMNS]
         if bad:
             raise ValueError(f"unknown section(s) {', '.join(bad)}; choose from {', '.join(FTS_COLUMNS)}")
+        if sort not in SEARCH_SORTS:
+            raise ValueError(f"unknown sort {sort!r}; choose from {', '.join(SEARCH_SORTS)}")
         self.last_search_fallback = None
         if sections:
             cols = " ".join(sections)
             fts_query = f"{{{cols}}}: ({query})"
         else:
             fts_query = query
-        sql = """SELECT p.id, p.doi, p.title, p.journal, p.pub_date, p.url, p.kind, p.source,
-                        snippet(papers_fts, -1, '[', ']', ' … ', 18) AS snippet, bm25(papers_fts) AS rank
-                 FROM papers_fts JOIN papers p ON p.rowid = papers_fts.rowid
+        weights = ", ".join(f"{w:g}" for w in FTS_BM25_WEIGHTS)
+        effective_date = "COALESCE(NULLIF(p.pub_date, ''), substr(p.first_seen, 1, 10))"
+        sql = f"""SELECT p.id, p.doi, p.title, p.journal, p.pub_date, p.url, p.kind, p.source,
+                        snippet(papers_fts, -1, '[', ']', ' … ', 18) AS snippet, bm25(papers_fts, {weights}) AS rank,
+                        s.final AS score, {worktype.sql_predicate('p')} AS non_research,
+                        json_extract(p.extra_json, '$.work_type') AS work_type, substr(p.abstract, 1, 40) AS abstract_head
+                 FROM papers_fts JOIN papers p ON p.rowid = papers_fts.rowid LEFT JOIN scores s ON s.paper_id = p.id
                  WHERE papers_fts MATCH ?"""
         params: List[Any] = [fts_query]
         if since:
             sql += " AND (p.pub_date >= ? OR (p.pub_date='' AND substr(p.first_seen,1,10) >= ?))"
             params += [since, since]
-        sql += " ORDER BY rank LIMIT ?"
-        params.append(limit)
+        order = {"relevance": "rank", "score": "(s.final IS NULL), s.final DESC, rank", "date": f"{effective_date} DESC, rank"}[sort]
+        sql += f" ORDER BY non_research, {order} LIMIT ?"
+        params.append(limit * _SEARCH_OVERFETCH if collapse else limit)
         try:
-            return _rows(self.conn.execute(sql, params))
+            rows = _rows(self.conn.execute(sql, params))
         except sqlite3.OperationalError as exc:
             if not fallback:
                 raise
@@ -1259,10 +1309,11 @@ class Store:
             phrase = '"' + query.replace('"', " ") + '"'
             params[0] = f"{{{' '.join(sections)}}}: ({phrase})" if sections else phrase
             try:
-                return _rows(self.conn.execute(sql, params))
+                rows = _rows(self.conn.execute(sql, params))
             except sqlite3.OperationalError as exc2:
                 log.warning("search fell back to a phrase query and still failed: %s", exc2)
                 return []
+        return _finish_search_rows(rows, limit, collapse)
 
     def entity_papers(self, entity_id: str, since: Optional[str] = None, limit: int = 100, distinct: bool = False) -> List[Dict[str, Any]]:
         """Papers mentioning an entity, newest first.

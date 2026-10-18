@@ -65,8 +65,18 @@ Tokenizer facts that change how you write queries:
 | phrase with a dot or slash | `"R10.4.1"`, `"HiSeq X/Ten"` | same rule |
 | a literal quote inside a phrase | `"said ""hi"""` | double the quote character |
 
-Ranking: results are ordered by `bm25(papers_fts)` (lower is better); the API returns it as `rank`.
-Snippets mark matched tokens with `[` and `]`.
+**Ordering.** Research papers come first; records that are not papers follow, each with a `record_type`
+saying why (`letter`, `editorial`, `dataset`, `software`, `deposit` for a general repository such as Zenodo or
+figshare, `protocol`, `supplement`, `dissertation`, `peer_review`, `paratext`; `null` for a paper). The rule is
+`litradar/worktype.py` (OpenAlex `work_type`, repository DOI prefixes and venues, NEJM DOI codes, "To the
+Editor:" / "Reply to" / "Supplementary ... from" cues), applied as one SQL expression. Within each group the
+`sort` decides: `relevance` (default) is `bm25(papers_fts, ...)` with the title weighted 4, abstract and entity
+mentions 2, Methods / funding / COI / affiliations 1 and body 0.5 (lower `rank` is better); `score` is the stored
+rank score (`score`; unscored rows last); `date` is newest first. bm25 normalises by document length, so a
+title-only deposit record would otherwise outrank a full-text paper that names the same platform in its title:
+that is why the papers-first rule exists rather than a weight. Rows that share a title (a dataset deposited in
+24 versions) fold into the best-placed one, whose `duplicates` counts the rows folded; `--keep-duplicates`
+(CLI) or `collapse=0` (API) keeps them apart. Snippets mark matched tokens with `[` and `]`.
 
 **Section filter versus column filter.** `--in methods,coi` (CLI) or `in=methods,coi` (API) wraps your
 whole query as `{methods coi}: (query)`; writing `methods:` inside the query does the same for one
@@ -129,6 +139,10 @@ Properties:
   affiliations and the stored sections are returned as stored.
 - **Windows.** `since`/`until` default to the last 7 days ending today (UTC) on the count endpoints.
   `/search` and `/entities` take `since` only (no upper bound), like the CLI.
+- **Search ordering.** `/search` takes `sort=relevance|score|date` (default `relevance`; anything else is a
+  `400`) and `collapse=1|0` (default `1`: rows sharing a title fold into one, `duplicates` counting the rest).
+  Research papers always precede letters, editorials and dataset / software deposits; `record_type` says why a
+  row is in the second group (`null` for a paper). The response echoes `sort` and `collapse`.
 - **Database checks at startup.** A missing file, a file that is not SQLite, or a database without the
   radar schema stops `litradar serve` with one line and exit 2; a busy port is one line and exit 1. A
   database error during a request is a `503` (`database error`), never a traceback to the client.
@@ -298,6 +312,8 @@ Vercel, Fly.io or Datasette Lite, and the settings to add before making a copy p
 
 ```bash
 litradar search "methods:Xenium" --since 90d --limit 20 [--json]
+litradar search "Xenium" --sort score                    # by stored rank score; --sort date = newest first; default = relevance
+litradar search "Visium" --keep-duplicates               # keep every dataset version instead of folding repeated titles
 litradar search "liquid biopsy" --since 30d              # plain text = phrase (see above); --json adds each paper's score
 litradar search "liquid biopsy" --raw-fts                # verbatim FTS5: AND of the stemmed words
 litradar search "Illumina" --in coi,funding --since 30d

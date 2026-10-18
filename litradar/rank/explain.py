@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from ..worktype import PHRASES as RECORD_TYPE_PHRASES
 from .heuristics import ScoreResult
 
 PREPRINT_SERVERS = {
@@ -64,6 +65,10 @@ def why_it_matters(res: ScoreResult, paper: Dict[str, Any], company_types: Optio
     noun = facts.get("new_platform")
     if facts.get("notice"):
         opener += " that is a correction / retraction notice, not a study"
+    elif facts.get("record_type"):
+        # a letter, editorial, dataset / software deposit, dissertation ...: name the venue and what the record is
+        venue = str(paper.get("journal") or paper.get("source") or "").strip() or "unnamed source"
+        opener = f"{venue} {RECORD_TYPE_PHRASES.get(facts['record_type'], facts['record_type'])}, not a research paper"
     elif noun:
         opener += f" introducing a new {noun}"
     clauses.append(opener)

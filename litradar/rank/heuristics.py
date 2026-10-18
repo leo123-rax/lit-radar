@@ -25,6 +25,11 @@ without a language model.
                       True / "openalex_id" for an exact match or "name" for a name match)
   notice penalty      -4.0 for "Author Correction: ...", "Erratum", "Retraction" and the like (NOTICE_RE) and for
                       preprints whose record type is "withdrawn": they carry the venue's tier but are not papers
+  not a paper         -4.0 (`non_research_penalty`) for letters to the editor, editorials, dataset / software /
+                      protocol deposits, supplementary files, dissertations, peer-review reports and front matter
+                      (litradar/worktype.py: OpenAlex work_type, repository DOI prefixes and venues, NEJM DOI codes,
+                      "To the Editor:" / "Reply to" / "Supplementary Figure ... from" cues); the venue prior of such
+                      a record falls to the unranked floor as well, so a NEJM letter does not inherit NEJM's tier
   novelty language    +0.5 per cue (cap 1.0)
   new platform cue    +1.5 when the title/abstract says the paper introduces an artefact: "we present / introduce /
                       develop ... a platform | method | assay | sequencer | instrument | ..." (NEW_PLATFORM_RE)
@@ -58,6 +63,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from .. import worktype
+
 DEFAULT_WEIGHTS = {
     # venue prior (tier from config/journals.yaml)
     "tier_A": 5.0,
@@ -82,6 +89,7 @@ DEFAULT_WEIGHTS = {
     "tracked_author_name": 1.5,     # matched by name only (a common name is weak evidence of identity)
     # editorial noise
     "notice_penalty": -4.0,         # "Author Correction: ...", "Erratum", "Retraction", ... (NOTICE_RE)
+    "non_research_penalty": -4.0,   # letters, editorials, dataset / software deposits, dissertations, peer-review reports, supplements (worktype.classify)
     # novelty language and the new-platform cue
     "novelty": 0.5,
     "novelty_cap": 1.0,
@@ -314,6 +322,13 @@ def _is_topical(comps: Sequence[Component], company_ids: Sequence[str], author_c
     return False
 
 
+def _withhold_venue(comps: List[Component], floor: float, reason: str, tiers: Sequence[Any]) -> None:
+    """Drop the venue component to `floor` when its tier is one of `tiers` and it scored above the floor."""
+    for i, c in enumerate(comps):
+        if c.key == "venue" and c.points > floor and isinstance(c.detail, dict) and c.detail.get("tier") in tiers:
+            comps[i] = Component("venue", f"{c.label}; {reason}", floor, c.detail)
+
+
 def score_paper_v2(
     paper: Dict[str, Any],
     mentions: Sequence[Dict[str, Any]],
@@ -504,16 +519,27 @@ def score_paper_v2(
         elif str(extra.get("type") or "").lower() == "withdrawn":  # bioRxiv marks withdrawn preprints in the record type
             comps.append(Component("notice", "withdrawn preprint", float(w["notice_penalty"]), "withdrawn"))
             facts["notice"] = True
+    # ---- not a research paper: letters, editorials, dataset / software deposits, dissertations, peer-review reports ...
+    rtype = worktype.classify(paper.get("title") or "", paper.get("abstract") or "", str(paper.get("doi") or ""),
+                              str(paper.get("journal") or ""), str(extra.get("work_type") or ""))
+    if rtype is not None and not facts.get("notice"):
+        if rtype.label == "notice":
+            if w["notice_penalty"]:
+                comps.append(Component("notice", "correction / retraction notice", float(w["notice_penalty"]), rtype.evidence))
+                facts["notice"] = True
+        elif w["non_research_penalty"]:
+            comps.append(Component("notice", f"{rtype.phrase}, not a research paper", float(w["non_research_penalty"]), rtype.label))
+            facts["record_type"] = rtype.label
 
-    # ---- topical gate
+    # ---- topical gate; a record that is not a research paper gets no venue credit either
     topical = _is_topical(comps, companies, author_companies, types)  # gazetteer ids, not display names
     facts["topical"] = topical
-    if w.get("topical_gate", True) and not topical:
-        floor = float(w["tier_unknown"])
-        for i, c in enumerate(comps):
-            if c.key == "venue" and c.points > floor and isinstance(c.detail, dict) and c.detail.get("tier") in ("A", "B"):
-                comps[i] = Component("venue", c.label + "; prior withheld: no platform, lab tool, watchlist term, tracked author or life-science company",
-                                     floor, c.detail)
+    floor = float(w["tier_unknown"])
+    if facts.get("record_type"):
+        _withhold_venue(comps, floor, f"prior withheld: {worktype.PHRASES.get(facts['record_type'], facts['record_type'])}, not a research paper",
+                        tiers=("A", "B", "C", ""))
+    elif w.get("topical_gate", True) and not topical:
+        _withhold_venue(comps, floor, "prior withheld: no platform, lab tool, watchlist term, tracked author or life-science company", tiers=("A", "B"))
 
     raw = sum(c.points for c in comps)
     scaled = max(0.0, min(10.0, 10.0 * raw / float(w["scale_max_raw"])))

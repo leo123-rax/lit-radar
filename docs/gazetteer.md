@@ -63,8 +63,9 @@ keeps its own id and its own mention rows. `Gazetteer.families` maps entity ids 
 with the member whose name slugifies to the key ("NovaSeq X", "Chromium"), else with the member names joined by
 " / " ("NextSeq 1000 / NextSeq 2000"). `litradar show <instrument>` prints the family in the identity block.
 
-**Scoring.** `litradar/rank/heuristics.py` splits instrument mentions into *platforms* (weight 1.0 per distinct entity,
-cap 3) and *lab tools* (0.2, cap 3) by category prefix; see section 4.
+**Scoring.** `litradar/rank/heuristics.py` splits instrument mentions into *platforms* (+1.0 for the first platform
+named, further platforms listed but not scored; +1.0 more when a platform is named in the title or abstract) and
+*lab tools* (+0.2 per distinct entity, cap 3) by category prefix; see section 4 here and docs/ranking.md section 4.
 
 ### Which alias matched
 
