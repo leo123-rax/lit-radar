@@ -279,6 +279,21 @@ def test_real_config_is_consistent_with_gazetteer_and_vocabulary():
     assert warnings == []
     # Flongle has no archive model; it is reachable through Europe PMC only
     assert "Flongle" in specs["ont-minion"].epmc_terms and "Vega" in specs["pacb-vega"].ena
+    # Europe PMC terms are vendor-qualified or brand tokens: the bare words that matched knee implants, odometry
+    # papers and buffer recipes live on 2026-10-17 must never come back
+    all_terms = {t for s in specs.values() for t in s.epmc_terms}
+    for banned in ("Vega", "Vega system", "Revio", "UG 100", "RS II system", "Sequel II", "Sequel", "Onso", "Element"):
+        assert banned not in all_terms, banned
+    assert specs["pacb-vega"].epmc_terms == ["PacBio Vega", "Vega sequencer"]
+    assert all(t.startswith("PacBio") or t.lower().startswith("revio ") for t in specs["pacb-revio"].epmc_terms)
+    assert all(t.startswith("PacBio") or t.lower().startswith("onso ") for t in specs["pacb-onso"].epmc_terms)
+    assert all(t.startswith("PacBio ") for t in specs["pacb-rs-ii"].epmc_terms)
+    # every launch month parses and sits before the first real deposits/mentions seen in the live audit
+    launches = {eid: s.launch for eid, s in specs.items() if s.launch}
+    assert all(ts.MONTH_RE.match(m) for m in launches.values())
+    assert launches["pacb-revio"] == "2022-10" and launches["pacb-vega"] == "2024-11" and launches["pacb-onso"] == "2022-10"
+    assert launches["ilmn-novaseq-x"] <= "2023-01" and launches["elem-aviti"] <= "2023-10" and launches["ultima-ug100"] <= "2024-05"
+    assert "pacb-sequel-ii" not in launches  # early-access deposits predate the April 2019 launch; no floor
 
 
 def test_load_archive_models_tolerates_sparse_and_odd_entries(tmp_path):
@@ -349,14 +364,49 @@ def test_csv_and_markdown_outputs(tmp_path):
     csv_path = tmp_path / "out" / "ts.csv"
     ts.write_csv(_rows(), csv_path)
     text = csv_path.read_text(encoding="utf-8").splitlines()
-    assert text[0] == "source,entity_id,model,month,count" and text[1] == "sra,pacb-revio,revio,2024-01,38" and len(text) == 5
+    # the unit travels with every row: experiments (sra), runs (ena), papers (epmc)
+    assert text[0] == "source,entity_id,model,month,count,unit" and text[1] == "sra,pacb-revio,revio,2024-01,38,experiments" and len(text) == 5
+    assert text[4] == "epmc,pacb-revio,Revio,2024-01,7,papers"
+    ts.write_csv([{"source": "ena", "entity_id": "pacb-revio", "model": "Revio", "month": "2024-01", "count": 1500}], csv_path)
+    assert csv_path.read_text(encoding="utf-8").splitlines()[1] == "ena,pacb-revio,Revio,2024-01,1500,runs"
     md = ts.render_markdown(_rows(), months)
-    assert "## sra (experiments by instrument_model)" in md and "## epmc (papers naming the model in Methods)" in md
+    assert "## sra (SRA experiments by instrument_model)" in md and "## epmc (open-access papers naming the model in Methods)" in md
+    assert "ena = ENA runs (experiment-run rows" in md and "Blank = never fetched; fail = the request failed" in md
     assert "| month | pacb-revio: revio | pacb-sequel-ii: sequel ii | total |" in md
-    assert "| 2024-01 | 38 | 7272 | 7310 |" in md
-    assert "| 2024-02 | 40 |  | 40 |" in md  # month with no Sequel II count stays blank
-    assert "| **total** | 78 | 7272 | 7350 |" in md
+    assert "|---|---:|---:|---:|" in md  # numbers right-aligned
+    assert "| 2024-01 | 38 | 7,272 | 7,310 |" in md  # thousands separators
+    assert "| 2024-02 | 40 |  | 40 |" in md  # month never fetched stays blank
+    assert "| **total** | 78 | 7,272 | 7,350 |" in md
     assert ts.render_markdown([], months).rstrip().endswith("_No data._")
+
+
+def test_markdown_labels_order_and_failed_cells():
+    months = ["2024-01", "2024-02"]
+    rows = [
+        {"source": "epmc", "entity_id": "pacb-sequel-ii", "model": "Sequel II|Sequel IIe", "month": "2024-01", "count": 5},
+        {"source": "ena", "entity_id": "pacb-revio", "model": "Revio", "month": "2024-01", "count": 38},
+        {"source": "sra", "entity_id": "pacb-revio", "model": "revio", "month": "2024-01", "count": 38},
+        {"source": "sra", "entity_id": "pacb-sequel-ii", "model": "sequel ii", "month": "2024-01", "count": 7272},
+    ]
+    names = {"pacb-revio": "Revio", "pacb-sequel-ii": "Sequel II"}
+    order = [("sra", "pacb-revio", "revio"), ("sra", "pacb-sequel-ii", "sequel ii"), ("ena", "pacb-revio", "Revio"), ("epmc", "pacb-sequel-ii", "Sequel II|Sequel IIe")]
+    failed = {("sra", "pacb-revio", "revio", "2024-02"), ("ena", "pacb-revio", "Revio", "2024-02")}
+    md = ts.render_markdown(rows, months, sources=["sra", "ena", "epmc"], names=names, failed=failed, order=order)
+    # sources in the requested order, not alphabetical
+    assert md.index("## sra (") < md.index("## ena (") < md.index("## epmc (")
+    # gazetteer names label the columns; the pipe-joined epmc term set is rendered with commas, never a bare pipe
+    assert "| month | Revio (revio) | Sequel II (sequel ii) | total |" in md
+    assert "| month | Sequel II (Sequel II, Sequel IIe) | total |" in md
+    assert "\\|" not in md
+    # every header has as many cells as its separator
+    lines = md.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("|---"):
+            assert lines[i - 1].count("|") == line.count("|"), (lines[i - 1], line)
+    # a failed month is marked, a never-fetched month is blank
+    assert "| 2024-02 | fail |  | 0 |" in md.split("## sra")[1].split("## ena")[0]
+    assert "| 2024-02 | fail | 0 |" in md.split("## ena")[1].split("## epmc")[0]
+    assert ts.series_label("x-id", "Model|Other") == "x-id: Model, Other" and ts.series_label("x", "MinION", {"x": "MinION"}) == "MinION (MinION)"
 
 
 def test_png_is_optional_and_never_raises(tmp_path):
@@ -370,25 +420,146 @@ def test_png_is_optional_and_never_raises(tmp_path):
     assert ts.write_png([], ["2024-01"], tmp_path / "empty.png") is False
 
 
+# ---- failure reasons, launch floor, run() verdicts --------------------------------------------
+class _Resp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class StatusHttp:
+    """Mimics litradar.http.Http.get: queued Response-like objects (None = the client gave up)."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,)):
+        self.calls.append((url, params))
+        return self.responses.pop(0) if self.responses else None
+
+
+def test_failure_reasons_name_the_http_status_or_cause(tmp_path):
+    store = Store(tmp_path / "t.sqlite")
+    jobs = ts.plan_jobs(_specs(), ["pacb-revio"], ["2026-08", "2026-09", "2026-10"], ["sra"])
+    http = StatusHttp([_Resp(400, None, text='{"error":"API key invalid"}'), None, _Resp(200, _sra(12))])
+    rep = ts.backfill(http, store, jobs, refresh_months=2, today=date(2026, 10, 17))
+    assert rep["failed"] == ["sra:pacb-revio:revio:2026-08", "sra:pacb-revio:revio:2026-09"]
+    assert [(f["month"], f["reason"]) for f in rep["failures"]] == [
+        ("2026-08", 'HTTP 400: {"error":"API key invalid"}'),
+        ("2026-09", ts.NO_ANSWER),
+    ]
+    assert rep["failures"][0]["source"] == "sra" and rep["failures"][0]["entity_id"] == "pacb-revio" and rep["failures"][0]["model"] == "revio"
+    assert store.get_timeseries_count("sra", "pacb-revio", "revio", "2026-10")["count"] == 12
+    # the detail functions on every unusual answer shape
+    assert ts.sra_count_detail(StatusHttp([_Resp(200, None, text="<html>")]), "Revio", "2026-08-01", "2026-08-31") == (None, "non-JSON body")
+    assert ts.sra_count_detail(StatusHttp([_Resp(200, {"error": "API rate limit exceeded"})]), "Revio", "2026-08-01", "2026-08-31")[1].startswith("NCBI error: API rate limit")
+    assert ts.ena_count_detail(StatusHttp([_Resp(503, None, text="Service Unavailable")]), "Revio", "2026-08-01", "2026-08-31") == (None, "HTTP 503: Service Unavailable")
+    assert ts.ena_count_detail(StatusHttp([_Resp(200, {"count": "n/a"})]), "Revio", "2026-08-01", "2026-08-31") == (None, "non-numeric count 'n/a'")
+    assert ts.epmc_count_detail(StatusHttp([_Resp(200, {"version": "6.9"})]), ["PacBio Revio"], "2026-08-01", "2026-08-31") == (None, "unexpected payload (no hitCount)")
+    assert ts.epmc_count_detail(StatusHttp([]), [], "2026-08-01", "2026-08-31") == (None, "no Europe PMC terms configured")
+    # a client that only offers get_json still works and reports 'no answer'
+    assert ts.sra_count_detail(FakeHttp([None]), "Revio", "2026-08-01", "2026-08-31") == (None, ts.NO_ANSWER)
+    # a garbage NCBI key is not sent (and so cannot earn the 400 it used to)
+    http = StatusHttp([_Resp(200, _sra(1))])
+    ts.sra_count(http, "Revio", "2026-08-01", "2026-08-31", api_key="# https://account.ncbi.nlm.nih.gov/settings/")
+    assert "api_key" not in http.calls[0][1]
+
+
+def test_launch_floor_stores_zero_without_a_request(tmp_path):
+    store = Store(tmp_path / "t.sqlite")
+    specs = _specs()
+    jobs = ts.plan_jobs(specs, ["pacb-revio"], ["2022-08", "2022-09", "2022-10", "2022-11"], ["sra", "epmc"])
+    http = FakeHttp([_sra(0), _sra(3), {"hitCount": 0}, {"hitCount": 2}])
+    rep = ts.backfill(http, store, jobs, today=date(2026, 10, 17), launches={"pacb-revio": "2022-10"})
+    assert rep["pre_launch"] == 4 and rep["requests"] == 4 and len(http.calls) == 4
+    assert rep["by_source"]["sra"]["pre_launch"] == 2 and rep["by_source"]["epmc"]["pre_launch"] == 2
+    rows = store.timeseries_rows(entity_ids=["pacb-revio"])
+    assert {(r["source"], r["month"]): r["count"] for r in rows} == {
+        ("sra", "2022-08"): 0, ("sra", "2022-09"): 0, ("sra", "2022-10"): 0, ("sra", "2022-11"): 3,
+        ("epmc", "2022-08"): 0, ("epmc", "2022-09"): 0, ("epmc", "2022-10"): 0, ("epmc", "2022-11"): 2,
+    }
+    # pre-launch months stay request-free on a forced re-run too; only the four post-launch jobs go to the network
+    http = FakeHttp([_sra(0), _sra(3), {"hitCount": 0}, {"hitCount": 2}])
+    rep = ts.backfill(http, store, jobs, today=date(2026, 10, 17), launches={"pacb-revio": "2022-10"}, force=True)
+    assert rep["pre_launch"] == 4 and rep["requests"] == 4 and rep["failed"] == [] and len(http.calls) == 4
+    # a bad launch value in the config is ignored with a warning, never a crash
+    p = tmp_path / "m.yaml"
+    p.write_text("entities:\n  a-one: {sra: [x], ena: [X], launch: 'October 2022'}\n  b-two: {sra: [y], ena: [Y], launch: 2022-10}\n", encoding="utf-8")
+    loaded = ts.load_archive_models(p)
+    assert loaded["a-one"].launch == "" and loaded["b-two"].launch == "2022-10"
+
+
+def test_run_verdicts_future_months_and_output_stem(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    # (a) two of six requests fail: a warning with the reasons, exit code 0 territory (errors empty), cells marked fail
+    http = StatusHttp([_Resp(200, _sra(38)), _Resp(429, None, text="too many requests"), _Resp(200, {"count": "38"}), None,
+                       _Resp(200, {"hitCount": 7}), _Resp(200, {"hitCount": 9})])
+    rep = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2024-01", end="2024-02",
+                 http=http, store=store, today=date(2026, 10, 17), chart=False)
+    assert rep["errors"] == []
+    assert rep["warnings"] == [
+        "sra: 1 of 2 count request(s) failed (shown as `fail`, not cached): HTTP 429: too many requests (x1). Re-run to retry",
+        f"ena: 1 of 2 count request(s) failed (shown as `fail`, not cached): {ts.NO_ANSWER} (x1). Re-run to retry",
+    ]
+    md = Path(rep["outputs"]["markdown"]).read_text(encoding="utf-8")
+    assert "| 2024-02 | fail | 0 |" in md.split("## sra")[1].split("## ena")[0]
+    assert "| 2024-02 | fail | 0 |" in md.split("## ena")[1].split("## epmc")[0]
+    # (b) every request of a source fails: that source is an error (exit 1), the others carry on
+    http = StatusHttp([_Resp(400, None, text="bad key"), _Resp(400, None, text="bad key"), _Resp(200, {"count": "40"}), _Resp(200, {"count": "41"}),
+                       _Resp(200, {"hitCount": 7}), _Resp(200, {"hitCount": 9})])
+    rep = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2024-01", end="2024-02",
+                 http=http, store=store, today=date(2026, 10, 17), chart=False, force=True)
+    assert rep["errors"] == ["sra: all 2 count request(s) of this run failed: HTTP 400: bad key (x2). Nothing cached for them; fix the cause and re-run"]
+    assert [w for w in rep["warnings"] if w.startswith("ena") or w.startswith("epmc")] == []
+    assert store.get_timeseries_count("sra", "pacb-revio", "revio", "2024-01")["count"] == 38  # the earlier value survives a failed refresh
+    # (c) future months: --to is clamped with a warning, --from in the future is an error before any request
+    rep = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2026-09", end="2027-03",
+                 http=FakeHttp([]), store=store, today=date(2026, 10, 17), dry_run=True)
+    assert rep["errors"] == [] and rep["to"] == "2026-10" and rep["months"] == 2
+    assert rep["warnings"] == ["--to 2027-03 is in the future; clamped to the current month 2026-10 (future months cannot have deposits)"]
+    rep = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2026-11", end="2027-03",
+                 http=FakeHttp([]), store=store, today=date(2026, 10, 17), dry_run=True)
+    assert rep["errors"] == ["--from 2026-11 is in the future (current month 2026-10); nothing can be deposited or published yet"] and "backfill" not in rep
+    # (d) the stem carries the selection, shortened with a hash when long
+    assert ts.output_stem("2019-01", "2026-09", [], ["pacb"], ["pacb-revio"]) == "timeseries_2019-01_2026-09_pacb"
+    assert ts.output_stem("2019-01", "2026-09", ["pacb-revio", "pacb-sequel-ii"], ["Oxford Nanopore"], ["a", "b", "c"]) == "timeseries_2019-01_2026-09_oxford-nanopore+pacb-revio+pacb-sequel-ii"
+    long = ts.output_stem("2019-01", "2026-09", ["ilmn-novaseq-x", "ilmn-novaseq-6000", "ilmn-nextseq-2000", "ilmn-miseq"], [], ["a", "b", "c", "d"])
+    assert long.startswith("timeseries_2019-01_2026-09_ilmn-novaseq-x+4ids-") and len(long) < 70
+    assert ts.output_stem("2019-01", "2026-09", [], [], ["x"]) == "timeseries_2019-01_2026-09_all"
+
+
 # ---- end-to-end through run() and the CLI -----------------------------------------------------
 def test_run_end_to_end_offline(tmp_path):
     http = FakeHttp([_sra(38), _sra(40), {"count": "38"}, {"count": "41"}, {"hitCount": 7}, {"hitCount": 9}])
     store = Store(tmp_path / "db.sqlite")
     # a row from a model string that is no longer configured for this entity must not leak into the outputs
     store.put_timeseries_count("sra", "pacb-revio", "revio (old spelling)", "2024-01", 5)
-    store.put_timeseries_count("epmc", "pacb-revio", "Revio|Revio system", "2024-01", 9)
+    store.put_timeseries_count("epmc", "pacb-revio", "Revio|Revio legacy term", "2024-01", 9)
     store.commit()
     rep = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2024-01", end="2024-02",
                  http=http, store=store, today=date(2026, 10, 17), chart=False)
-    assert rep["errors"] == [] and rep["entities"] == ["pacb-revio"] and rep["months"] == 2
-    assert rep["backfill"]["requests"] == 6 and rep["outputs"]["rows"] == 6
-    assert Path(rep["outputs"]["csv"]).name == "timeseries_2024-01_2024-02.csv" and Path(rep["outputs"]["markdown"]).exists()
+    assert rep["errors"] == [] and rep["warnings"] == [] and rep["entities"] == ["pacb-revio"] and rep["months"] == 2
+    assert rep["backfill"]["requests"] == 6 and rep["backfill"]["failures"] == [] and rep["outputs"]["rows"] == 6
+    # the selection is part of the file stem, so two vendors written into one --out directory keep both files
+    assert Path(rep["outputs"]["csv"]).name == "timeseries_2024-01_2024-02_pacb-revio.csv" and Path(rep["outputs"]["markdown"]).exists()
     assert "png" not in rep["outputs"]
     csv_text = Path(rep["outputs"]["csv"]).read_text(encoding="utf-8")
-    assert "old spelling" not in csv_text and "Revio system" not in csv_text and csv_text.count("\n") == 7
+    assert "old spelling" not in csv_text and "legacy term" not in csv_text and csv_text.count("\n") == 7
+    assert "ena,pacb-revio,Revio,2024-01,38,runs" in csv_text and "sra,pacb-revio,revio,2024-01,38,experiments" in csv_text
     md = Path(rep["outputs"]["markdown"]).read_text(encoding="utf-8")
-    assert "| 2024-01 | 38 | 38 |" in md  # sra table: one series + total
+    assert "| month | Revio (revio) | total |" in md and "| 2024-01 | 38 | 38 |" in md  # sra table: gazetteer name, one series + total
     assert "old spelling" not in md
+    # a second run into the same directory replaces its own files and says so
+    rep2 = ts.run(CONFIG, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], start="2024-01", end="2024-02",
+                  http=FakeHttp([]), store=store, today=date(2026, 10, 17), chart=False)
+    assert rep2["errors"] == [] and any("replacing the earlier outputs timeseries_2024-01_2024-02_pacb-revio" in w for w in rep2["warnings"])
     # a config dir without archive_models.yaml is an error in the report, not a traceback
     rep = ts.run(tmp_path, tmp_path / "db.sqlite", tmp_path / "out", entities=["pacb-revio"], http=http, store=store)
     assert len(rep["errors"]) == 1 and "archive_models.yaml" in rep["errors"][0]
@@ -411,8 +582,8 @@ def test_cli_dry_run_makes_no_requests(tmp_path, monkeypatch, capsys):
     rep = json.loads(out)
     assert rep["dry_run"] is True and rep["entities"][:1] == ["pacb-rs-ii"] and "pacb-revio" in rep["entities"]
     # 6 PacBio entities with 8 archive model strings per source (rs ii, rs, sequel, sequel ii, sequel iie, revio, vega, onso)
-    # x 3 months x 2 sources = 48 planned requests
-    assert rep["backfill"]["requests"] == 48 and rep["backfill"]["cached"] == 0
+    # x 3 months x 2 sources = 48 planned requests, minus the 6 Vega months before its 2024-11 launch (stored as 0, no request)
+    assert rep["backfill"]["requests"] == 42 and rep["backfill"]["cached"] == 0 and rep["backfill"]["pre_launch"] == 6
     assert main(["timeseries", "--from", "2024-01", "--to", "2024-01", "--dry-run"]) == 1  # no entities selected
 
 

@@ -7,9 +7,17 @@
 #   ena         ENA portal `instrument_model` values: the exact vocabulary strings (matching is case-insensitive, but
 #               "PacBio Revio" is not a vocabulary value and returns 0). SRA and ENA share the controlled vocabulary in
 #               SRA.common.xsd (github.com/enasequence/schema), so `ena` is the mixed-case twin of `sra`.
+#               ENA's count endpoint returns experiment-RUN rows (runs), SRA counts experiments; the outputs say so.
 #   epmc_terms  Phrases searched in Europe PMC Methods sections (METHODS:"..."), OR-ed into one query per entity;
 #               the hit count is papers, not mentions. Europe PMC phrase search is prefix-inclusive at the token
-#               level ("NovaSeq X" also matches "NovaSeq X Plus"), so keep terms specific to the model family.
+#               level ("NovaSeq X" also matches "NovaSeq X Plus") and case-insensitive, so every term must be
+#               VENDOR-QUALIFIED or a brand token that is not an ordinary word: "Vega system" matched knee implants,
+#               MRI software and astronomy (29 of 29 hits before 2025 were not sequencers); "Revio" alone matched a
+#               robotics paper (REVIO odometry); "UG 100" alone would match "10 ug 100 uL" in a buffer recipe.
+#               Use "PacBio Vega" / "Vega sequencer", not "Vega"; "NovaSeq", "MinION", "DNBSEQ" are safe brand tokens.
+#   launch      YYYY-MM the model was announced. Months before it are stored as 0 without a request (nothing can
+#               deposit from or name an instrument that did not exist; Europe PMC phrase hits before the launch were
+#               only ever false positives). Optional; use the announcement month, which precedes shipping.
 #   vendor      fallback for `--vendor` expansion when the id is not (yet) in instruments.yaml.
 #   proposed    true = the id is pre-registered here but the gazetteer entry still has to be added to
 #               instruments.yaml (the time series works without it; `litradar check-config` and the `warnings`
@@ -19,14 +27,17 @@
 # schema with no gazetteer entry and therefore not covered: Illumina MiniSeq, Ultima UG 200, Genapsys, GeneMind,
 # Vela Sentosa, capillary and 454 instruments. Oxford Nanopore sub-models (PromethION 2 Solo, MinION Mk1C, Flongle)
 # are not archive instrument_model values; they are only reachable through Europe PMC terms.
+#
+# Changing an entity's epmc_terms changes its series key: cached months under the old term set stay in the
+# `timeseries` table but leave the outputs, and the new set is fetched on the next run.
 entities:
   # ---------------- Pacific Biosciences ----------------
   pacb-rs-ii:
     vendor: Pacific Biosciences
     sra: ["pacbio rs ii", "pacbio rs"]
     ena: ["PacBio RS II", "PacBio RS"]
-    epmc_terms: ["PacBio RS II", "PacBio RSII", "RS II system"]
-    notes: "legacy SMRT instruments (2011-2016)"
+    epmc_terms: ["PacBio RS II", "PacBio RSII", "PacBio RS"]
+    notes: "legacy SMRT instruments (2011-2016); 'RS II system' dropped (unqualified)"
   pacb-sequel:
     vendor: Pacific Biosciences
     sra: ["sequel"]
@@ -37,23 +48,29 @@ entities:
     vendor: Pacific Biosciences
     sra: ["sequel ii", "sequel iie"]
     ena: ["Sequel II", "Sequel IIe"]
-    epmc_terms: ["Sequel II", "Sequel IIe"]
+    epmc_terms: ["PacBio Sequel II", "Sequel II system", "Sequel II sequencer", "Sequel II platform", "Sequel IIe"]
+    notes: "'Sequel II' alone is an ordinary phrase; 'Sequel IIe' is a brand token and stays bare; no launch floor (early-access deposits reached SRA in 2019-03, before the April 2019 launch)"
   pacb-revio:
     vendor: Pacific Biosciences
     sra: ["revio"]
     ena: ["Revio"]
-    epmc_terms: ["Revio"]
+    epmc_terms: ["PacBio Revio", "Revio system", "Revio sequencer", "Revio platform", "Revio SMRT"]
+    launch: 2022-10
+    notes: "announced 2022-10-25; bare 'Revio' matched 'REVIO: Range- and Event-Based Visual-Inertial Odometry' (2022-10)"
   pacb-vega:
     vendor: Pacific Biosciences
     sra: ["vega"]
     ena: ["Vega"]
-    epmc_terms: ["PacBio Vega", "Vega system", "Vega sequencer"]
-    notes: "in the SRA/ENA vocabulary since 2025; zero deposits as of 2026-10-17"
+    epmc_terms: ["PacBio Vega", "Vega sequencer"]
+    launch: 2024-11
+    notes: "announced 2024-11; in the SRA/ENA vocabulary since 2025; zero deposits as of 2026-10-17; 'Vega system' dropped (knee implants, MRI software, astronomy)"
   pacb-onso:
     vendor: Pacific Biosciences
     sra: ["onso"]
     ena: ["Onso"]
     epmc_terms: ["PacBio Onso", "Onso system", "Onso sequencer"]
+    launch: 2022-10
+    notes: "announced 2022-10-25 with Revio"
   # ---------------- Oxford Nanopore ----------------
   ont-promethion:
     vendor: Oxford Nanopore Technologies
@@ -89,6 +106,8 @@ entities:
     sra: ["illumina novaseq x", "illumina novaseq x plus"]
     ena: ["Illumina NovaSeq X", "Illumina NovaSeq X Plus"]
     epmc_terms: ["NovaSeq X", "NovaSeq X Plus", "NovaSeqX"]
+    launch: 2022-09
+    notes: "announced 2022-09-29"
   ilmn-nextseq-550:
     vendor: Illumina
     sra: ["nextseq 500", "nextseq 550"]
@@ -114,7 +133,8 @@ entities:
     sra: []
     ena: []
     epmc_terms: ["MiSeq i100"]
-    notes: "not in the archive vocabulary as of 2026-10-17; papers only"
+    launch: 2024-10
+    notes: "announced 2024-10; not in the archive vocabulary as of 2026-10-17; papers only"
   ilmn-iseq-100:
     vendor: Illumina
     sra: ["illumina iseq 100"]
@@ -126,18 +146,23 @@ entities:
     sra: ["element aviti"]
     ena: ["Element AVITI"]
     epmc_terms: ["AVITI"]
+    launch: 2022-03
+    notes: "announced 2022-03"
   elem-aviti24:
     vendor: Element Biosciences
     sra: ["aviti 24"]
     ena: ["AVITI 24"]
     epmc_terms: ["AVITI24", "AVITI 24"]
-    notes: "in the vocabulary; zero SRA deposits as of 2026-10-17"
+    launch: 2024-01
+    notes: "announced 2024-01; in the vocabulary; zero SRA deposits as of 2026-10-17"
   # ---------------- Ultima Genomics ----------------
   ultima-ug100:
     vendor: Ultima Genomics
     sra: ["ug 100"]
     ena: ["UG 100"]
-    epmc_terms: ["UG 100", "UG100", "Ultima Genomics"]
+    epmc_terms: ["UG100", "Ultima UG 100", "UG 100 sequencer", "UG 100 platform", "Ultima Genomics"]
+    launch: 2022-05
+    notes: "company unveiled 2022-05; bare 'UG 100' dropped (case-insensitive match on '... ug 100 uL' buffer recipes)"
   # ---------------- MGI Tech ----------------
   mgi-dnbseq-t7:
     vendor: MGI Tech
