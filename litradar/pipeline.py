@@ -14,7 +14,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-from . import policy
+from . import gsa_snapshots, policy
 from .config import Settings
 from .extract.gazetteer import Gazetteer
 from .extract.jats import parse_jats
@@ -24,16 +24,22 @@ from .rank import heuristics
 from .sources import arxiv as arxiv_src
 from .sources import biorxiv as biorxiv_src
 from .sources import cellxgene as cellxgene_src
+from .sources import chinaxiv as chinaxiv_src
 from .sources import clinicaltrials as ctgov_src
 from .sources import crossref as crossref_src
 from .sources import ena as ena_src
 from .sources import europepmc as epmc_src
 from .sources import geo as geo_src
+from .sources import gsa as gsa_src
+from .sources import gsa_human as gsa_human_src
+from .sources import jstage as jstage_src
+from .sources import kci as kci_src
 from .sources import nih_reporter as nih_src
 from .sources import openalex as openalex_src
 from .sources import openfda as openfda_src
 from .sources import pride as pride_src
 from .sources import rss as rss_src
+from .sources import scielo as scielo_src
 from .sources import semantic_scholar as s2_src
 from .sources import sra as sra_src
 from .store import FULLTEXT_SECTIONS, Store, restricted_sections
@@ -43,7 +49,7 @@ log = logging.getLogger(__name__)
 
 INSTRUMENT_SECTIONS = ("title", "abstract", "methods")
 COMPANY_SECTIONS = ("title", "abstract", "methods", "funding", "coi", "ack", "affiliations")
-ARCHIVE_SOURCES = ("sra", "ena", "geo", "pride", "cellxgene")
+ARCHIVE_SOURCES = ("sra", "ena", "geo", "pride", "cellxgene", "gsa", "gsa_human")
 SIGNAL_SOURCES = ("nih_reporter", "clinicaltrials", "openfda")
 SIGNAL_FEEDS = ("nih-reporter", "clinicaltrials", "fda-510k", "fda-pma", "fda-denovo")
 DEFAULT_NAME_MATCH_CAP = 5  # per run, per tracked name, when the match is by name only (common names)
@@ -68,6 +74,11 @@ HOST_SOURCES = {
     "www.sec.gov": "sec",
     "api.gdeltproject.org": "gdelt",
     "news.google.com": "gnews",
+    "ngdc.cncb.ac.cn": "gsa",  # also GSA-Human
+    "global.chinaxiv.org": "chinaxiv",
+    "api.jstage.jst.go.jp": "jstage",
+    "open.kci.go.kr": "kci",
+    "articlemeta.scielo.org": "scielo",
 }
 
 
@@ -304,6 +315,10 @@ class Pipeline:
         if self._enabled("openalex", only):
             cfg = self._src("openalex")
             maxr = int(cfg.get("max_records_per_query", 2000))
+            # ISO country codes whose affiliated work is pulled with its own copy of every topic query (default CN): the
+            # global topic query stops at `max_records_per_query`, and a slice intersected with
+            # authorships.institutions.country_code is small enough to always come back whole; [] switches the slices off
+            country_slices = [str(c).strip().upper() for c in (cfg.get("country_slices", ["CN"]) or []) if str(c).strip()]
             base = {"from_publication_date": since, "to_publication_date": until}
             mail, key = self.settings.contact_email, self.settings.openalex_api_key
             # every query reports how it ended; failures are folded into self.errors per query group below,
@@ -343,6 +358,8 @@ class Pipeline:
                         if kws:
                             flt["title_and_abstract.search"] = openalex_src.or_join(kws[:40])
                         oa_query("topics", flt)
+                        for cc in country_slices:
+                            oa_query(f"topics_{cc.lower()}", dict(flt, **{"authorships.institutions.country_code": cc}))
                 if cfg.get("company_authors", True):
                     kw = sorted({k for g in self.subgroups for k in (g.get("keywords") or [])})
                     # OpenAlex search filters accept OR via |; keep the query short
@@ -408,6 +425,82 @@ class Pipeline:
                         add(p, "rss.subjects")
                 except Exception as exc:  # noqa: BLE001
                     self.errors.append(f"subject feed {f['name']}: {exc}")
+
+        # 7. ChinaXiv (Chinese Academy of Sciences preprints) through the global aggregator's OAI-PMH endpoint; metadata only,
+        #    mostly Chinese titles; the derived 10.12074 DOI never collides with Crossref/DataCite records (docs/sources/china.md)
+        if self._enabled("chinaxiv", only):
+            cfg = self._src("chinaxiv")
+            try:
+                for p in chinaxiv_src.fetch(
+                    self.http, since, until, source=str(cfg.get("source", "chinaxiv")), max_records=int(cfg.get("max_records", 5000)),
+                    life_science_only=bool(cfg.get("life_science_only", True)),
+                ):
+                    add(p, "chinaxiv")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"chinaxiv: {exc}")
+                log.exception("chinaxiv failed")
+
+        # 8. SciELO ArticleMeta (Latin America, Spain, Portugal, South Africa): no server-side search, so the window is swept by
+        #    processing date, journals are kept by subject area and the keyword filter runs locally (docs/sources/asia_latam.md)
+        if self._enabled("scielo", only):
+            cfg = self._src("scielo")
+            scielo_stats: Dict[str, int] = {}
+            try:
+                for p in scielo_src.fetch(
+                    self.http, since, until, collections=cfg.get("collections") or None,
+                    subject_areas=cfg.get("subject_areas", list(scielo_src.LIFE_SCIENCE_AREAS)), keywords=cfg.get("keywords") or [],
+                    max_articles=int(cfg.get("max_articles", 2000)), stats=scielo_stats,
+                ):
+                    add(p, "scielo")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"scielo: {exc}")
+                log.exception("scielo failed")
+            for k in ("identifiers", "skipped_subject", "fetched", "missing", "kept", "capped", "identifier_errors"):
+                if scielo_stats.get(k):
+                    self.counts[f"scielo.{k}"] = int(scielo_stats[k])
+            if scielo_stats.get("identifier_errors"):
+                self.errors.append(f"scielo: {scielo_stats['identifier_errors']} identifier page(s) failed; the window was only partly swept")
+
+        # 9. KCI (Korea Citation Index) OAI-PMH: a capped harvest by processing date, filtered locally by keyword, subject and
+        #    publication year, because the datestamp index is dominated by re-processed back catalogue (docs/sources/asia_latam.md)
+        if self._enabled("kci", only):
+            cfg = self._src("kci")
+            kci_stats: Dict[str, int] = {}
+            try:
+                for p in kci_src.fetch(
+                    self.http, since, until, keywords=cfg.get("keywords") or [], categories=cfg.get("categories") or [],
+                    min_pub_year=cfg.get("min_pub_year"), max_pages=int(cfg.get("max_pages", 10)), stats=kci_stats,
+                ):
+                    add(p, "kci")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"kci: {exc}")
+                log.exception("kci failed")
+            for k in ("records", "kept"):
+                if kci_stats.get(k):
+                    self.counts[f"kci.{k}"] = int(kci_stats[k])
+
+        # 10. J-STAGE WebAPI (Japan): term / journal-code / ISSN queries by publication year, kept when the article's J-STAGE
+        #     release date falls in the window. OPT-IN: the API terms forbid caching the data for 24 hours or more and require
+        #     a "Powered by J-STAGE" credit wherever it is shown (docs/sources/asia_latam.md), so unlike every other source it
+        #     runs only with an explicit `enabled: true` in radar.yaml or when --sources names it.
+        jstage_cfg = self._src("jstage")
+        if self._enabled("jstage", only) and (only is not None or jstage_cfg.get("enabled") is True):
+            jstage_stats: Dict[str, int] = {}
+            try:
+                for p in jstage_src.fetch(
+                    self.http, since, until, terms=jstage_cfg.get("terms") or [], field=str(jstage_cfg.get("field", "abst")),
+                    journals=jstage_cfg.get("journals") or [], issns=jstage_cfg.get("issns") or [],
+                    max_records=int(jstage_cfg.get("max_records_per_query", 5000)), stats=jstage_stats,
+                ):
+                    add(p, "jstage")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"jstage: {exc}")
+                log.exception("jstage failed")
+            for k in ("queries", "entries", "in_window", "papers", "errors", "truncated"):
+                if jstage_stats.get(k):
+                    self.counts[f"jstage.{k}"] = int(jstage_stats[k])
+            if jstage_stats.get("errors"):
+                self.errors.append(f"jstage: {jstage_stats['errors']} of {jstage_stats.get('queries', 0)} quer(y/ies) abandoned on an API error status")
 
         log.info("fetched %d unique papers", len(papers))
         self.counts["papers.unique"] = len(papers)
@@ -679,6 +772,37 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"cellxgene: {exc}")
                 log.exception("cellxgene failed")
+        # Chinese archives at CNCB-NGDC, which INSDC does not mirror. GSA search hits carry the platform FAMILY only
+        # ("BGISEQ (model n/a)" still resolves to MGI Tech in the gazetteer; "ILLUMINA (model n/a)" is labelled from the
+        # platform string); GSA-Human exposes the instrument MODEL per run. See docs/sources/china.md.
+        if self._enabled("gsa", only):
+            cfg = self._src("gsa")
+            try:
+                n += self._store_archive(
+                    gsa_src.fetch(
+                        self.http, since, until, center=str(cfg.get("center", "NGDC")),
+                        page_size=int(cfg.get("page_size", gsa_src.PAGE_SIZE)), max_records=int(cfg.get("max_records", 20000)),
+                        max_page_size=int(cfg.get("max_page_size", gsa_src.MAX_PAGE_SIZE)),
+                    ),
+                    "gsa",
+                )
+                if cfg.get("statistics_snapshot", False):
+                    # cumulative per-MODEL totals (~12 MB JSON); one snapshot per run turns them into a flow (litradar/gsa_snapshots.py)
+                    stats = gsa_src.fetch_statistics(self.http)
+                    if stats:
+                        self.counts["archive.gsa_snapshot_models"] = gsa_snapshots.save_snapshot(self.store.conn, stats, until)
+                    else:
+                        self.errors.append("gsa: statistics.json unavailable; no instrument-model snapshot stored this run")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"gsa: {exc}")
+                log.exception("gsa failed")
+        if self._enabled("gsa_human", only):
+            cfg = self._src("gsa_human")
+            try:
+                n += self._store_archive(gsa_human_src.fetch(self.http, since, until, max_studies=int(cfg.get("max_studies", 400))), "gsa_human")
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"gsa_human: {exc}")
+                log.exception("gsa_human failed")
         return n
 
     def fetch_news(self, since: str) -> int:

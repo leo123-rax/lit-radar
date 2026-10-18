@@ -7,9 +7,9 @@ Everything below that is not marked as quoted from documentation was established
 
 | Source | Region | Adapter | Endpoint | Search | Dates | Status |
 |---|---|---|---|---|---|---|
-| **J-STAGE WebAPI** (JST) | Japan, ~3,900 journals | `litradar/sources/jstage.py` | `https://api.jstage.jst.go.jp/searchapi/do?service=3` | server-side: abstract, full text, title, keywords, author, affiliation, journal, ISSN, journal code | publication **year** only; per-article release date in `updated` | works, no key; **restrictive terms** (see below) |
-| **SciELO ArticleMeta** | Brazil + 15 Latin American countries, Spain, Portugal, South Africa | `litradar/sources/scielo.py` | `https://articlemeta.scielo.org/api/v1/` | none server-side (sweep by processing date, filter locally) | processing date; real publication date inside the record | works, no key, no stated limits |
-| **KCI OAI-PMH** (NRF Korea) | Korea, KCI-listed journals | `litradar/sources/kci.py` | `https://open.kci.go.kr/oai/request` | none (OAI-PMH sweep, filter locally) | datestamp = KCI processing date | works, no key; windows are dominated by re-processed back catalogue, no total count exposed |
+| **J-STAGE WebAPI** (JST) | Japan, ~3,900 journals | `litradar/sources/jstage.py` | `https://api.jstage.jst.go.jp/searchapi/do?service=3` | server-side: abstract, full text, title, keywords, author, affiliation, journal, ISSN, journal code | publication **year** only; per-article release date in `updated` | built, **disabled by default** (`sources.jstage.enabled: false`, opt-in; see Wiring); works, no key; **restrictive terms** (see below) |
+| **SciELO ArticleMeta** | Brazil + 15 Latin American countries, Spain, Portugal, South Africa | `litradar/sources/scielo.py` | `https://articlemeta.scielo.org/api/v1/` | none server-side (sweep by processing date, filter locally) | processing date; real publication date inside the record | **wired** 2026-10-17 (`sources.scielo`, default on); works, no key, no stated limits |
+| **KCI OAI-PMH** (NRF Korea) | Korea, KCI-listed journals | `litradar/sources/kci.py` | `https://open.kci.go.kr/oai/request` | none (OAI-PMH sweep, filter locally) | datestamp = KCI processing date | **wired** 2026-10-17 (`sources.kci`, default on, keyword-filtered); works, no key; windows are dominated by re-processed back catalogue, no total count exposed |
 | KCI Open API (keyword search) | Korea | not implemented | `https://open.kci.go.kr/po/openapi/openApiSearch.kci?apiCode=articleSearch` | title / author / journal | | needs a key issued by KCI; schema unverifiable without one |
 | KoreaMed / KoreaMed Synapse | Korea (KAMJE journals) | not implemented | | | | no API, RSS or OAI found; the journals are in PubMed / Europe PMC / Crossref |
 
@@ -300,86 +300,68 @@ years 2004-2016; the default filters (`min_pub_year` 2025, keywords `genom` / `�
 
 ---
 
-## Wiring (not applied here; other adapters are built in parallel)
+## Wiring (applied 2026-10-17)
 
-1. `litradar/pipeline.py`, imports:
-   ```python
-   from .sources import jstage as jstage_src
-   from .sources import kci as kci_src
-   from .sources import scielo as scielo_src
-   ```
-   In `fetch_papers`, after step 6 (RSS):
-   ```python
-   # 7. J-STAGE (Japan): keyword / journal-code queries, filtered to the window by release date
-   if self._enabled("jstage", only):
-       cfg = self._src("jstage")
-       try:
-           for p in jstage_src.fetch(self.http, since, until, terms=cfg.get("terms") or [], field=cfg.get("field", "abst"),
-                                     journals=cfg.get("journals") or [], issns=cfg.get("issns") or [],
-                                     max_records=int(cfg.get("max_records_per_query", 5000))):
-               add(p, "jstage")
-       except Exception as exc:  # noqa: BLE001
-           self.errors.append(f"jstage: {exc}")
-           log.exception("jstage failed")
+The three adapters are registered in `Pipeline.fetch_papers` (steps 8–10, after the RSS feeds) with the same
+`add()` / `merge()` path as every other paper source, one `try` per source so a dead endpoint is reported as
+`scielo: …` / `kci: …` / `jstage: …` in the run's error list without stopping the run, and `HOST_SOURCES` maps
+`articlemeta.scielo.org`, `open.kci.go.kr` and `api.jstage.jst.go.jp` to those ids for the dead-host report.
+Each adapter's `stats` counters are copied into the run report (`scielo.identifiers`, `scielo.skipped_subject`,
+`scielo.fetched`, `scielo.missing`, `scielo.kept`, `scielo.capped`, `scielo.identifier_errors`; `kci.records`,
+`kci.kept`; `jstage.queries`, `jstage.entries`, `jstage.in_window`, `jstage.papers`, `jstage.errors`,
+`jstage.truncated`), and a SciELO identifier-page failure or a J-STAGE query abandoned on an API error status is
+also appended to the error list, so a partial sweep is visible in the digest.
 
-   # 8. SciELO (Latin America, Spain, Portugal, South Africa): sweep by processing date, filter locally
-   if self._enabled("scielo", only):
-       cfg = self._src("scielo")
-       try:
-           for p in scielo_src.fetch(self.http, since, until, collections=cfg.get("collections") or None,
-                                     subject_areas=cfg.get("subject_areas", list(scielo_src.LIFE_SCIENCE_AREAS)),
-                                     keywords=cfg.get("keywords") or [], max_articles=int(cfg.get("max_articles", 2000))):
-               add(p, "scielo")
-       except Exception as exc:  # noqa: BLE001
-           self.errors.append(f"scielo: {exc}")
-           log.exception("scielo failed")
+Re-checked live on the wiring day, one request each through the shared client (0 retries, 0 failures):
+J-STAGE `abst=genome`, 2025–2026: status `0`, 466 hits, 1.1 s. SciELO `/article/identifiers/` 2026-10-10..17, all
+collections: 131 identifiers (scl 126, esp 5), 1.1 s. KCI `ListRecords` 2026-10-10..17, page 1: 100 records, all
+published 2013–2016 (the back-catalogue re-stamping described above; `<language>` 한국어 on 100 of 100), 12.5 s.
 
-   # 9. KCI (Korea) OAI-PMH: capped harvest, filtered locally
-   if self._enabled("kci", only):
-       cfg = self._src("kci")
-       try:
-           for p in kci_src.fetch(self.http, since, until, keywords=cfg.get("keywords") or [], categories=cfg.get("categories") or [],
-                                  min_pub_year=cfg.get("min_pub_year"), max_pages=int(cfg.get("max_pages", 10))):
-               add(p, "kci")
-       except Exception as exc:  # noqa: BLE001
-           self.errors.append(f"kci: {exc}")
-           log.exception("kci failed")
-   ```
-2. `config/radar.yaml`, under `sources:`:
-   ```yaml
-   jstage:
-     enabled: false          # read https://www.jstage.jst.go.jp/static/pages/WebAPI/-char/ja first (24-hour caching clause)
-     field: abst             # abst | text | article | keyword | author | affil
-     terms: [genome, genomics, sequencing, single-cell, spatial transcriptomics, proteomics, CRISPR]
-     journals: []            # J-STAGE journal codes (cdjournal), e.g. [plantbiotechnology, jsbbs]
-     issns: []
-     max_records_per_query: 5000
-   scielo:
-     enabled: true
-     collections: []         # empty = all 36 collections; e.g. [scl, mex, arg, chl, col]
-     subject_areas: [Health Sciences, Biological Sciences, Agricultural Sciences]
-     keywords: []            # empty = keep every article in those areas
-     max_articles: 2000      # article fetches per run
-   kci:
-     enabled: true
-     keywords: []            # e.g. [genom, 유전체, sequencing]
-     categories: []          # KCI subject strings, e.g. [의학, 생물학, 약학]
-     min_pub_year: null      # default: window year - 1
-     max_pages: 10           # 100 records per page, ~1 s each; the window has no known size
-   ```
-3. `litradar/http.py` needs no change: each adapter registers its own pacing in `http.min_interval`
-   (`api.jstage.jst.go.jp` 1.0 s, `articlemeta.scielo.org` 0.25 s, `open.kci.go.kr` 1.0 s).
-4. `docs/SOURCES.md`: add three rows to "Papers and preprints" pointing here; `litradar/cli.py` `--sources` help
-   string: append `jstage,scielo,kci`.
-5. `litradar/digest/render.py` (required by the sources' terms, not optional): after the paper sections, append an
-   attribution footer built from the sources actually rendered:
-   * when any rendered paper has `source == "jstage"`: `Powered by J-STAGE` linking to <https://www.jstage.jst.go.jp/>
-     (J-STAGE terms Article 9: the credit with a link must appear wherever API data is displayed);
-   * when any rendered paper has `source == "kci"`: `Source: KCI (Korea Citation Index), National Research Foundation
-     of Korea` linking to <https://www.kci.go.kr/> (출처표시, source attribution, required by the OAI guide page);
-   * SciELO states no credit requirement; a `Source: SciELO` line is courteous.
-   `Paper.extra["lang"]` / `["country"]` (JP / KR / BR ...) are available for a language or country breakdown when
-   the renderer grows one.
+### Configuration (`config/radar.yaml`, `sources:`)
+
+```yaml
+scielo:
+  enabled: true
+  collections: []          # empty = every collection; e.g. [scl, mex, arg, chl, col]
+  subject_areas: [Health Sciences, Biological Sciences, Agricultural Sciences]   # [] = all
+  keywords: []             # accent-insensitive substrings over every title / abstract / keyword; empty = keep all
+  max_articles: 2000       # article fetches per run
+kci:
+  enabled: true
+  keywords: [genom, sequenc, 유전체, 시퀀싱, proteom, 단백체, single-cell, 단일세포, spatial transcriptom, 공간전사체, CRISPR, 크리스퍼]
+  categories: []           # KCI subject strings, e.g. [의학, 생물학, 약학]
+  min_pub_year: null       # default: window year - 1
+  max_pages: 10            # 100 records per page
+jstage:
+  enabled: false           # OPT-IN, see below
+  field: abst
+  terms: [genome, genomics, sequencing, single-cell, spatial transcriptomics, proteomics, CRISPR]
+  journals: []
+  issns: []
+  max_records_per_query: 5000
+```
+
+**J-STAGE is opt-in, unlike every other source.** `Pipeline._enabled()` treats a source whose key is missing from
+`radar.yaml` as enabled; for J-STAGE the pipeline additionally requires an explicit `enabled: true` (or
+`--sources jstage` on the command line) because the API terms forbid storing or caching the data in machine-readable
+form for 24 hours or more and require a "Powered by J-STAGE" credit wherever it is displayed, which the digest does
+not render yet. The live check passed; the default is a terms decision, not a technical one.
+
+`litradar/http.py` needed no change: each adapter registers its own pacing in `http.min_interval`
+(`api.jstage.jst.go.jp` 1.0 s, `articlemeta.scielo.org` 0.25 s, `open.kci.go.kr` 1.0 s).
+
+### Still open after the wiring
+
+* `litradar/digest/render.py` (required by the sources' terms before J-STAGE is enabled, and owed to KCI already):
+  after the paper sections, append an attribution footer built from the sources actually rendered:
+  * when any rendered paper has `source == "jstage"`: `Powered by J-STAGE` linking to <https://www.jstage.jst.go.jp/>
+    (J-STAGE terms Article 9: the credit with a link must appear wherever API data is displayed);
+  * when any rendered paper has `source == "kci"`: `Source: KCI (Korea Citation Index), National Research Foundation
+    of Korea` linking to <https://www.kci.go.kr/> (출처표시, source attribution, required by the OAI guide page);
+  * SciELO states no credit requirement; a `Source: SciELO` line is courteous.
+  `Paper.extra["lang"]` / `["country"]` (JP / KR / BR ...) are available for a language or country breakdown when
+  the renderer grows one.
+* `litradar/cli.py`: the `--sources` help string does not list `scielo,kci,jstage` yet (the ids work; only the help lags).
 
 ## Tests
 

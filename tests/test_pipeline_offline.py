@@ -461,7 +461,8 @@ def test_tracked_lists_are_built_from_subgroup_config(tmp_path):
 
 # ---- source failures reach the run's error list --------------------------------------------------
 def test_openalex_query_failures_are_reported(tmp_path, monkeypatch, caplog):
-    settings = _settings(tmp_path, sources={"openalex": {"enabled": True, "topics": True, "company_authors": True, "tracked_authors": False, "journals": False}})
+    # country_slices off: this test pins the error list of the original query groups (the CN slice has its own test below)
+    settings = _settings(tmp_path, sources={"openalex": {"enabled": True, "topics": True, "company_authors": True, "tracked_authors": False, "journals": False, "country_slices": []}})
     pipe = Pipeline(settings, http=FakeHttp())
     pipe.subgroups = [{"id": "g1", "openalex_topics": ["T1"], "keywords": ["x"]}, {"id": "g2", "openalex_topics": ["T2"], "keywords": []}]
     err = "HTTP 400: Invalid query parameters error: grants is not a valid select field"
@@ -668,3 +669,210 @@ def test_run_merges_fts_segments_only_after_many_rewrites(tmp_path, monkeypatch)
     assert rep2["counts"]["fts.rows_unchanged"] == 4 and rep2["counts"]["fts.rows_rewritten"] == 0 and "fts.optimized" not in rep2["counts"]
     assert rep2["counts"]["papers.reingested"] == 4
     pipe2.store.close()
+
+
+# ---- global-corpus wiring: GSA, GSA-Human, ChinaXiv, SciELO, KCI, J-STAGE and the OpenAlex country slices ------------
+GLOBAL_PAPER_SOURCES = ("chinaxiv", "scielo", "kci", "jstage")
+
+
+def _global_paper(src, i, **kw):
+    base = dict(
+        id=f"{src}:{i}", source=src, kind="article", title=f"{src} paper {i} on single-cell sequencing", doi=None,
+        abstract="Libraries were sequenced on a DNBSEQ-T7.", journal=src.upper(), pub_date="2026-10-12",
+        url=f"https://example.org/{src}/{i}", authors=[Author(name="Author One")],
+    )
+    base.update(kw)
+    return Paper(**base)
+
+
+def _raise(message):
+    return lambda *a, **k: (_ for _ in ()).throw(RuntimeError(message))
+
+
+def test_run_reaches_global_corpus_sources_with_configured_caps(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, sources={
+        "gsa": {"max_records": 123, "page_size": 50, "max_page_size": 900, "center": "NGDC"},
+        "gsa_human": {"max_studies": 7},
+        "chinaxiv": {"max_records": 50, "life_science_only": False},
+        "scielo": {"collections": ["scl"], "subject_areas": ["Health Sciences"], "keywords": ["genom"], "max_articles": 9},
+        "kci": {"keywords": ["genom"], "categories": ["의학"], "min_pub_year": 2020, "max_pages": 2},
+        "jstage": {"enabled": True, "terms": ["genome"], "field": "text", "issns": ["1234-5678"], "max_records_per_query": 77},
+    })
+    pipe = Pipeline(settings, http=FakeHttp())
+    calls = {}
+
+    def gsa_fetch(http, start, end, center="NGDC", page_size=200, max_records=20000, max_page_size=1500):
+        calls["gsa"] = (start, end, center, page_size, max_records, max_page_size)
+        yield ArchiveRecord("gsa", "CRX1", "CRA1", "BGISEQ (model n/a)", "BGISEQ", "Genome", "2026-10-12", "", "WGS of a rice line", "")
+        yield ArchiveRecord("gsa", "CRX2", "CRA1", "ILLUMINA (model n/a)", "ILLUMINA", "RNASeq", "2026-10-12", "", "RNA-seq", "")
+
+    def gsa_human_fetch(http, start, end, max_studies=400):
+        calls["gsa_human"] = (start, end, max_studies)
+        yield ArchiveRecord("gsa-human", "HRX1", "HRA1", "DNBSEQ-T7", "BGISEQ", "WGS", "2026-10-13", "Example Hospital", "WGS cohort", "Homo sapiens")
+
+    def chinaxiv_fetch(http, start, end, source="chinaxiv", max_records=5000, life_science_only=False):
+        calls["chinaxiv"] = (start, end, source, max_records, life_science_only)
+        yield _global_paper("chinaxiv", 1, kind="preprint", journal="ChinaXiv")
+
+    def scielo_fetch(http, since, until, collections=None, subject_areas=None, keywords=(), max_articles=2000, fmt="opac", stats=None):
+        calls["scielo"] = (since, until, collections, list(subject_areas or []), list(keywords), max_articles)
+        if stats is not None:
+            stats.update({"identifiers": 40, "fetched": 9, "kept": 1, "capped": 31, "identifier_errors": 0})
+        yield _global_paper("scielo", 1)
+
+    def kci_fetch(http, since, until, keywords=(), categories=(), min_pub_year=None, metadata_prefix="oai_kci", max_pages=10, stats=None):
+        calls["kci"] = (since, until, list(keywords), list(categories), min_pub_year, max_pages)
+        if stats is not None:
+            stats.update({"records": 200, "kept": 1})
+        yield _global_paper("kci", 1)
+
+    def jstage_fetch(http, start, end, terms=(), field="abst", journals=(), issns=(), max_records=5000, year_slack=1, stats=None):
+        calls["jstage"] = (start, end, list(terms), field, list(journals), list(issns), max_records)
+        if stats is not None:
+            stats.update({"queries": 2, "entries": 30, "in_window": 1, "papers": 1, "errors": 0, "truncated": 0})
+        yield _global_paper("jstage", 1)
+
+    monkeypatch.setattr(pl.gsa_src, "fetch", gsa_fetch)
+    monkeypatch.setattr(pl.gsa_human_src, "fetch", gsa_human_fetch)
+    monkeypatch.setattr(pl.chinaxiv_src, "fetch", chinaxiv_fetch)
+    monkeypatch.setattr(pl.scielo_src, "fetch", scielo_fetch)
+    monkeypatch.setattr(pl.kci_src, "fetch", kci_fetch)
+    monkeypatch.setattr(pl.jstage_src, "fetch", jstage_fetch)
+    rep = _run(pipe, monkeypatch, [_preprint(fulltext_url="")], attach=_no_attach,
+               only=("biorxiv", "gsa", "gsa_human") + GLOBAL_PAPER_SOURCES)
+    c = rep["counts"]
+    assert rep["errors"] == []
+    # radar.yaml caps and filters reach the adapters unchanged
+    assert calls["gsa"] == (*WINDOW, "NGDC", 50, 123, 900)
+    assert calls["gsa_human"] == (*WINDOW, 7)
+    assert calls["chinaxiv"] == (*WINDOW, "chinaxiv", 50, False)
+    assert calls["scielo"] == (*WINDOW, ["scl"], ["Health Sciences"], ["genom"], 9)
+    assert calls["kci"] == (*WINDOW, ["genom"], ["의학"], 2020, 2)
+    assert calls["jstage"] == (*WINDOW, ["genome"], "text", [], ["1234-5678"], 77)
+    assert c["archive.gsa_new"] == 2 and c["archive.gsa_human_new"] == 1
+    assert all(c[f"fetched.{src}"] == 1 for src in GLOBAL_PAPER_SOURCES)
+    assert c["papers.unique"] == 5 and c["papers.new"] == 5
+    assert c["scielo.fetched"] == 9 and c["scielo.kept"] == 1 and c["scielo.capped"] == 31 and "scielo.identifier_errors" not in c
+    assert c["kci.records"] == 200 and c["kci.kept"] == 1
+    assert c["jstage.queries"] == 2 and c["jstage.papers"] == 1
+    for src in GLOBAL_PAPER_SOURCES:
+        assert pipe.store.get_paper(f"{src}:1")["source"] == src
+    # the Chinese archives reach the census through the instrument gazetteer: the GSA family label and the GSA-Human model both
+    # resolve to MGI Tech; an Illumina family label without a model is labelled from the platform string instead of being dropped
+    rows = {r["instrument_model"]: r for r in pipe.store.archive_instrument_counts(*WINDOW, archives=("gsa", "gsa-human"))}
+    assert rows["BGISEQ (model n/a)"]["vendor"] == "MGI Tech" and rows["BGISEQ (model n/a)"]["ticker"] == "688114.SS"
+    assert rows["BGISEQ (model n/a)"]["archive"] == "gsa" and rows["BGISEQ (model n/a)"]["vendor_mapped"] is True
+    assert rows["DNBSEQ-T7"]["vendor"] == "MGI Tech" and rows["DNBSEQ-T7"]["archive"] == "gsa-human"
+    assert rows["ILLUMINA (model n/a)"]["vendor_mapped"] is False and rows["ILLUMINA (model n/a)"]["vendor"].startswith("Illumina")
+    md = render.render(pipe.store, *WINDOW, settings.radar, run_report=rep, company_types=pipe.company_types)["markdown"]
+    assert "New archive records: GSA 2, GSA" in md and "HUMAN 1" in md
+    pipe.store.close()
+
+
+def test_global_corpus_toggles_are_respected_and_jstage_is_opt_in(tmp_path, monkeypatch):
+    everything_else = ("sra", "ena", "geo", "pride", "cellxgene", "nih_reporter", "clinicaltrials", "openfda", "europepmc", "openalex",
+                       "crossref", "arxiv", "rss", "semantic_scholar")
+    settings = _settings(tmp_path, sources={name: {"enabled": False} for name in everything_else + ("gsa", "gsa_human", "chinaxiv", "scielo", "kci")})
+    wired = ((pl.gsa_src, "gsa"), (pl.gsa_human_src, "gsa_human"), (pl.chinaxiv_src, "chinaxiv"), (pl.scielo_src, "scielo"), (pl.kci_src, "kci"), (pl.jstage_src, "jstage"))
+    for mod, name in wired:
+        monkeypatch.setattr(mod, "fetch", _raise(f"{name} must not run"))
+    monkeypatch.setattr(pl.biorxiv_src, "fetch", lambda *a, **k: iter([_preprint(fulltext_url="")]))
+    from litradar.incremental import error_sources
+    wired_ids = {"gsa", "gsa_human", "chinaxiv", "scielo", "kci", "jstage"}
+    # `enabled: false` is honoured for each new source, and J-STAGE stays off when radar.yaml has no `jstage:` key at all
+    pipe = Pipeline(settings, http=FakeHttp())
+    rep = pipe.run(*WINDOW, only=None, fulltext=False)
+    assert not (set(error_sources(rep["errors"])) & wired_ids) and rep["counts"]["papers.unique"] == 1  # (the SEC skip notice is unrelated)
+    pipe.store.close()
+    # the other five default to on when their key is absent; J-STAGE needs an explicit `enabled: true`
+    hit = []
+    for mod, name in wired:
+        monkeypatch.setattr(mod, "fetch", (lambda n: lambda *a, **k: hit.append(n) or iter(()))(name))
+    for name in ("gsa", "gsa_human", "chinaxiv", "scielo", "kci"):
+        del settings.radar["sources"][name]
+    settings.radar["sources"]["jstage"] = {"enabled": True}
+    pipe2 = Pipeline(settings, http=FakeHttp())
+    rep2 = pipe2.run(*WINDOW, only=None, fulltext=False)
+    assert not (set(error_sources(rep2["errors"])) & wired_ids) and sorted(hit) == ["chinaxiv", "gsa", "gsa_human", "jstage", "kci", "scielo"]
+    pipe2.store.close()
+    # --sources reaches the archive stage for the Chinese archives on its own, and naming J-STAGE there is the one-off opt-in
+    hit.clear()
+    del settings.radar["sources"]["jstage"]
+    pipe3 = Pipeline(settings, http=FakeHttp())
+    pipe3.run(*WINDOW, only=["gsa"], fulltext=False)
+    assert hit == ["gsa"]
+    pipe3.store.close()
+    hit.clear()
+    pipe4 = Pipeline(settings, http=FakeHttp())
+    pipe4.run(*WINDOW, only=["jstage", "gsa_human"], fulltext=False)
+    assert sorted(hit) == ["gsa_human", "jstage"]
+    pipe4.store.close()
+
+
+def test_global_corpus_source_failures_are_isolated(tmp_path, monkeypatch):
+    pipe = Pipeline(_settings(tmp_path), http=FakeHttp())
+    monkeypatch.setattr(pl.gsa_src, "fetch", _raise("GSA: unexpected search page for 2026-10-12 page 1 (JavaScript challenge page)"))
+    monkeypatch.setattr(pl.gsa_human_src, "fetch", lambda *a, **k: iter([ArchiveRecord("gsa-human", "HRX9", "HRA9", "Illumina NovaSeq 6000", "ILLUMINA", "WGS", "2026-10-12", "", "", "Homo sapiens")]))
+    monkeypatch.setattr(pl.scielo_src, "fetch", _raise("identifier page failed"))
+    monkeypatch.setattr(pl.kci_src, "fetch", lambda *a, **k: iter([_global_paper("kci", 2)]))
+    monkeypatch.setattr(pl.chinaxiv_src, "fetch", lambda *a, **k: iter([_global_paper("chinaxiv", 2, kind="preprint")]))
+    rep = _run(pipe, monkeypatch, [_preprint(fulltext_url="")], attach=_no_attach, only=("biorxiv", "gsa", "gsa_human", "chinaxiv", "scielo", "kci"))
+    assert any(e.startswith("gsa: GSA: unexpected search page") for e in rep["errors"])
+    assert any(e.startswith("scielo: identifier page failed") for e in rep["errors"])
+    assert rep["counts"]["archive.gsa_human_new"] == 1 and "archive.gsa_new" not in rep["counts"]
+    assert rep["counts"]["fetched.kci"] == 1 and rep["counts"]["fetched.chinaxiv"] == 1 and rep["counts"]["papers.unique"] == 3
+    from litradar.incremental import error_sources
+    assert error_sources(rep["errors"]) == ["scielo", "gsa"]  # papers stage first, then archives; ids usable as `--sources`
+    pipe.store.close()
+
+
+def test_openalex_country_slices_repeat_each_topic_query_per_country(tmp_path, monkeypatch):
+    oa_cfg = {"enabled": True, "topics": True, "company_authors": False, "tracked_authors": False, "journals": False}
+    settings = _settings(tmp_path, sources={"openalex": dict(oa_cfg)})
+    pipe = Pipeline(settings, http=FakeHttp())
+    pipe.subgroups = [{"id": "g1", "openalex_topics": ["T1", "T2"], "keywords": ["x", "y"]}, {"id": "g2", "openalex_topics": [], "keywords": ["z"]}]
+    seen = []
+
+    def works(http, filters, mailto="", api_key="", max_records=10000, select=None, extra_params=None, state=None):
+        seen.append(dict(filters))
+        if state is not None:
+            state["complete"] = True
+        if filters.get("authorships.institutions.country_code") == "CN":
+            yield {
+                "id": "https://openalex.org/W1", "title": "A single-cell atlas", "publication_date": "2026-10-12", "type": "article",
+                "authorships": [{"author": {"display_name": "A B", "id": "https://openalex.org/A1"},
+                                 "institutions": [{"display_name": "Example University", "type": "education", "country_code": "CN"}],
+                                 "raw_affiliation_strings": ["Example University, Beijing"]}],
+            }
+
+    monkeypatch.setattr(pl.openalex_src, "works", works)
+    papers = pipe.fetch_papers(*WINDOW, only=["openalex"])
+    assert pipe.errors == []
+    assert len(seen) == 2  # the global topic query and its CN slice; the subgroup without topics issues nothing
+    glob, cn = seen
+    assert "authorships.institutions.country_code" not in glob
+    assert cn["authorships.institutions.country_code"] == "CN" and cn["primary_topic.id"] == glob["primary_topic.id"] == "T1|T2"
+    assert cn["title_and_abstract.search"] == glob["title_and_abstract.search"] == "x|y"
+    assert cn["from_publication_date"] == WINDOW[0] and cn["to_publication_date"] == WINDOW[1]
+    assert pipe.counts["fetched.openalex.topics_cn"] == 1 and list(papers) == ["openalex:W1"]
+    pipe.store.close()
+    # [] switches the slices off; several codes are each queried once per subgroup, upper-cased
+    for slices, expected in (([], 1), (["cn", "JP"], 3)):
+        seen.clear()
+        settings.radar["sources"]["openalex"] = dict(oa_cfg, country_slices=slices)
+        pipe2 = Pipeline(settings, http=FakeHttp())
+        pipe2.subgroups = pipe.subgroups
+        pipe2.fetch_papers(*WINDOW, only=["openalex"])
+        assert len(seen) == expected
+        assert [f.get("authorships.institutions.country_code") for f in seen] == [None] + [s.upper() for s in slices]
+        pipe2.store.close()
+
+
+def test_shipped_radar_yaml_wires_the_global_corpus_sources():
+    sources = Settings.from_env().radar["sources"]
+    for name in ("gsa", "gsa_human", "chinaxiv", "scielo", "kci"):
+        assert sources[name]["enabled"] is True, name
+    assert sources["jstage"]["enabled"] is False  # terms: 24-hour caching clause and credit requirement; opt-in only
+    assert sources["openalex"]["country_slices"] == ["CN"]
+    assert sources["gsa"]["center"] == "NGDC" and sources["gsa"]["statistics_snapshot"] is False
+    assert sources["chinaxiv"]["life_science_only"] is True and sources["kci"]["keywords"]

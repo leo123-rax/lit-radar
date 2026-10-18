@@ -61,6 +61,10 @@ sources:
     company_authors: true   # new works with a company-affiliated author in those topics
     tracked_authors: true   # new works by the authors listed in config/subgroups.yaml
     journals: true          # ISSN coverage as a Crossref/Europe PMC backstop
+    # every per-subgroup topic query is repeated once per ISO country code here, intersected with
+    # authorships.institutions.country_code, so work affiliated with these countries is pulled whole even when the
+    # global topic query stops at max_records_per_query (live 2026-10-17, single_cell, 30 days: 509 global / 112 CN). [] = off
+    country_slices: [CN]
     max_records_per_query: 2000
 
   crossref:
@@ -86,6 +90,40 @@ sources:
   rss:
     enabled: true           # journal TOCs that lack ISSN coverage, trade press, press wires (config/feeds.yaml)
 
+  # ---- regional literature, metadata only (docs/sources/china.md, docs/sources/asia_latam.md) ----
+  chinaxiv:
+    enabled: true           # ChinaXiv (CAS preprints) via the global aggregator's OAI-PMH. Live check 2026-10-17: 51 records in 7 days, 1 request
+    source: chinaxiv        # aggregator source id; the endpoint also mirrors biorxiv / medrxiv / arxiv, which are pulled directly
+    life_science_only: true # keep records whose ChinaXiv subject is a life-science discipline (~1 in 10 postings); false = every discipline
+    max_records: 5000
+
+  scielo:
+    enabled: true           # SciELO ArticleMeta (Latin America, Spain, Portugal, South Africa). Live check 2026-10-17: 131 identifiers in 7 days
+    collections: []         # empty = every collection; e.g. [scl, mex, arg, chl, col]
+    subject_areas: [Health Sciences, Biological Sciences, Agricultural Sciences]   # journal subject areas kept; [] = all
+    keywords: []            # case- and accent-insensitive substrings over every title / abstract / keyword; empty = keep every article
+    max_articles: 2000      # article fetches per run (one request each, after one per identifier page and one per journal)
+
+  kci:
+    enabled: true           # KCI (Korea Citation Index) OAI-PMH. Live check 2026-10-17: page 1 = 100 records, all 2013-2016 re-processed
+                            # back catalogue (the datestamp is KCI's processing date), so the filters below do the real work
+    keywords: [genom, sequenc, 유전체, 시퀀싱, proteom, 단백체, single-cell, 단일세포, spatial transcriptom, 공간전사체, CRISPR, 크리스퍼]
+    categories: []          # KCI subject strings, e.g. [의학, 생물학, 약학]; empty = all
+    min_pub_year: null      # default: window year - 1
+    max_pages: 10           # 100 records per page, about one request per second
+
+  jstage:
+    enabled: false          # J-STAGE WebAPI (Japan). Live check 2026-10-17 PASSED (status 0, 466 hits for abst=genome, 2025-2026), but the
+                            # API terms forbid storing or caching the data in machine-readable form for 24 hours or more (Article 3(5))
+                            # and require a "Powered by J-STAGE" credit wherever it is displayed (Article 9), which the digest does not
+                            # render yet. Opt-in only: an explicit `enabled: true` after reading
+                            # https://www.jstage.jst.go.jp/static/pages/WebAPI/-char/ja, or `--sources jstage` for a one-off pull.
+    field: abst             # abst | text | article | keyword | author | affil
+    terms: [genome, genomics, sequencing, single-cell, spatial transcriptomics, proteomics, CRISPR]
+    journals: []            # J-STAGE journal codes (cdjournal), e.g. [plantbiotechnology, jsbbs]
+    issns: []
+    max_records_per_query: 5000
+
   # ---- additional archives (study-level censuses; every record passes through the instrument gazetteer) ----
   geo:
     enabled: true           # NCBI GEO: newly released Series (GSE) and the platform (GPL) each ran on
@@ -101,6 +139,21 @@ sources:
     include_revisions: false    # also count datasets whose latest revision landed in the window
     max_records: 0              # 0 = all assay rows in the window
     max_collection_details: 50  # fallback route only: cap on per-collection detail requests
+
+  gsa:
+    enabled: true           # GSA (CNCB-NGDC Genome Sequence Archive): native Chinese experiments by release day; NOT mirrored into SRA/ENA.
+                            # Live check 2026-10-17: 33,480 experiments in 30 days (ILLUMINA 21,891 / BGISEQ 11,014 / PACBIO_SMRT 451 /
+                            # OXFORD_NANOPORE 86 / CAPILLARY 18 / GENEMIND 11 / CapitalBio 8 / ION_TORRENT 1), one request, 10 s
+    center: NGDC            # NGDC = native GSA records; INSDC = the mirrored SRA/ENA/DDBJ copies (already counted by sra / ena)
+    page_size: 200          # per-day probe; a day with at most this many releases costs one request
+    max_page_size: 1500     # largest single page (~6.5 MB); bigger days are split by facet, never paged (the server's page order is unstable)
+    max_records: 20000      # per run; a week is roughly 7,000-8,000 native experiments
+    statistics_snapshot: false  # also store the cumulative per-MODEL totals from statistics.json (~12 MB, ~60 s) as a gsa_snapshots row
+
+  gsa_human:
+    enabled: true           # GSA-Human (controlled-access human data; metadata open): instrument MODEL per experiment, one JSON request per study.
+                            # Live check 2026-10-17: 246 studies released in 30 days; HRA021718 = 96 runs on DNBSEQ-T7 / NovaSeq 6000 / NovaSeq X Plus
+    max_studies: 400        # per run
 
   # ---- signals (grants, trials, device decisions) rendered in their own digest section ----
   nih_reporter:
