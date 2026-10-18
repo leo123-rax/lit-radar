@@ -20,11 +20,11 @@ do; Science mostly does not).
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, Iterator, List, Optional
 
 from ..http import Http
 from ..models import Author, Paper, normalize_doi
+from . import clean_text
 
 log = logging.getLogger(__name__)
 BASE = "https://api.crossref.org"
@@ -116,14 +116,12 @@ def to_paper(it: Dict[str, Any], journal_name: str = "") -> Paper:
         affs.extend(aff)
         if name:
             authors.append(Author(name=name, affiliation="; ".join(aff), orcid=(a.get("ORCID") or "").rsplit("/", 1)[-1]))
-    abstract = it.get("abstract") or ""
-    # Crossref abstracts are JATS-flavoured XML
-    if "<" in abstract:
-        abstract = re.sub(r"<[^>]+>", " ", abstract)
-        abstract = re.sub(r"\s+", " ", abstract).strip()
-    title = " ".join(it.get("title") or []).strip()
-    container = " ".join(it.get("container-title") or []) or journal_name
-    funders = [f.get("name") for f in (it.get("funder") or []) if f.get("name")]
+    # Crossref abstracts are JATS-flavoured XML; titles carry <i>/<sub>/<sup> and multi-line whitespace too
+    abstract = clean_text(it.get("abstract") or "")
+    title = clean_text(" ".join(it.get("title") or []))
+    container = clean_text(" ".join(it.get("container-title") or [])) or journal_name
+    # one record can list the same funder once per award: keep each name once, in order
+    funders = list(dict.fromkeys(f.get("name") for f in (it.get("funder") or []) if f.get("name")))
     issns = [x for x in (it.get("ISSN") or []) if x]
     p = Paper(
         id=Paper.make_id("crossref", doi or title, doi),

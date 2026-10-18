@@ -32,6 +32,15 @@ full text to store. `is_open_access(paper)` returns True/False/None. `attach_ful
 non-OA PMCIDs, and the default retry policy used to spend 1+2+4+8+16 = 31 s of sleep per such id.
 `fulltext_xml` / `attach_fulltext` take `retries=1` by default for the same reason (`Http.get(retries=...)`).
 
+## Abstract fallback from the full text
+
+Around 15% of Europe PMC search records (Science family titles among them) carry no `abstractText`, and
+those papers used to reach the digest as a title plus entity lists. When `attach_fulltext` has downloaded
+the JATS document anyway, it now fills an empty `Paper.abstract` from the document's `<abstract>` element
+(`litradar.sources.jats_abstract`; graphical/teaser abstracts are skipped) at no extra request. An abstract
+the search record already had is never overwritten. Titles and abstracts from the search API are run
+through `litradar.sources.clean_text` (JATS/HTML tags stripped, entities decoded, whitespace collapsed).
+
 ## Known limitations
 
 * `isOpenAccess` is `N` for preprint records even when the server licence is CC; preprint full text is

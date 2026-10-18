@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 from ..extract.jats import parse_jats
 from ..http import Http
 from ..models import Author, Paper, normalize_doi
+from . import clean_text, jats_abstract
 
 log = logging.getLogger(__name__)
 BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
@@ -120,9 +121,9 @@ def to_paper(rec: Dict[str, Any]) -> Paper:
         id=Paper.make_id("europepmc", native, doi),
         source="europepmc",
         kind="preprint" if is_preprint else "article",
-        title=(rec.get("title") or "").strip().rstrip("."),
+        title=clean_text(rec.get("title") or "").rstrip("."),
         doi=doi,
-        abstract=(rec.get("abstractText") or "").strip(),
+        abstract=clean_text(rec.get("abstractText") or ""),
         journal=journal if not is_preprint else (preprint_server(rec) or "preprint"),
         pub_date=rec.get("firstPublicationDate") or "",
         url=url,
@@ -164,6 +165,10 @@ def attach_fulltext(http: Http, paper: Paper, retries: int = 1) -> bool:
     for key in ("methods", "funding", "coi", "ack", "data_availability", "body"):
         if parsed.get(key):
             paper.sections[key] = parsed[key]
+    if not paper.abstract:
+        # the search record had no abstractText (true for ~15% of the corpus, e.g. Science family titles) but the
+        # full text just downloaded carries <abstract>: fill it here so the digest can summarise the paper
+        paper.abstract = jats_abstract(xml)
     if parsed.get("affiliations"):
         paper.affiliations = list(dict.fromkeys(paper.affiliations + parsed["affiliations"]))
     if parsed.get("emails"):

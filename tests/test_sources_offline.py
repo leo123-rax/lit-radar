@@ -223,6 +223,170 @@ def test_sra_fetch_raises_on_esearch_failures_instead_of_an_empty_census():
     assert sra.count(_StatusHttp([_Resp(400, None, text="bad")]), "x[PDAT]") == 0
 
 
+# ---- arXiv: a blocked or dead host is reported, never silently partial --------------------------------------
+ARXIV_PAGE = (
+    '<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">'
+    '<entry><id>http://arxiv.org/abs/2610.00001v1</id><title>A  preprint\n title</title><summary>S</summary>'
+    "<published>2026-10-12T00:00:00Z</published><author><name>A B</name></author>"
+    '<arxiv:primary_category term="q-bio.GN"/></entry></feed>'
+)
+
+
+class _BlockingHttp(FakeHttp):
+    """get_text answers from the queue; `block_after` responses later the host is marked blocked, as Http does on 429s."""
+
+    def __init__(self, payloads, block_after=None):
+        super().__init__(payloads)
+        self.blocked_hosts = set()
+        self.block_after = block_after
+
+    def get_text(self, url, params=None, cache=False):
+        if self.block_after is not None and len(self.calls) >= self.block_after:
+            self.blocked_hosts.add("export.arxiv.org")
+            self.calls.append((url, params))
+            return None
+        return super().get_text(url, params, cache)
+
+
+def test_arxiv_stops_and_reports_when_the_host_is_blocked_or_silent():
+    import pytest
+
+    from litradar.sources import arxiv
+
+    # a complete single page: one paper, no error
+    papers = list(arxiv.fetch(_BlockingHttp([ARXIV_PAGE]), "2026-10-10", "2026-10-17", ["q-bio.GN"]))
+    assert len(papers) == 1 and papers[0].title == "A preprint title" and papers[0].extra["arxiv_id"] == "2610.00001v1"
+    # first page dead (retries exhausted, host not blocked): raised with the reason, nothing yielded
+    with pytest.raises(arxiv.ArxivUnavailable, match="gave no usable answer on the first page"):
+        list(arxiv.fetch(_BlockingHttp([None]), "2026-10-10", "2026-10-17", ["q-bio.GN"]))
+    # host blocked after two 429s mid-way: the pages already yielded stay with the caller, the error names the block
+    full_page = ARXIV_PAGE.replace("<entry>", "<entry>" * 1).replace("</entry>", "</entry>")
+    many = full_page.replace('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">',
+                             '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">' + "".join(
+                                 f'<entry><id>http://arxiv.org/abs/2610.{i:05d}v1</id><title>T{i}</title><summary>S</summary>'
+                                 f'<published>2026-10-12T00:00:00Z</published><arxiv:primary_category term="q-bio.GN"/></entry>'
+                                 for i in range(199)))
+    http = _BlockingHttp([many], block_after=1)
+    got = []
+    with pytest.raises(arxiv.ArxivUnavailable) as info:
+        for p in arxiv.fetch(http, "2026-10-10", "2026-10-17", ["q-bio.GN"], max_records=1000):
+            got.append(p)
+    assert len(got) == 200 and len(http.calls) == 2  # no third request on a blocked host
+    assert "export.arxiv.org rate-limited (HTTP 429/503 twice in a row) and skipped for the rest of the run after 1 page(s), 200 record(s)" in str(info.value)
+    # a non-Atom body (an HTML error page) is reported the same way
+    with pytest.raises(arxiv.ArxivUnavailable, match="not Atom XML"):
+        list(arxiv.fetch(_BlockingHttp(["<html>503 Service Unavailable"]), "2026-10-10", "2026-10-17", ["q-bio.GN"]))
+
+
+# ---- RSS: parse errors name the feed, once per URL; tracking suffixes are stripped ---------------------------
+def test_rss_parse_errors_name_the_feed_once_and_links_lose_tracking_params(caplog):
+    import logging
+
+    rss._BAD_FEEDS.clear()
+    html_body = "<!doctype html>\n<html><head><title>Just a moment...</title></head><body>challenge</body></html>"
+    with caplog.at_level(logging.DEBUG, logger="litradar.sources.rss"):
+        assert rss.parse_feed(html_body, feed_name="Example Journal ToC", url="https://feeds.example.org/toc.xml") == []
+        assert rss.parse_feed(html_body, feed_name="Example Journal ToC", url="https://feeds.example.org/toc.xml") == []
+        assert rss.parse_feed("not xml at all", feed_name="Other feed") == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2  # one per feed, the repeat went to DEBUG
+    assert warnings[0].getMessage().startswith("feed parse error in Example Journal ToC (https://feeds.example.org/toc.xml): ")
+    assert "body starts '<!doctype html> <html><head><title>Just a moment...</title>" in warnings[0].getMessage()
+    assert warnings[1].getMessage().startswith("feed parse error in Other feed: ")
+    assert rss.bad_feeds() == [
+        {"url": "https://feeds.example.org/toc.xml", "name": "Example Journal ToC", "error": warnings[0].getMessage().split(": ", 1)[1].split("; body")[0]},
+        {"url": "Other feed", "name": "Other feed", "error": warnings[1].getMessage().split(": ", 1)[1].split("; body")[0]},
+    ]
+    rss._BAD_FEEDS.clear()
+    # links: feed-reader tracking suffixes go, everything else stays byte for byte
+    assert rss.clean_link("https://ascopubs.org/doi/abs/10.1200/JCO-26-00565?af=R") == "https://ascopubs.org/doi/abs/10.1200/JCO-26-00565"
+    assert rss.clean_link("https://www.nature.com/articles/s41586-026-1?utm_source=feed&utm_medium=rss&dgcid=rss_sd_all") == "https://www.nature.com/articles/s41586-026-1"
+    assert rss.clean_link("https://example.org/a?id=7&utm_campaign=x&page=2") == "https://example.org/a?id=7&page=2"
+    assert rss.clean_link("https://example.org/a?id=7") == "https://example.org/a?id=7" and rss.clean_link("") == ""
+    rss2 = ('<rss version="2.0"><channel><item><title>T</title><link>https://ascopubs.org/doi/10.1200/X?af=R</link>'
+            "<pubDate>Mon, 12 Oct 2026 00:00:00 GMT</pubDate></item></channel></rss>")
+    assert rss.parse_feed(rss2)[0]["link"] == "https://ascopubs.org/doi/10.1200/X"
+    atom = ('<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>T</title>'
+            '<link rel="alternate" href="https://example.org/p?utm_source=rss"/><updated>2026-10-12T00:00:00Z</updated></entry></feed>')
+    assert rss.parse_feed(atom)[0]["link"] == "https://example.org/p"
+
+
+# ---- metadata hygiene shared by the adapters -------------------------------------------------------------
+def test_clean_text_and_crossref_titles_and_funders():
+    from litradar.sources import clean_text
+
+    assert clean_text("Integrating glycosylation in <i>de novo</i> protein design") == "Integrating glycosylation in de novo protein design"
+    assert clean_text("A B1 SINE element within the mouse\n                    <i>Malat1</i>\n                    long noncoding RNA") == "A B1 SINE element within the mouse Malat1 long noncoding RNA"
+    assert clean_text("H<sub>2</sub>O &amp; CO<sub>2</sub>") == "H 2 O & CO 2".replace("H 2 O", "H 2 O")  # tags become spaces, entities decode
+    assert clean_text("plain title") == "plain title" and clean_text(None) == "" and clean_text("  a   b ") == "a b"
+    item = {
+        "DOI": "10.1038/s41592-026-03264-x", "type": "journal-article",
+        "title": ["Integrating glycosylation in <i>de novo</i>\n   protein design"], "container-title": ["Nature\nMethods"],
+        "created": {"date-time": "2026-10-13T00:00:00Z"}, "published": {"date-parts": [[2026, 10]]},
+        "funder": [{"name": "U.S. Department of Health & Human Services | NIH | National Cancer Institute"}] * 24 + [{"name": "Cancer Research UK"}] * 9,
+    }
+    p = crossref.to_paper(item, "Nature Methods")
+    assert p.title == "Integrating glycosylation in de novo protein design" and p.journal == "Nature Methods"
+    assert p.extra["funders"] == ["U.S. Department of Health & Human Services | NIH | National Cancer Institute", "Cancer Research UK"]
+    assert p.sections["funding"] == "U.S. Department of Health & Human Services | NIH | National Cancer Institute; Cancer Research UK"
+
+
+JATS_WITH_ABSTRACT = (
+    '<article xmlns:xlink="http://www.w3.org/1999/xlink"><front><article-meta>'
+    "<abstract abstract-type=\"graphical\"><p>Graphical abstract figure.</p></abstract>"
+    "<abstract><title>Abstract</title><p>In most cells, <italic>Malat1</italic> long noncoding RNA localizes to the\n nucleus.</p>"
+    "<p>Here we show a micropeptide.</p></abstract></article-meta></front>"
+    "<body><sec><title>Methods</title><p>Cells were sequenced on a NovaSeq 6000.</p></sec></body></article>"
+)
+
+
+def test_fulltext_fills_a_missing_abstract_from_the_jats_document():
+    from litradar.models import Paper
+    from litradar.sources import jats_abstract
+
+    assert jats_abstract(JATS_WITH_ABSTRACT) == "Abstract In most cells, Malat1 long noncoding RNA localizes to the nucleus. Here we show a micropeptide."
+    assert jats_abstract("<article/>") == "" and jats_abstract("<not xml") == "" and jats_abstract(None) == ""
+
+    class _XmlHttp:
+        def __init__(self, body):
+            self.body = body
+
+        def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,), retries=None):
+            r = type("R", (), {})()
+            r.status_code = 200
+            r.content = self.body.encode("utf-8")
+            return r
+
+    p = Paper(id="europepmc:MED:1", source="europepmc", kind="article", title="T", doi=None, abstract="", journal="Science Advances",
+              pub_date="2026-10-16", url="u", extra={"pmcid": "PMC13666002", "is_open_access": "Y"})
+    assert europepmc.attach_fulltext(_XmlHttp(JATS_WITH_ABSTRACT), p) is True
+    assert p.abstract.startswith("Abstract In most cells, Malat1") and "sequenced on a NovaSeq 6000" in p.sections["methods"]
+    # an abstract the search record already had is never overwritten
+    p2 = Paper(id="europepmc:MED:2", source="europepmc", kind="article", title="T", doi=None, abstract="Original.", journal="J",
+               pub_date="2026-10-16", url="u", extra={"pmcid": "PMC2", "is_open_access": "Y"})
+    europepmc.attach_fulltext(_XmlHttp(JATS_WITH_ABSTRACT), p2)
+    assert p2.abstract == "Original."
+    # the bioRxiv JATS path does the same
+    p3 = Paper(id="doi:10.64898/1", source="biorxiv", kind="preprint", title="T", doi="10.64898/1", abstract="", journal="biorxiv",
+               pub_date="2026-10-16", url="u", fulltext_url="https://www.biorxiv.org/content/x.source.xml")
+    assert biorxiv.attach_fulltext(_XmlHttp(JATS_WITH_ABSTRACT), p3) is True and p3.abstract.startswith("Abstract In most cells")
+
+
+def test_biorxiv_by_doi_lookup_logs_at_debug_not_info(caplog):
+    import logging
+
+    record = {"collection": [{"doi": "10.64898/2026.04.16.718906", "title": "T", "version": "1", "date": "2026-04-16", "category": "bioinformatics",
+                              "authors": "A B", "server": "biorxiv"}], "messages": [{"count": 1, "total": 1}]}
+    with caplog.at_level(logging.DEBUG, logger="litradar.sources.biorxiv"):
+        assert len(list(biorxiv.fetch(FakeHttp([record]), "", "", server="biorxiv"))) == 1
+    assert not [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("1 version(s) kept for 10.64898/2026.04.16.718906" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="litradar.sources.biorxiv"):
+        list(biorxiv.fetch(FakeHttp([record]), "2026-04-10", "2026-04-17", server="biorxiv"))
+    assert any("biorxiv: 1 preprints in 2026-04-10..2026-04-17" in r.getMessage() for r in caplog.records)
+
+
 def test_crossref_filters_on_created_date_and_falls_back_to_online_pub_date():
     empty = {"status": "ok", "message": {"items": [], "next-cursor": "c1"}}
     hit = {"status": "ok", "message": {"items": [{"DOI": "10.1016/x"}], "next-cursor": None}}
