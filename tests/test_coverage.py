@@ -93,7 +93,7 @@ def test_coverage_report_sections(store, settings):
     assert "txg-xenium" not in pz and "pacb-revio" not in pz and "ilmn-novaseq-x" in pz
     az = {(a["subgroup"], a["name"]) for a in w["authors"]["zero"]}
     assert ("single_cell", "Aviv Regev") not in az and ("spatial", "Xiaowei Zhuang") in az
-    assert w["authors"]["total"] > w["authors"]["with_openalex_id"] > 0
+    assert w["authors"]["total"] >= w["authors"]["with_openalex_id"] > 0  # every tracked author may carry an id (they all do since the 2026-10-17 resolution pass)
     tz = {t["term"] for t in w["terms"]["zero"]}
     assert "spatial transcriptomics" not in tz and "single-cell" not in tz and "cryo-EM" in tz
 
@@ -103,7 +103,10 @@ def test_coverage_report_sections(store, settings):
     assert "europepmc errored in the last run" in sugg
     assert "No OpenAlex key configured" in sugg
     assert "LITRADAR_CONTACT_EMAIL is empty" in sugg
-    assert "tracked authors have no OpenAlex id" in sugg
+    if w["authors"]["total"] > w["authors"]["with_openalex_id"]:
+        assert "tracked authors have no OpenAlex id" in sugg
+    else:  # every tracked author carries an id (the state since the 2026-10-17 resolution pass): nothing to suggest
+        assert "tracked authors have no OpenAlex id" not in sugg
     assert "Source crossref is enabled but contributed 0 papers" in sugg and "Source arxiv is enabled" in sugg
     assert "check the ISSN" in sugg  # never-seen journals with an ISSN
     json.dumps(r)  # serialisable
