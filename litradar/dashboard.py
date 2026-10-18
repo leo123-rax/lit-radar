@@ -42,6 +42,7 @@ rather than one dual-axis chart.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import shutil
@@ -59,6 +60,12 @@ log = logging.getLogger(__name__)
 #   https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js      -> 200, identical bytes
 CHARTJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"
 CHARTJS_SRI = "sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+# d3 for the company co-mention graph (companies/graph.html): pinned, with SRI; 279,706 bytes, identical on jsdelivr
+D3_URL = "https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"
+D3_SRI = "sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
+COMPANY_PAGE_MIN_PAPERS = 3   # a company gets companies/<id>.html once it has this many distinct papers in the window
+COMPANY_PAGE_MONTHS = 24      # months of history on the profile page's monthly chart
+GRAPH_MAX_DEFAULT_LINKS = 400 # the graph page's default minimum edge weight keeps about this many edges on screen
 
 NAV = [
     ("index.html", "Overview"),
@@ -754,8 +761,41 @@ def collect(conn: sqlite3.Connection, weeks: int = 52, today: Optional[date] = N
                      {"available": False, "source": None, "series": {}, "table": []},
         "timeseries": _timeseries(conn, tables),
         "papers": _search_index(conn, start, end, max_papers) if have_papers else [],
+        "company_pages": _company_pages(conn, start, end, today) if have_mentions else _empty_company_pages(start, end),
         "skipped_queries": list(getattr(conn, "skipped_queries", [])),
     }
+
+
+# ---------------------------------------------------------------------------- company profiles
+def _empty_company_pages(start: str, end: str) -> Dict[str, Any]:
+    return {"details": [], "pages": {}, "graph": {"window": {"start": start, "end": end}, "min_weight": 1, "nodes": [], "links": []}}
+
+
+def _company_pages(conn: sqlite3.Connection, start: str, end: str, today: date) -> Dict[str, Any]:
+    """Profile payloads for every company with >= COMPANY_PAGE_MIN_PAPERS distinct papers in the window, plus the
+    co-mention graph. Company metadata comes from the mentions table (the dashboard reads only the database), so
+    `type` is blank unless the store carries it."""
+    from . import companies as C
+
+    entries = C.entries_from_store(conn)
+    counts = C.paper_counts(conn, start, end)
+    details: List[Dict[str, Any]] = []
+    for e in entries:
+        c = counts.get(e["id"])
+        if not c or c["papers"] < COMPANY_PAGE_MIN_PAPERS:
+            continue
+        d = C.company_detail(conn, e, today=today, windows=(90, 365), months=COMPANY_PAGE_MONTHS)
+        d["window_papers"] = c["papers"]
+        details.append(d)
+    details.sort(key=lambda d: (-d["window_papers"], d["name"].lower()))
+    pages = {d["id"]: f"companies/{d['slug']}.html" for d in details}
+    for d in details:
+        for co in d["companies"]:
+            co["page"] = pages.get(co["id"], "")
+    graph = C.comention_graph(conn, start, end, entries)
+    for n in graph["nodes"]:
+        n["page"] = pages.get(n["id"], "")
+    return {"details": details, "pages": pages, "graph": graph}
 
 
 # ---------------------------------------------------------------------------- rendering
@@ -926,7 +966,10 @@ def _companies_html(data: Dict[str, Any]) -> str:
         '  </section>\n'
         '  <div id="company-cards"></div>\n'
     )
-    payload = {"weeks": data["weeks"], "entities": data["companies"]}
+    body += _company_links_html(data)
+    pages = (data.get("company_pages") or {}).get("pages") or {}
+    entities = [dict(e, page=pages.get(e["id"], "")) for e in data["companies"]]
+    payload = {"weeks": data["weeks"], "entities": entities}
     script = "litradar.renderCompanies(litradar.pageData());"
     lede = (
         "Mentions per week split by the role the company plays in the paper: author affiliation, funding or "
@@ -934,6 +977,174 @@ def _companies_html(data: Dict[str, Any]) -> str:
         "the stored headline feed."
     )
     return _page("Companies", "companies.html", lede, body, payload, script, data["generated"])
+
+
+def _company_links_html(data: Dict[str, Any]) -> str:
+    """The card on companies.html that links to the per-company profile pages and the co-mention graph."""
+    pages = data.get("company_pages") or {}
+    details = pages.get("details") or []
+    links = " ".join(
+        f'<a href="companies/{html.escape(d["slug"])}.html">{html.escape(d["name"])}</a> '
+        f'<span class="muted">{int(d.get("window_papers", 0))}</span>'
+        for d in details
+    )
+    body = (
+        '  <section class="card">\n'
+        '    <h2>Company profiles and co-mention graph</h2>\n'
+        f'    <p class="note">One page per company with at least {COMPANY_PAGE_MIN_PAPERS} papers in this window: mentions by '
+        'month, roles, recent papers, co-mentioned instruments and companies, news. The '
+        '<a href="companies/graph.html">co-mention graph</a> draws every company that shares a paper with another '
+        'one. The number after each name is its papers in the window.</p>\n'
+    )
+    if links:
+        body += f'    <p class="profile-links">{links}</p>\n'
+    else:
+        body += '    <p class="empty">No company reaches the profile threshold in this window.</p>\n'
+    return body + "  </section>\n"
+
+
+def _nav_at(active: str, root: str) -> str:
+    items = []
+    for href, label in NAV:
+        current = ' aria-current="page"' if href == active else ""
+        items.append(f'<a href="{root}{href}"{current}>{label}</a>')
+    return "\n      ".join(items)
+
+
+def _nested_page(title: str, lede: str, body: str, payload: Any, script: str, generated: str,
+                 root: str = "../", extra_scripts: str = "") -> str:
+    """The `_page` shell for a page one directory down (companies/): assets and nav resolve through `root`."""
+    return f"""<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<link rel="stylesheet" href="{root}assets/styles.css">
+</head>
+<body>
+<header class="site-head">
+  <div class="wrap">
+    <div class="brand">Literature radar <span class="muted">trends</span></div>
+    <nav class="nav">
+      {_nav_at("companies.html", root)}
+    </nav>
+    <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch colour theme">Theme</button>
+  </div>
+</header>
+<main class="wrap">
+  <h1>{title}</h1>
+  <p class="lede">{lede}</p>
+{body}
+</main>
+<footer class="wrap site-foot">
+  <p>Generated {generated} from the radar database this site was built from. Counts are of records in
+  the store, not of everything published; see the project documentation for coverage and method.</p>
+</footer>
+<script type="application/json" id="page-data">{_json_blob(payload)}</script>
+<script src="{CHARTJS_URL}" integrity="{CHARTJS_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+{extra_scripts}<script src="{root}assets/app.js"></script>
+<script>
+{script}
+</script>
+</body>
+</html>
+"""
+
+
+def _slot_card(title: str, note: str, slot_id: str) -> str:
+    note_html = f'<p class="note">{note}</p>' if note else ""
+    return f'  <section class="card">\n    <h2>{title}</h2>\n    {note_html}\n    <div id="{slot_id}"></div>\n  </section>\n'
+
+
+def _company_detail_html(d: Dict[str, Any], generated: str) -> str:
+    """companies/<slug>.html: one company's profile (payload = litradar.companies.company_detail output)."""
+    esc = html.escape
+    w90 = (d.get("windows") or {}).get("90d") or {}
+    w365 = (d.get("windows") or {}).get("365d") or {}
+    tags = []
+    if d.get("public") and _ticker(d.get("ticker")):
+        tags.append(_ticker(d.get("ticker")))
+    if d.get("type"):
+        tags.append(str(d["type"]))
+    tags += [f"{int(w90.get('papers', 0))} papers / 90 days", f"{int(w365.get('papers', 0))} papers / 365 days",
+             f"{int(w365.get('news', 0))} news items / 365 days"]
+    head = f'<h2>{esc(d["name"])}</h2>' + "".join(f'<span class="tag">{esc(t)}</span>' for t in tags)
+    meta = []
+    if d.get("parent"):
+        meta.append(f"Parent: {esc(str(d['parent']))}")
+    if d.get("domains"):
+        meta.append("E-mail domains: " + esc(", ".join(d["domains"])))
+    if d.get("aliases"):
+        meta.append("Also written: " + esc(", ".join(d["aliases"][:8])))
+    meta_html = "".join(f'<p class="note">{m}</p>' for m in meta)
+    body = (
+        '  <section class="card">\n'
+        f'    <div class="entity-head">{head}</div>\n'
+        f"{meta_html}"
+        '    <p class="note"><a href="../companies.html">All companies</a> &middot; <a href="graph.html">Co-mention graph</a></p>\n'
+        "  </section>\n"
+        + _card("Mentions by month",
+                f"Distinct papers naming the company per calendar month over the last {COMPANY_PAGE_MONTHS} months, "
+                "with the summed mention count. A paper is dated by its publication date, else by the day it was first seen.",
+                "comp-months")
+        + _slot_card("Roles", "Distinct papers per role in the last 90 and 365 days. A paper counts once per role it "
+                     "shows the company in: author affiliation, funding or competing-interest statement, subject "
+                     "(title or abstract), supplier (Methods).", "comp-roles")
+        + _slot_card("Recent papers", "Newest papers naming the company in the last 365 days, with the roles it plays in each.", "comp-papers")
+        + _slot_card("Co-mentioned instruments", "Gazetteer instruments named in the same papers, by shared papers (last 365 days).", "comp-instruments")
+        + _slot_card("Co-mentioned companies", "Companies named in the same papers, by shared papers (last 365 days). Linked names have a profile page.", "comp-companies")
+        + _slot_card("News", "Headlines from the stored feed tagged with this company (last 365 days).", "comp-news")
+    )
+    if d.get("candidates"):
+        body += _slot_card("Discovery candidates that resolve to this company",
+                           "Rows of the candidate table whose spelling, alias or e-mail domain matches this entry.", "comp-candidates")
+    lede = ("Company profile built from the radar store: how often the company appears in papers, in which role, "
+            "next to which instruments and companies, and in the news feed.")
+    return _nested_page(esc(d["name"]), lede, body, d, "litradar.renderCompanyDetail(litradar.pageData());", generated)
+
+
+def _graph_default_min_weight(graph: Dict[str, Any]) -> int:
+    weights = sorted((int(l_.get("weight", 1)) for l_ in graph.get("links") or []), reverse=True)
+    if len(weights) <= GRAPH_MAX_DEFAULT_LINKS:
+        return 1
+    return max(2, weights[GRAPH_MAX_DEFAULT_LINKS - 1])
+
+
+def _company_graph_html(graph: Dict[str, Any], generated: str) -> str:
+    """companies/graph.html: the co-mention graph (d3 force layout) with the same data as tables."""
+    nodes = graph.get("nodes") or []
+    links = graph.get("links") or []
+    default_min = _graph_default_min_weight(graph)
+    body = (
+        '  <section class="card">\n'
+        '    <h2>Filter</h2>\n'
+        '    <div class="filters">\n'
+        '      <label for="graph-min">Minimum shared papers</label>\n'
+        f'      <input type="number" id="graph-min" min="1" value="{default_min}">\n'
+        '      <label for="graph-top">Companies shown (largest first)</label>\n'
+        f'      <input type="number" id="graph-top" min="2" max="{max(2, len(nodes))}" value="{min(60, max(2, len(nodes)))}">\n'
+        '      <label class="checkbox"><input type="checkbox" id="graph-labels" checked> show labels</label>\n'
+        '    </div>\n'
+        '    <div class="legend" id="graph-legend"></div>\n'
+        '  </section>\n'
+        '  <section class="card">\n'
+        '    <h2>Co-mention graph</h2>\n'
+        '    <p class="note">Each node is a company; an edge joins two companies named in the same paper, weighted by how many '
+        'papers they share in the window. Node size follows papers in the window, colour follows the gazetteer type. Drag to '
+        'rearrange, scroll to zoom, click a node to open its profile. The tables below carry the same numbers.</p>\n'
+        '    <div class="graph"><svg id="graph" role="img" aria-label="Company co-mention graph"></svg></div>\n'
+        '  </section>\n'
+        + _slot_card("Strongest pairs", "Company pairs by shared papers, strongest first.", "graph-links")
+        + _slot_card("Companies in the graph", "Every company with at least one shared paper in the window.", "graph-nodes")
+    )
+    payload = dict(graph, default_min=default_min, counts={"nodes": len(nodes), "links": len(links)})
+    lede = (f"{len(nodes)} companies and {len(links)} co-mention pairs between "
+            f"{html.escape(str((graph.get('window') or {}).get('start', '')))} and "
+            f"{html.escape(str((graph.get('window') or {}).get('end', '')))}.")
+    d3_tag = (f'<script src="{D3_URL}" integrity="{D3_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n')
+    return _nested_page("Company co-mention graph", lede, body, payload, "litradar.renderCompanyGraph(litradar.pageData());",
+                        generated, extra_scripts=d3_tag)
 
 
 def _subgroups_html(data: Dict[str, Any]) -> str:
@@ -1143,6 +1354,16 @@ td.wrap, th.wrap { white-space: normal; min-width: 16em; max-width: 46em; overfl
 }
 .site-foot { color: var(--text-muted); font-size: 12px; padding-bottom: 32px; }
 .empty { color: var(--text-secondary); font-size: 14px; }
+/* company profile pages and the co-mention graph */
+.profile-links { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; line-height: 1.6; }
+.profile-links .muted { font-size: 12px; }
+a.tag { text-decoration: none; }
+ul.plain { list-style: none; padding: 0; margin: 0; font-size: 14px; line-height: 1.7; }
+.graph svg { width: 100%; height: 600px; display: block; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.graph svg text { font-size: 11px; fill: var(--text-secondary); pointer-events: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-secondary); margin-top: 10px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; background: var(--swatch); vertical-align: middle; }
+.filters input[type="number"] { width: 6em; }
 """
 
 
@@ -1555,6 +1776,7 @@ var litradar = (function () {
       head.appendChild(el("span", e.total + " mentions", { "class": "tag" }));
       head.appendChild(el("span", e.news_total + " news items", { "class": "tag" }));
       if (e.unlisted) { head.appendChild(el("span", "not in gazetteer", { "class": "tag" })); }
+      if (e.page) { head.appendChild(el("a", "Profile", { "class": "tag", href: e.page })); }
       card.appendChild(head);
 
       var chartBox = el("div", null, { "class": "chart small" });
@@ -1674,6 +1896,216 @@ var litradar = (function () {
   }
 
   /* ---------------------------------------------------------------- theme */
+  /* ------------------------------------------------------- company profile (companies/<id>.html) */
+  var ROLE_LABELS = { author: "Author affiliation", funding_coi: "Funding / COI", subject: "Subject of the work",
+                      supplier: "Supplier (Methods)", other: "Other" };
+  var ROLE_ORDER = ["author", "funding_coi", "subject", "supplier", "other"];
+
+  /* a relative link (profile pages live next to each other); external URLs still go through isWebUrl */
+  function localLink(text, href) {
+    var a = el("a", text, { href: href });
+    return a;
+  }
+
+  function linkedList(container, items, empty) {
+    container.textContent = "";
+    if (!items.length) { container.appendChild(el("p", empty, { "class": "empty" })); return; }
+    var ul = el("ul", null, { "class": "plain" });
+    items.forEach(function (it) {
+      var li = el("li");
+      if (it.href) { li.appendChild(localLink(it.text, it.href)); } else { li.appendChild(el("span", it.text)); }
+      if (it.tail) { li.appendChild(el("span", " " + it.tail, { "class": "muted" })); }
+      ul.appendChild(li);
+    });
+    container.appendChild(ul);
+  }
+
+  function renderCompanyDetail(d) {
+    var monthly = d.monthly || [];
+    var months = monthly.map(function (m) { return m.month; });
+    var papers = monthly.map(function (m) { return m.papers || 0; });
+    var mentionCounts = monthly.map(function (m) { return m.mentions || 0; });
+    var monthSlot = document.getElementById("comp-months-table");
+    if (monthSlot) {
+      table(monthSlot, [{ label: "Month" }, { label: "Papers", num: true }, { label: "Mentions", num: true }],
+            months.map(function (m, i) { return [m, papers[i], mentionCounts[i]]; }));
+    }
+    var canvas = document.getElementById("comp-months");
+    if (canvas) {
+      if (sum(papers) === 0) {
+        noChart(canvas, "No papers named the company in the last " + months.length + " months.");
+      } else {
+        register("comp-months", function (c) {
+          return lineChart(c, months, [{ label: "Papers", data: papers }, { label: "Mentions", data: mentionCounts }]);
+        });
+      }
+    }
+
+    var roles = document.getElementById("comp-roles");
+    var windows = d.windows || {};
+    var keys = Object.keys(windows);
+    if (roles) {
+      var headers = [{ label: "Role" }].concat(keys.map(function (k) { return { label: "Last " + k, num: true }; }));
+      var rows = ROLE_ORDER.map(function (r) {
+        return [ROLE_LABELS[r] || r].concat(keys.map(function (k) { return ((windows[k] || {}).roles || {})[r] || 0; }));
+      });
+      rows.push(["All papers"].concat(keys.map(function (k) { return (windows[k] || {}).papers || 0; })));
+      rows.push(["News items"].concat(keys.map(function (k) { return (windows[k] || {}).news || 0; })));
+      table(roles, headers, rows, { collapsible: false, fit: true });
+    }
+
+    var papersSlot = document.getElementById("comp-papers");
+    if (papersSlot) {
+      table(papersSlot, [{ label: "Date" }, { label: "Paper", wrap: true }, { label: "Venue" }, { label: "Roles" }],
+            (d.recent_papers || []).map(function (p) {
+              return [p.date || "n.d.", { text: p.title, href: p.url }, p.journal || "",
+                      (p.roles || []).map(function (r) { return ROLE_LABELS[r] || r; }).join(", ")];
+            }), { collapsible: false, fit: true, empty: "No papers in the last 365 days." });
+    }
+
+    var inst = document.getElementById("comp-instruments");
+    if (inst) {
+      table(inst, [{ label: "Instrument" }, { label: "Vendor" }, { label: "Shared papers", num: true }],
+            (d.instruments || []).map(function (i) { return [i.name, i.vendor || "", i.papers]; }),
+            { collapsible: false, fit: true, empty: "No gazetteer instrument shares a paper with this company." });
+    }
+
+    var cos = document.getElementById("comp-companies");
+    if (cos) {
+      linkedList(cos, (d.companies || []).map(function (c) {
+        var href = c.page ? c.page.replace(/^companies\//, "") : "";
+        return { text: c.name + (c.ticker ? " (" + c.ticker + ")" : ""), href: href, tail: c.papers + " shared" };
+      }), "No other company shares a paper with this one.");
+    }
+
+    var news = document.getElementById("comp-news");
+    if (news) {
+      table(news, [{ label: "Date" }, { label: "Headline", wrap: true }, { label: "Feed" }],
+            (d.news || []).map(function (n) { return [n.date || "n.d.", { text: n.title, href: n.url }, n.feed || ""]; }),
+            { collapsible: false, fit: true, empty: "No news items tagged with this company." });
+    }
+
+    var cands = document.getElementById("comp-candidates");
+    if (cands) {
+      table(cands, [{ label: "Candidate" }, { label: "Status" }, { label: "Score", num: true }, { label: "Papers / items", num: true }],
+            (d.candidates || []).map(function (c) { return [c.display_name, c.status, c.score, c.papers]; }),
+            { collapsible: false, fit: true });
+    }
+    afterRender();
+  }
+
+  /* ------------------------------------------------------- co-mention graph (companies/graph.html) */
+  var TYPE_SWATCH = { tools: 0, pharma: 1, diagnostics: 2, cro: 3, ai_bio: 4, synthesis: 5, software: 6, institute: 7 };
+
+  function typeColor(type) {
+    var i = TYPE_SWATCH[type];
+    return i === undefined ? otherColor() : colorFor(i);
+  }
+
+  function renderCompanyGraph(data) {
+    var allNodes = data.nodes || [];
+    var allLinks = data.links || [];
+    var byId = {};
+    allNodes.forEach(function (n) { byId[n.id] = n; });
+    var name = function (id) { return byId[id] ? byId[id].name : id; };
+
+    var linksSlot = document.getElementById("graph-links");
+    if (linksSlot) {
+      table(linksSlot, [{ label: "Company" }, { label: "Company" }, { label: "Shared papers", num: true }],
+            allLinks.slice(0, 300).map(function (l) { return [name(l.source), name(l.target), l.weight]; }),
+            { summary: "Pairs (top 300)", empty: "No two companies share a paper in this window." });
+    }
+    var nodesSlot = document.getElementById("graph-nodes");
+    if (nodesSlot) {
+      table(nodesSlot, [{ label: "Company" }, { label: "Ticker" }, { label: "Type" }, { label: "Papers", num: true }, { label: "Partners", num: true }],
+            allNodes.map(function (n) { return [n.name, n.ticker || "", n.type || "", n.papers, n.degree]; }),
+            { summary: "Companies", empty: "No company in the graph." });
+    }
+    var legend = document.getElementById("graph-legend");
+    if (legend) {
+      var types = {};
+      allNodes.forEach(function (n) { types[n.type || "unknown"] = true; });
+      Object.keys(types).sort().forEach(function (t) {
+        var span = el("span", t);
+        span.style.setProperty("--swatch", typeColor(t));
+        legend.appendChild(span);
+      });
+    }
+
+    var svg = document.getElementById("graph");
+    if (!svg) { afterRender(); return; }
+    var box = svg.parentNode;
+    if (typeof d3 === "undefined") {
+      box.textContent = "";
+      box.appendChild(el("p", "Graph library unavailable - the tables below carry the same pairs.", { "class": "empty" }));
+      afterRender();
+      return;
+    }
+    var minInput = document.getElementById("graph-min");
+    var topInput = document.getElementById("graph-top");
+    var labelsInput = document.getElementById("graph-labels");
+    var sim = null;
+
+    function draw() {
+      var minW = Math.max(1, parseInt(minInput ? minInput.value : "1", 10) || 1);
+      var top = Math.max(2, parseInt(topInput ? topInput.value : "60", 10) || 60);
+      var keep = {};
+      allNodes.slice(0, top).forEach(function (n) { keep[n.id] = true; });
+      var links = allLinks.filter(function (l) { return l.weight >= minW && keep[l.source] && keep[l.target]; })
+                          .map(function (l) { return { source: l.source, target: l.target, weight: l.weight }; });
+      var used = {};
+      links.forEach(function (l) { used[l.source] = true; used[l.target] = true; });
+      var nodes = allNodes.filter(function (n) { return used[n.id]; }).map(function (n) {
+        return { id: n.id, name: n.name, type: n.type, papers: n.papers, degree: n.degree, page: n.page, ticker: n.ticker };
+      });
+      if (sim) { sim.stop(); }
+      var root = d3.select(svg);
+      root.selectAll("*").remove();
+      var width = svg.clientWidth || 900, height = svg.clientHeight || 600;
+      if (!nodes.length) {
+        root.append("text").attr("x", 16).attr("y", 32).text("No pairs at this threshold - lower the minimum shared papers.");
+        return;
+      }
+      var g = root.append("g");
+      root.call(d3.zoom().scaleExtent([0.3, 5]).on("zoom", function (ev) { g.attr("transform", ev.transform); }));
+      var radius = function (n) { return 4 + Math.sqrt(n.papers || 1) * 1.6; };
+      var link = g.append("g").attr("stroke", cssVar("--axis")).attr("stroke-opacity", 0.7)
+        .selectAll("line").data(links).join("line")
+        .attr("stroke-width", function (l) { return 1 + Math.log2(l.weight); });
+      link.append("title").text(function (l) { return name(l.source.id || l.source) + " - " + name(l.target.id || l.target) + ": " + l.weight + " shared papers"; });
+      var node = g.append("g").selectAll("g").data(nodes).join("g").attr("class", "node")
+        .style("cursor", function (n) { return n.page ? "pointer" : "grab"; })
+        .call(d3.drag()
+          .on("start", function (ev, n) { if (!ev.active) { sim.alphaTarget(0.3).restart(); } n.fx = n.x; n.fy = n.y; })
+          .on("drag", function (ev, n) { n.fx = ev.x; n.fy = ev.y; })
+          .on("end", function (ev, n) { if (!ev.active) { sim.alphaTarget(0); } n.fx = null; n.fy = null; }));
+      node.append("circle").attr("r", radius).attr("fill", function (n) { return typeColor(n.type); })
+        .attr("stroke", cssVar("--surface")).attr("stroke-width", 1.5);
+      node.append("title").text(function (n) { return n.name + (n.ticker ? " (" + n.ticker + ")" : "") + ": " + n.papers + " papers, " + n.degree + " partners"; });
+      var showLabels = !labelsInput || labelsInput.checked;
+      node.filter(function (n) { return showLabels && (n.papers >= 3 || nodes.length <= 40); })
+        .append("text").attr("dx", function (n) { return radius(n) + 3; }).attr("dy", "0.35em").text(function (n) { return n.name; });
+      node.on("click", function (ev, n) { if (n.page) { window.location.href = n.page.replace(/^companies\//, ""); } });
+      sim = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(links).id(function (n) { return n.id; }).distance(function (l) { return 90 - Math.min(60, l.weight * 4); }).strength(function (l) { return Math.min(1, 0.2 + l.weight / 40); }))
+        .force("charge", d3.forceManyBody().strength(-160))
+        .force("collide", d3.forceCollide().radius(function (n) { return radius(n) + 4; }))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .on("tick", function () {
+          link.attr("x1", function (l) { return l.source.x; }).attr("y1", function (l) { return l.source.y; })
+              .attr("x2", function (l) { return l.target.x; }).attr("y2", function (l) { return l.target.y; });
+          node.attr("transform", function (n) { return "translate(" + n.x + "," + n.y + ")"; });
+        });
+    }
+    [minInput, topInput, labelsInput].forEach(function (inp) {
+      if (inp) { inp.addEventListener("change", draw); }
+    });
+    var toggle = document.getElementById("theme-toggle");
+    if (toggle) { toggle.addEventListener("click", function () { window.setTimeout(draw, 0); }); }
+    afterRender();
+    draw();
+  }
+
   function currentTheme() {
     try { return localStorage.getItem("litradar-theme") || "auto"; } catch (e) { return "auto"; }
   }
@@ -1715,7 +2147,9 @@ var litradar = (function () {
     renderCompanies: renderCompanies,
     renderSubgroups: renderSubgroups,
     renderCountries: renderCountries,
-    renderSearch: renderSearch
+    renderSearch: renderSearch,
+    renderCompanyDetail: renderCompanyDetail,
+    renderCompanyGraph: renderCompanyGraph
   };
 })();
 """
@@ -1762,6 +2196,11 @@ def write_site(data: Dict[str, Any], out_dir: Path) -> Dict[str, int]:
     put("subgroups.html", _subgroups_html(data))
     put("countries.html", _countries_html(data))
     put("search.html", _search_html(data))
+    pages = data.get("company_pages") or _empty_company_pages(data["window"]["start"], data["window"]["end"])
+    for d in pages.get("details") or []:
+        put(f"companies/{d['slug']}.html", _company_detail_html(d, data["generated"]))
+    put("companies/graph.html", _company_graph_html(pages.get("graph") or {}, data["generated"]))
+    put("data/companies-graph.json", json.dumps(pages.get("graph") or {}, ensure_ascii=False, default=str))
     put(".nojekyll", "")  # GitHub Pages: serve assets/ and data/ verbatim
     return written
 
@@ -1796,6 +2235,12 @@ def build(db_path: Path, out_dir: Path, weeks: int = 52, max_papers: int = DEFAU
             "timeseries_months": len(data["timeseries"]["months"]),
         },
         "movers_window": data["movers_window"],
+        "company_pages": {
+            "pages": len((data.get("company_pages") or {}).get("details") or []),
+            "min_papers": COMPANY_PAGE_MIN_PAPERS,
+            "graph_nodes": len(((data.get("company_pages") or {}).get("graph") or {}).get("nodes") or []),
+            "graph_links": len(((data.get("company_pages") or {}).get("graph") or {}).get("links") or []),
+        },
         "skipped_queries": data["skipped_queries"],
         "totals": data["totals"],
         "files": files,

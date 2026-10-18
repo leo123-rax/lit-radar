@@ -106,6 +106,22 @@ Wiring (two one-line additions in files this module does not own):
 
 Until that is wired, `litradar candidates refresh` after each `litradar run` keeps the table current.
 
+## From candidate to profile
+
+A promoted candidate becomes a gazetteer entry, and `litradar rematch --since 90d` re-annotates the stored
+papers so the new entry picks up the mentions the candidate was spotted in. From then on it is a company
+like any other: `litradar companies show <id>` prints its 90- and 365-day profile (papers by role, instruments
+and companies co-mentioned, news, and the candidate rows that resolve to it), `litradar companies export --csv`
+puts it in the one-row-per-company table, and the dashboard gives it `companies/<id>.html` once it reaches three
+papers in the window. See `docs/companies.md` for the command, the pages and the vetting pass that landed the
+first 53 discovered companies (77 candidates at the default threshold reviewed with web evidence: 55 added or
+folded into an entry, 17 ignored as off-sector, 5 left `new` for want of evidence).
+
+`companies.sec_ticker_proposals(entries, tickers)` is the batch counterpart of the ticker hint: for every entry
+whose ticker is a placeholder it keeps only an **exact** normalised match against the SEC list (the whole name,
+not a shared first word), so the output can be applied rather than browsed. Across 264 entries it proposed two
+(both verified listings) and withheld one same-first-word near miss.
+
 ## Precision, measured
 
 On a one-week store (3,562 papers, 504 news items; 413 papers with a competing-interest statement, 824 with a

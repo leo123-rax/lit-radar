@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from litradar import discovery as d
-from litradar.config import load_yaml
 from litradar.extract.gazetteer import Gazetteer
 from litradar.models import Author, Mention, NewsItem, Paper
 from litradar.store import Store
@@ -14,9 +13,25 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 
 
+# companies.yaml carries a section of entries promoted from candidates; the fixtures below are the very paragraphs
+# those companies were discovered in, and a gazetteer that already knows them (correctly) stops reporting them.
+# The discovery tests therefore run against the file up to that section.
+DISCOVERED_MARKER = "discovered via `litradar candidates`"
+
+
+def baseline_companies_text() -> str:
+    text = (ROOT / "config" / "companies.yaml").read_text(encoding="utf-8")
+    if DISCOVERED_MARKER not in text:
+        return text
+    head = text.split(DISCOVERED_MARKER, 1)[0]
+    return head.rsplit("\n", 1)[0] + "\n"  # drop the partial comment line that opens the section
+
+
 @pytest.fixture(scope="module")
 def gz():
-    return Gazetteer.from_yaml(load_yaml(ROOT / "config" / "companies.yaml"), "company")
+    import yaml
+
+    return Gazetteer.from_yaml(yaml.safe_load(baseline_companies_text()), "company")
 
 
 def _fixture_lines(name):
@@ -394,6 +409,7 @@ def test_cli_candidates_roundtrip(tmp_path, monkeypatch, capsys):
     st = _seed(tmp_path)
     st.close()
     shutil.copytree(DEFAULT_CONFIG_DIR, tmp_path / "config")  # promote writes companies.yaml: never the repo's copy
+    (tmp_path / "config" / "companies.yaml").write_text(baseline_companies_text(), encoding="utf-8")  # see DISCOVERED_MARKER
     monkeypatch.setenv("LITRADAR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "d.sqlite"))
     monkeypatch.setenv("LITRADAR_CACHE_DIR", str(tmp_path / ".cache"))
