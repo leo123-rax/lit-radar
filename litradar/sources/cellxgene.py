@@ -94,8 +94,8 @@ ASSAY_ENTITY: Dict[str, str] = {
     "EFO:0700003": "bd-rhapsody",        # BD Rhapsody Whole Transcriptome Analysis
     "EFO:0700004": "bd-rhapsody",        # BD Rhapsody Targeted mRNA
     # Curio Bioscience (commercial Slide-seq)
-    "EFO:0030062": "curio-seeker",       # Slide-seqV2
-    "EFO:0920002": "curio-seeker",       # curio biosciences seeker, 3mm
+    "EFO:0030062": "slide-seq",          # Slide-seqV2: the academic method (gazetteer entry slide-seq, no vendor)
+    "EFO:0920002": "curio-seeker",       # curio biosciences seeker, 3mm: the commercial kit
     # others
     "EFO:0022490": "scale-bio",          # ScaleBio single cell RNA sequencing
     "EFO:0700011": "singleron",          # GEXSCOPE technology
@@ -116,7 +116,8 @@ _LABEL_RULES: Sequence[Tuple[re.Pattern[str], str]] = (
     (re.compile(r"\b10x\b|chromium", re.I), "txg-chromium"),
     (re.compile(r"evercode|parse bio|split-seq", re.I), "parse-evercode"),
     (re.compile(r"rhapsody", re.I), "bd-rhapsody"),
-    (re.compile(r"slide-?seq|curio|slide-?tags", re.I), "curio-seeker"),
+    (re.compile(r"curio", re.I), "curio-seeker"),
+    (re.compile(r"slide-?seq|slide-?tags", re.I), "slide-seq"),
     (re.compile(r"scale\s*bio|quantumscale", re.I), "scale-bio"),
     (re.compile(r"gexscope|singleron", re.I), "singleron"),
     (re.compile(r"\bhive\b|honeycomb", re.I), "honeycomb-hive"),
@@ -142,6 +143,7 @@ ENTITY_VENDORS: Dict[str, Tuple[str, str]] = {
     "parse-evercode": ("Parse Biosciences", "private"),
     "bd-rhapsody": ("Waters", "WAT"),  # BD Biosciences became part of Waters in Feb 2026
     "curio-seeker": ("Curio Bioscience", "private"),
+    "slide-seq": ("open source", "n/a"),  # academic method; split out of curio-seeker 2026-10-17
     "scale-bio": ("Scale Biosciences", "private"),
     "singleron": ("Singleron Biotechnologies", "private"),
     "honeycomb-hive": ("Honeycomb Biotechnologies", "private"),

@@ -111,7 +111,7 @@ def test_read_one_facts_only_and_keep_text(tmp_path, monkeypatch):
     pipe = Pipeline(settings, http=object())
     monkeypatch.setattr("litradar.ingest.Resolver.resolve", lambda self, ident: None, raising=False)
     r = S.read_one(pipe, settings, "10.1038/s41592-026-99999-9", html_override=NATURE_HTML)
-    assert not r.error and {"NovaSeq X", "Chromium"} <= set(r.instruments) and "Illumina" in r.companies
+    assert not r.error and {"NovaSeq X Plus", "Chromium"} <= set(r.instruments) and "Illumina" in r.companies
     row = pipe.store.get_paper(r.paper_id)
     assert row["fulltext_available"] == 0 and json.loads(row["sections_json"]) == {} and r.stored_as == "facts_only"
     r2 = S.read_one(pipe, settings, "10.1038/s41592-026-99999-9", keep_text=True, html_override=NATURE_HTML)

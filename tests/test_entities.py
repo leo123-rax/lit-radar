@@ -18,6 +18,8 @@ INSTRUMENTS = Gazetteer.from_yaml({"entries": [
     {"id": "ilmn-novaseq-x", "name": "NovaSeq X", "vendor": "Illumina", "ticker": "ILMN", "category": "sequencer.short_read", "launched": 2023, "aliases": ["NovaSeq X Plus"]},
     {"id": "ilmn-miseq", "name": "MiSeq", "vendor": "Illumina", "ticker": "ILMN", "category": "sequencer.short_read", "launched": 2011, "aliases": []},
     {"id": "txg-xenium", "name": "Xenium", "vendor": "10x Genomics", "ticker": "TXG", "category": "spatial", "launched": 2022, "aliases": ["Xenium Analyzer"]},
+    {"id": "olink-explore", "name": "Olink Explore", "vendor": "Thermo Fisher Scientific", "ticker": "TMO", "category": "proteomics.affinity", "launched": 2020,
+     "parent": "Olink", "aliases": ["Olink", "Proximity Extension Assay"]},
 ]}, "instrument")
 COMPANIES = Gazetteer.from_yaml({"entries": [
     {"id": "illumina", "name": "Illumina", "ticker": "ILMN", "domains": ["illumina.com"], "aliases": ["Illumina Inc"]},
@@ -25,6 +27,7 @@ COMPANIES = Gazetteer.from_yaml({"entries": [
     {"id": "10x-genomics", "name": "10x Genomics", "ticker": "TXG", "aliases": ["10X Genomics"]},
     {"id": "element-biosciences", "name": "Element Biosciences", "ticker": "private", "aliases": ["Element Bio"]},
     {"id": "fluent-biosciences", "name": "Fluent BioSciences", "ticker": "ILMN", "parent": "Illumina", "aliases": ["Fluent Bio"]},
+    {"id": "thermo-fisher", "name": "Thermo Fisher Scientific", "ticker": "TMO", "domains": ["thermofisher.com", "olink.com"], "aliases": ["Thermo Fisher", "Olink"]},
 ]}, "company")
 SUBGROUPS = [
     {"id": "long_read", "tracked_authors": [{"name": "Evan E. Eichler", "openalex_id": "A1", "institution": "Example University"}]},
@@ -155,6 +158,45 @@ def test_resolve_by_id_name_alias_ticker_and_mentions(tmp_path):
     st.commit()
     r = entities.resolve(st, "unlisted:acme-genomics", INSTRUMENTS, COMPANIES)
     assert r.kind == "company" and r.matched_by == "mentions" and r.name == "Acme Genomics"
+
+
+def test_product_name_shared_with_its_owner_resolves_to_both(tmp_path):
+    st = _seed(tmp_path)
+    st.replace_mentions("doi:10.1000/e9", st_mentions := [
+        Mention("doi:10.1000/e9", "company", "illumina", "Illumina", "", "ILMN", "", "affiliations", 1, "Illumina, San Diego"),
+        Mention("doi:10.1000/e9", "instrument", "olink-explore", "Olink Explore", "Thermo Fisher Scientific", "TMO", "proteomics.affinity", "methods", 1, "Olink Explore 3072"),
+    ])
+    st.commit()
+    assert len(st_mentions) == 2
+    # the typed token is a product name the company entry carries as a trade name: the instrument leads ...
+    r = entities.resolve(st, "olink", INSTRUMENTS, COMPANIES)
+    assert (r.kind, r.entity_id, r.matched_by) == ("instrument", "olink-explore", "alias")
+    assert [(c["id"], c["matched_by"]) for c in r.candidates] == [("thermo-fisher", "alias")]
+    rs = entities.resolve_all(st, "Olink", INSTRUMENTS, COMPANIES)
+    assert [(x.kind, x.entity_id, x.matched_by) for x in rs] == [("instrument", "olink-explore", "alias"), ("company", "thermo-fisher", "alias")]
+    assert rs[1].identity["domains"] == ["thermofisher.com", "olink.com"]
+    # ... while the company's own name or id keeps the company first and alone
+    assert entities.resolve(st, "Thermo Fisher Scientific", INSTRUMENTS, COMPANIES).kind == "company"
+    assert len(entities.resolve_all(st, "thermo-fisher", INSTRUMENTS, COMPANIES)) == 1
+    assert len(entities.resolve_all(st, "pacb-revio", INSTRUMENTS, COMPANIES)) == 1
+    # the dossier carries the other kind under `also` (one level deep) and the text renders both, product first
+    d = entities.dossier(st, rs[0], "2026-07-01", "2026-10-17", instruments=INSTRUMENTS, companies=COMPANIES)
+    assert d["entity_id"] == "olink-explore" and d["papers_total"] == 1
+    assert [a["entity_id"] for a in d["also"]] == ["thermo-fisher"] and "also" not in d["also"][0]
+    assert d["also"][0]["kind"] == "company" and "portfolio" in d["also"][0] and d["also"][0]["papers_total"] == 0
+    text = entities.render_dossier(d)
+    i_prod, i_sep, i_co = (text.index("Olink Explore  [instrument olink-explore]"),
+                           text.index("'Olink' also names a company: Thermo Fisher Scientific [thermo-fisher]"),
+                           text.index("Thermo Fisher Scientific  [company thermo-fisher]  matched by alias"))
+    assert i_prod < i_sep < i_co
+    assert "also" not in entities.dossier(st, rs[0], "2026-07-01", "2026-10-17", instruments=INSTRUMENTS, companies=COMPANIES, also=False)
+    # without the company gazetteer the second dossier still appears, with the identity taken from the candidates
+    d2 = entities.dossier(st, rs[0], "2026-07-01", "2026-10-17", instruments=INSTRUMENTS)
+    assert d2["also"][0]["entity_id"] == "thermo-fisher" and d2["also"][0]["identity"]["ticker"] == "TMO"
+    assert "gazetteer was not loaded" in d2["also"][0]["identity"]["note"]
+    # an instrument dossier shows its family; an unambiguous instrument has no `also`
+    r = entities.resolve(st, "pacb-revio", INSTRUMENTS, COMPANIES)
+    assert "also" not in entities.dossier(st, r, "2026-07-01", "2026-10-17", instruments=INSTRUMENTS, companies=COMPANIES)
 
 
 def test_resolve_people_and_unknown(tmp_path):
@@ -480,6 +522,14 @@ def test_cli_show_and_watch(tmp_path, monkeypatch, capsys):
     assert d["entity_id"] == "pacb-revio" and d["papers_total"] == 5 and d["window"] == {"since": "2026-07-01", "until": "2026-10-17"}
     assert cli.main(["show", "illumina", "--since", "90d"]) == 0
     assert "Illumina  [company illumina]  matched by id" in capsys.readouterr().out
+    # the real gazetteers: 'olink' is an alias of both the Olink Explore platform and its owner -> both dossiers
+    assert cli.main(["show", "olink", "--since", "90d", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["kind"] == "instrument" and d["entity_id"] == "olink-explore"
+    assert [(a["kind"], a["entity_id"]) for a in d["also"]] == [("company", "thermo-fisher")]
+    assert cli.main(["show", "olink", "--since", "90d"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("[instrument olink-explore]") < out.index("also names a company: Thermo Fisher Scientific [thermo-fisher]")
     assert cli.main(["show", "no-such-thing"]) == 1
     assert "nothing in the gazetteers" in capsys.readouterr().out
     assert cli.main(["watch", "add", "methylation AND ctDNA"]) == 0

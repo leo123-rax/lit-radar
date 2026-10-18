@@ -20,11 +20,21 @@ segments and refreshes planner statistics after a run with many of them.
 
 Data policy: when a paper's `extra_json.fulltext_policy` is anything but 'full', the store keeps no
 full-text sections and no body for it, whatever the caller passes (see litradar/policy.py).
+
+Mention roles: every mentions row carries a `role` -- 'used' (named in the Methods as something the study
+ran), 'reanalysis' (the snippet around the hit cites a public dataset: a GEO / SRA / ArrayExpress accession,
+"downloaded from", "publicly available", "re-analysed", "previously published") or 'mentioned' (title,
+abstract, funding, COI, acknowledgement and affiliation hits). `mention_role` derives it from the section and
+the stored snippet, so it costs no extra text and `Store.__init__` back-fills it for stores written before the
+column existed. `instrument_counts` reports `papers_used` / `papers_reanalysis` / `papers_mentioned` next to
+the unchanged `papers` total, so "who is using Chromium" can leave out papers that only re-analysed somebody
+else's data.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 import unicodedata
@@ -32,11 +42,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from .extract.gazetteer import family_label
 from .models import ArchiveRecord, Mention, NewsItem, Paper, normalize_doi
 from .policy import fulltext_storage_level
 from .rank.heuristics import PLATFORM_CATEGORIES
 
 log = logging.getLogger(__name__)
+
+MENTION_ROLES = ("used", "reanalysis", "mentioned")
+# sections in which a hit means the study ran the thing (the extractor files body hits under 'methods')
+_USED_SECTIONS = frozenset({"methods", "body"})
+# phrases that mark the surrounding sentence as data reuse rather than data generation (case-insensitive)
+_REANALYSIS_PHRASES = re.compile(
+    r"downloaded from|publicly available|public(?:ly)? (?:available )?datasets?|GEO accession|Gene Expression Omnibus|"
+    r"re-?analy[sz]|previously published|previously (?:generated|deposited|reported) data|retrieved from|"
+    r"ArrayExpress|Sequence Read Archive",
+    re.IGNORECASE,
+)
+# accession tokens: case-sensitive so 'sra' inside a word or a lower-case 'gse' never counts
+_REANALYSIS_ACCESSIONS = re.compile(r"\bSRA\b|\bGSE\d{3,}\b|\bGSM\d{4,}\b|\bE-MTAB-\d+\b|\bPRJ[NED][AB]\d+\b|\bSR[PRXS]\d{5,}\b|\bER[PRXS]\d{5,}\b")
+# archive rows written by an older SRA parser when the experiment accession was missing: synthetic ids that cannot be
+# de-duplicated against ENA and carry no study / platform / strategy (litradar/sources/sra.py documents the cause)
+SRA_PLACEHOLDER_PREFIX = "SRA-UID-"
+
+
+def mention_role(section: str, snippet: Optional[str]) -> str:
+    """Derive a mention's role from its section and snippet (see the module docstring)."""
+    text = snippet or ""
+    if _REANALYSIS_PHRASES.search(text) or _REANALYSIS_ACCESSIONS.search(text):
+        return "reanalysis"
+    return "used" if section in _USED_SECTIONS else "mentioned"
 
 FTS_COLUMNS = ("title", "abstract", "methods", "funding", "coi", "affiliations", "body", "mentions")
 # the `mentions` column is maintained from the mentions table; the others are text columns of the paper
@@ -88,6 +123,7 @@ CREATE TABLE IF NOT EXISTS mentions (
   count INTEGER DEFAULT 1,
   snippet TEXT,
   alias TEXT DEFAULT '',
+  role TEXT DEFAULT '',
   PRIMARY KEY (paper_id, kind, entity_id, section)
 );
 CREATE INDEX IF NOT EXISTS idx_mentions_entity ON mentions(kind, entity_id);
@@ -288,6 +324,7 @@ class Store:
         self.fts_mentions_updated = 0  # `mentions` column refreshes
         self.last_search_fallback: Optional[str] = None
         self._ensure_mentions_alias_column()
+        self.roles_backfilled = self._ensure_mentions_role_column()
         self.fts_migrated = self._ensure_fts_schema()
         self.fts_rebuilt = self._ensure_fts_keyed_by_rowid()
 
@@ -352,6 +389,29 @@ class Store:
             log.info("mentions table has no 'alias' column; adding it")
             self.conn.execute("ALTER TABLE mentions ADD COLUMN alias TEXT DEFAULT ''")
             self.conn.commit()
+
+    def _ensure_mentions_role_column(self) -> int:
+        """Add `mentions.role` to stores written before it existed and derive it for every row that has none.
+        Returns the number of rows back-filled (0 when the column was present and complete)."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(mentions)")}
+        if "role" not in cols:
+            log.info("mentions table has no 'role' column; adding it")
+            self.conn.execute("ALTER TABLE mentions ADD COLUMN role TEXT DEFAULT ''")
+        n = self.backfill_mention_roles(only_blank=True)
+        if n:
+            log.info("derived the role of %d stored mention(s)", n)
+        self.conn.commit()
+        return n
+
+    def backfill_mention_roles(self, only_blank: bool = True) -> int:
+        """(Re)derive `mentions.role` from section + snippet; `only_blank=False` recomputes every row (after a
+        change to the cue list). Returns the number of rows updated."""
+        where = " WHERE role IS NULL OR role = ''" if only_blank else ""
+        rows = self.conn.execute(f"SELECT rowid, section, snippet, role FROM mentions{where}").fetchall()
+        updates = [(mention_role(sec, snip), rid) for rid, sec, snip, role in rows if mention_role(sec, snip) != (role or "")]
+        if updates:
+            self.conn.executemany("UPDATE mentions SET role=? WHERE rowid=?", updates)
+        return len(updates)
 
     def _ensure_fts_schema(self) -> bool:
         """Rebuild papers_fts once when it lacks a column of the current schema (e.g. `mentions`). Returns True
@@ -658,7 +718,8 @@ class Store:
         none for that section (used when the text they came from is not kept under the data policy).
 
         Also refreshes the paper's `mentions` full-text column (only when its text changed). A Mention may carry
-        an `alias` attribute (extract.gazetteer.MatchedMention); it is stored in `mentions.alias`."""
+        an `alias` attribute (extract.gazetteer.MatchedMention); it is stored in `mentions.alias`. Its `role` is
+        stored as given, or derived with `mention_role` when blank."""
         new = list(mentions)
         kept: List[Dict[str, Any]] = []
         if keep_sections:
@@ -667,19 +728,20 @@ class Store:
         self.conn.execute("DELETE FROM mentions WHERE paper_id=?", (paper_id,))
         n = 0
         for m in new:
+            role = str(getattr(m, "role", "") or "") or mention_role(m.section, m.snippet)
             self.conn.execute(
                 """INSERT OR REPLACE INTO mentions (paper_id, kind, entity_id, entity_name, vendor, ticker, category,
-                   section, count, snippet, alias) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   section, count, snippet, alias, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (paper_id, m.kind, m.entity_id, m.entity_name, m.vendor, m.ticker, m.category, m.section, m.count, m.snippet,
-                 str(getattr(m, "alias", "") or "")),
+                 str(getattr(m, "alias", "") or ""), role),
             )
             n += 1
         for r in kept:
             self.conn.execute(
                 """INSERT OR IGNORE INTO mentions (paper_id, kind, entity_id, entity_name, vendor, ticker, category,
-                   section, count, snippet, alias) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   section, count, snippet, alias, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (paper_id, r["kind"], r["entity_id"], r["entity_name"], r["vendor"], r["ticker"], r["category"], r["section"], r["count"], r["snippet"],
-                 r.get("alias") or ""),
+                 r.get("alias") or "", r.get("role") or mention_role(r["section"], r.get("snippet"))),
             )
             n += 1
         self._sync_fts_mentions(paper_id)
@@ -859,34 +921,69 @@ class Store:
             r["mentions"] = self.mentions_for(r["id"])
         return out
 
+    @staticmethod
+    def _family_key(families: Optional[Dict[str, str]]) -> Tuple[str, List[Any]]:
+        """SQL expression (and its parameters) that maps `m.entity_id` to its family key, else to itself."""
+        if not families:
+            return "m.entity_id", []
+        params: List[Any] = []
+        for eid, fam in families.items():
+            params += [eid, fam]
+        return "CASE m.entity_id " + " ".join("WHEN ? THEN ?" for _ in families) + " ELSE m.entity_id END", params
+
     def instrument_counts(
         self, since: str, until: str, limit: int = 60,
         categories: Optional[Sequence[str]] = None, platform_only: Optional[bool] = None,
+        families: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         """Instrument entities named in the window, most papers first.
 
         `categories` restricts to gazetteer category prefixes (e.g. ("sequencer", "spatial")); `platform_only=True`
         is shorthand for rank.heuristics.PLATFORM_CATEGORIES and `platform_only=False` for everything else (lab
         infrastructure and consumables). The filter is applied in SQL, before `limit`, so the two groups never
-        compete for one row budget."""
+        compete for one row budget.
+
+        Every row carries the role split `papers_used` / `papers_reanalysis` / `papers_mentioned` (distinct papers
+        whose mention of the entity has that role; a paper can appear in more than one when it names the entity in
+        several sections) next to the unchanged `papers` total.
+
+        `families` ({entity_id: family key}, e.g. `Gazetteer.families`) rolls sibling entries up before the limit:
+        the row's `entity_id` becomes the family key, `family` names it, `members` lists the member ids seen, the
+        display name is `extract.gazetteer.family_label` and `papers` counts distinct papers across the members
+        (a paper naming both NovaSeq X and NovaSeq X Plus counts once). Entries without a family are unchanged and
+        carry `family: ''` and `members: [entity_id]`."""
         cat_sql, cat_params = _category_clause(categories, platform_only)
+        key_sql, key_params = self._family_key(families)
         cur = self.conn.execute(
-            f"""SELECT m.entity_id, m.entity_name, m.vendor, m.ticker, m.category,
+            f"""SELECT {key_sql} AS entity_id, m.entity_name, m.vendor, m.ticker, m.category,
+                      MIN(length(m.entity_name)) AS _shortest,
                       COUNT(DISTINCT m.paper_id) AS papers,
                       SUM(m.count) AS mentions,
-                      GROUP_CONCAT(DISTINCT m.section) AS sections
+                      GROUP_CONCAT(DISTINCT m.section) AS sections,
+                      GROUP_CONCAT(DISTINCT m.entity_id) AS _members,
+                      GROUP_CONCAT(DISTINCT m.entity_name) AS _member_names,
+                      COUNT(DISTINCT CASE WHEN m.role='used' THEN m.paper_id END) AS papers_used,
+                      COUNT(DISTINCT CASE WHEN m.role='reanalysis' THEN m.paper_id END) AS papers_reanalysis,
+                      COUNT(DISTINCT CASE WHEN m.role='mentioned' THEN m.paper_id END) AS papers_mentioned
                FROM mentions m JOIN papers p ON p.id = m.paper_id
                WHERE m.kind='instrument' AND {_WINDOW}{cat_sql}
-               GROUP BY m.entity_id ORDER BY papers DESC, mentions DESC LIMIT ?""",
-            (since, until, since, *cat_params, limit),
+               GROUP BY 1 ORDER BY papers DESC, mentions DESC LIMIT ?""",
+            (*key_params, since, until, since, *cat_params, limit),
         )
         rows = _rows(cur)
         for r in rows:
+            r.pop("_shortest", None)
+            members = [x for x in str(r.pop("_members", "") or "").split(",") if x]
+            names = [x for x in str(r.pop("_member_names", "") or "").split(",") if x]
+            r["members"] = members or [r["entity_id"]]
+            r["family"] = (families or {}).get(members[0], "") if members else ""
+            if r["family"]:
+                r["entity_name"] = family_label(r["family"], names)
             ex = self.conn.execute(
                 f"""SELECT p.title, p.url FROM mentions m JOIN papers p ON p.id=m.paper_id
-                   WHERE m.kind='instrument' AND m.entity_id=? AND {_WINDOW}
+                   WHERE m.kind='instrument' AND m.entity_id IN ({','.join('?' * len(r['members']))}) AND {_WINDOW}
                    ORDER BY m.count DESC LIMIT 1""",
-                (r["entity_id"], since, until, since),
+                (*r["members"], since, until, since),
             ).fetchone()
             r["example_title"], r["example_url"] = (ex[0], ex[1]) if ex else ("", "")
         return rows
@@ -989,13 +1086,16 @@ class Store:
     def distinct_entities_in_window(
         self, since: str, until: str, kind: str,
         categories: Optional[Sequence[str]] = None, platform_only: Optional[bool] = None,
+        families: Optional[Dict[str, str]] = None,
     ) -> int:
-        """Distinct entities of `kind` mentioned in the window; same category filter as instrument_counts."""
+        """Distinct entities of `kind` mentioned in the window; same category filter (and optional family roll-up)
+        as instrument_counts."""
         cat_sql, cat_params = _category_clause(categories, platform_only)
+        key_sql, key_params = self._family_key(families)
         row = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT m.entity_id) FROM mentions m JOIN papers p ON p.id=m.paper_id
+            f"""SELECT COUNT(DISTINCT {key_sql}) FROM mentions m JOIN papers p ON p.id=m.paper_id
                WHERE m.kind=? AND {_WINDOW}{cat_sql}""",
-            (kind, since, until, since, *cat_params),
+            (*key_params, kind, since, until, since, *cat_params),
         ).fetchone()
         return int(row[0] if row else 0)
 
@@ -1009,6 +1109,117 @@ class Store:
         for t in ("papers", "mentions", "scores", "archive_records", "news_items", "tracked_author_hits"):
             out[t] = self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
         return out
+
+    # ---- maintenance (litradar maintenance) ----------------------------------------------
+    def count_sra_placeholders(self) -> int:
+        """Archive rows whose accession is a synthetic `SRA-UID-...` placeholder (see SRA_PLACEHOLDER_PREFIX)."""
+        return int(self.conn.execute("SELECT COUNT(*) FROM archive_records WHERE accession LIKE ? ESCAPE '\\'",
+                                     (SRA_PLACEHOLDER_PREFIX.replace("_", "\\_").replace("%", "\\%") + "%",)).fetchone()[0])
+
+    def purge_sra_placeholders(self) -> int:
+        """Delete the `SRA-UID-...` placeholder rows from archive_records; returns how many went."""
+        cur = self.conn.execute("DELETE FROM archive_records WHERE accession LIKE ? ESCAPE '\\'",
+                                (SRA_PLACEHOLDER_PREFIX.replace("_", "\\_").replace("%", "\\%") + "%",))
+        self.conn.commit()
+        return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
+
+    def refresh_entity_metadata(self, entries: Iterable[Any]) -> int:
+        """Rewrite the denormalised columns of stored mentions from the current gazetteer entries.
+
+        Ids are stable but display names, vendors, tickers and categories change (a renamed bucket, an acquisition).
+        `rematch` re-derives most rows, yet rows kept because their source text is not stored under the data policy
+        keep the values they were written with. This brings every row of a known id up to date: `entity_name` and
+        `ticker` for all kinds, plus `vendor` and `category` for instruments (company rows use those two columns for
+        the parent and the provenance tag, which are left alone). Returns the number of rows changed and refreshes
+        the `mentions` full-text column of the papers touched."""
+        changed = 0
+        papers: set = set()
+        for e in entries:
+            kind, eid = getattr(e, "kind", ""), getattr(e, "id", "")
+            if not kind or not eid:
+                continue
+            if kind == "instrument":
+                where = ("WHERE kind=? AND entity_id=? AND (COALESCE(entity_name,'') IS NOT ? OR COALESCE(ticker,'') IS NOT ? "
+                         "OR COALESCE(vendor,'') IS NOT ? OR COALESCE(category,'') IS NOT ?)")
+                params = (kind, eid, e.name, e.ticker or "", e.vendor or "", e.category or "")
+                set_sql = "SET entity_name=?, ticker=?, vendor=?, category=?"
+                set_params = (e.name, e.ticker or "", e.vendor or "", e.category or "")
+            else:
+                where = "WHERE kind=? AND entity_id=? AND (COALESCE(entity_name,'') IS NOT ? OR COALESCE(ticker,'') IS NOT ?)"
+                params = (kind, eid, e.name, e.ticker or "")
+                set_sql = "SET entity_name=?, ticker=?"
+                set_params = (e.name, e.ticker or "")
+            stale = [r[0] for r in self.conn.execute(f"SELECT paper_id FROM mentions {where}", params)]
+            if not stale:
+                continue
+            cur = self.conn.execute(f"UPDATE mentions {set_sql} {where}", (*set_params, *params))
+            changed += max(cur.rowcount, 0)
+            papers.update(stale)
+        for pid in papers:
+            self._sync_fts_mentions(pid)
+        self.conn.commit()
+        return changed
+
+    def rebuild_fts(self) -> int:
+        """Drop and re-create papers_fts from `papers` (+ stored bodies and the mentions table), then merge its
+        segments. Returns the number of FTS rows written. Use after a tokenizer / schema change or when the index
+        is suspected to be out of step with `papers`."""
+        before = self.fts_rows_written
+        self._rebuild_fts(recreate=True)
+        self.optimize()
+        return self.fts_rows_written - before
+
+    def file_size(self) -> int:
+        """Bytes of the main database file plus its WAL side file (0 for an in-memory store)."""
+        total = 0
+        for p in (self.path, Path(str(self.path) + "-wal")):
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+        return total
+
+    def vacuum(self) -> Dict[str, int]:
+        """Checkpoint, VACUUM and checkpoint again; returns {'bytes_before', 'bytes_after', 'freelist_before'}.
+        Rewrites the whole file: needs free disk space of about the file's size (see :meth:`checkpoint`)."""
+        self.checkpoint()
+        before, free = self.file_size(), int(self.conn.execute("PRAGMA freelist_count").fetchone()[0])
+        self.conn.execute("VACUUM")
+        self.checkpoint()
+        return {"bytes_before": before, "bytes_after": self.file_size(), "freelist_before": free}
+
+    def table_stats(self) -> Dict[str, Any]:
+        """Row counts and on-disk bytes per table (indexes and FTS shadow tables included), plus file totals.
+
+        Bytes come from the `dbstat` virtual table when this SQLite build has it (most do); otherwise they are
+        None and `bytes_available` is False. Rows are counted for tables only (None for indexes)."""
+        objects = self.conn.execute(
+            "SELECT name, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY tbl_name, type DESC, name"
+        ).fetchall()
+        sizes: Dict[str, int] = {}
+        bytes_available = True
+        try:
+            for name, size in self.conn.execute("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name"):
+                sizes[name] = int(size or 0)
+        except sqlite3.DatabaseError:
+            bytes_available = False
+        tables: List[Dict[str, Any]] = []
+        for name, typ, tbl in objects:
+            rows: Optional[int] = None
+            if typ == "table":
+                try:
+                    rows = int(self.conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
+                except sqlite3.DatabaseError:
+                    rows = None
+            tables.append({"name": name, "type": typ, "table": tbl, "rows": rows, "bytes": sizes.get(name) if bytes_available else None})
+        page_size = int(self.conn.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(self.conn.execute("PRAGMA page_count").fetchone()[0])
+        freelist = int(self.conn.execute("PRAGMA freelist_count").fetchone()[0])
+        return {
+            "objects": tables, "bytes_available": bytes_available, "page_size": page_size, "page_count": page_count,
+            "freelist_count": freelist, "freelist_bytes": freelist * page_size, "file_bytes": self.file_size(),
+            "sra_placeholders": self.count_sra_placeholders(),
+        }
 
     # ---- search -------------------------------------------------------------------------
     def search(self, query: str, since: Optional[str] = None, limit: int = 50, sections: Sequence[str] = (), fallback: bool = True) -> List[Dict[str, Any]]:

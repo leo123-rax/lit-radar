@@ -34,7 +34,8 @@ def test_end_to_end_matching_on_fixture():
     inst = Gazetteer.from_yaml(yaml.safe_load(open(DEFAULT_CONFIG_DIR / "instruments.yaml")), "instrument")
     comp = Gazetteer.from_yaml(yaml.safe_load(open(DEFAULT_CONFIG_DIR / "companies.yaml")), "company")
     ids = {m.entity_id for m in inst.find(d["methods"])}
-    assert {"ilmn-novaseq-x", "txg-xenium", "thermo-orbitrap-astral", "evosep-one", "txg-chromium"} <= ids
+    assert {"ilmn-novaseq-x-plus", "txg-xenium", "thermo-orbitrap-astral", "evosep-one", "txg-chromium"} <= ids
+    assert "ilmn-novaseq-x" not in ids  # the Plus model is its own entry since 2026-10-17
     assert "singular-g4" not in ids  # "G4 quadruplex" must not count
     coi = {m.entity_id for m in comp.find(d["coi"])}
     assert coi == {"10x-genomics", "illumina"}

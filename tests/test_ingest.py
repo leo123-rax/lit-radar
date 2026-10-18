@@ -242,7 +242,7 @@ def test_add_journal_article_with_open_access_full_text(tmp_path):
     assert sorted(r.sources) == ["crossref", "europepmc"]
     assert r.fulltext_level == "full" and PMCID in r.fulltext_note
     inst = {d["id"] for d in r.instruments}
-    assert {"ilmn-novaseq-x", "txg-xenium", "thermo-orbitrap-astral"} <= inst
+    assert {"ilmn-novaseq-x-plus", "txg-xenium", "thermo-orbitrap-astral"} <= inst
     comp = {d["id"]: d for d in r.companies}
     assert {"10x-genomics", "illumina", "twist"} <= set(comp)
     assert "coi" in comp["illumina"]["sections"]
@@ -260,7 +260,7 @@ def test_add_journal_article_with_open_access_full_text(tmp_path):
     assert extra["tags"] == ["reading-list"] and extra["fulltext_level"] == "full" and extra["issn"] == ["1548-7091", "1548-7105"]
     assert extra["added_ids"] == [f"https://doi.org/{DOI}"] and extra["added_at"]
     assert pipe.store.search("GSE000001")[0]["id"] == r.paper_id  # body landed in FTS
-    assert {m["entity_id"] for m in pipe.store.mentions_for(r.paper_id)} >= {"ilmn-novaseq-x", "10x-genomics"}
+    assert {m["entity_id"] for m in pipe.store.mentions_for(r.paper_id)} >= {"ilmn-novaseq-x-plus", "10x-genomics"}
     assert pipe.store.get_score(r.paper_id)["final"] == r.score
     assert "NEW" in ingest.format_result(r) and "NovaSeq X" in ingest.format_result(r)
 
@@ -301,7 +301,7 @@ def test_add_preprint_keeps_latest_version_and_fetches_jats_under_cc_licence(tmp
     assert r.resolved_via == ["europepmc:PPR:PPR900001", "crossref", "biorxiv v2"]
     assert r.title.endswith("(v2)") and r.url == f"https://doi.org/{PRE_DOI}"  # merge keeps the base record's URL
     assert r.fulltext_level == "full" and "cc_by_nc_nd" in r.fulltext_note
-    assert {d["id"] for d in r.instruments} >= {"ilmn-novaseq-x", "txg-xenium"}
+    assert {d["id"] for d in r.instruments} >= {"ilmn-novaseq-x-plus", "txg-xenium"}
     assert any("2026.01.02.600001.source.xml" in k for k in http.keys())
     assert "preprint" in r.reasons
     row = pipe.store.get_paper(r.paper_id)
@@ -316,7 +316,7 @@ def test_add_preprint_respects_radar_fulltext_flag(tmp_path):
     assert not r.error and r.fulltext_level == "none" and "sources.biorxiv.fulltext" in r.fulltext_note
     assert not any("source.xml" in k for k in http.keys())
     # abstract-only annotation still happens
-    assert {d["id"] for d in r.instruments} == {"ilmn-novaseq-x"}
+    assert {d["id"] for d in r.instruments} == {"ilmn-novaseq-x-plus"}
 
 
 def test_add_preprint_falls_back_to_medrxiv(tmp_path):
@@ -415,7 +415,7 @@ def test_refresh_without_fulltext_keeps_stored_text(tmp_path):
     row = pipe.store.get_paper(first.paper_id)
     assert "NovaSeq X Plus" in json.loads(row["sections_json"])["methods"] and row["fulltext_available"] == 1
     assert pipe.store.search("GSE000001")[0]["id"] == first.paper_id
-    assert {d["id"] for d in second.instruments} >= {"ilmn-novaseq-x", "thermo-orbitrap-astral"}
+    assert {d["id"] for d in second.instruments} >= {"ilmn-novaseq-x-plus", "thermo-orbitrap-astral"}
 
 
 def test_tracked_author_hit_recorded_once(tmp_path):

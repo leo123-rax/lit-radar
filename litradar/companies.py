@@ -197,8 +197,10 @@ def paper_counts(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, 
     ).fetchall():
         out[eid].update({"papers": int(n or 0), "mentions": int(k or 0), "last_paper": last or ""})
     for eid, role, n in conn.execute(
-        f"SELECT m.entity_id, {_ROLE_CASE} AS role, COUNT(DISTINCT m.paper_id) FROM mentions m JOIN papers p ON p.id=m.paper_id "
-        f"WHERE m.kind='company' AND {d} >= ? AND {d} <= ? GROUP BY m.entity_id, role",
+        f"SELECT m.entity_id, {_ROLE_CASE} AS section_role, COUNT(DISTINCT m.paper_id) FROM mentions m JOIN papers p ON p.id=m.paper_id "
+        # the alias must not be named `role`: mentions.role is a real column (used/reanalysis/mentioned) and
+        # SQLite would bind GROUP BY to it, collapsing every section into one group
+        f"WHERE m.kind='company' AND {d} >= ? AND {d} <= ? GROUP BY m.entity_id, section_role",
         (since, until),
     ).fetchall():
         out[eid]["roles"][role if role in ROLES else "other"] = int(n or 0)

@@ -385,8 +385,16 @@ cases:
   reject: [novo-nordisk-foundation]
 - text: "AlphaFold3 modelling of the complex predicted Phe339 at the kinase pocket; structures were downloaded from the AlphaFold database."
   gazetteer: company
-  expect: [google-deepmind]
-  reject: [isomorphic]
+  expect: []
+  reject: [google-deepmind, isomorphic]
+- text: "AlphaFold3 modelling of the complex predicted Phe339 at the kinase pocket; structures were downloaded from the AlphaFold database."
+  gazetteer: instrument
+  expect: [deepmind-alphafold]
+  reject: []
+- text: "Google DeepMind, London, UK; Isomorphic Labs, London, UK"
+  gazetteer: company
+  expect: [google-deepmind, isomorphic]
+  reject: []
 - text: "Isomorphic Labs, London, UK"
   gazetteer: company
   expect: [isomorphic]
@@ -427,3 +435,165 @@ cases:
   gazetteer: company
   expect: [evident, nikon]
   reject: []
+# ---------------- hygiene pass of 2026-10-17: model split, camera / software splits, addresses, Unicode hyphens ----------------
+- text: "Libraries were sequenced on an Illumina NovaSeq X Plus (PE150) at a service provider."
+  gazetteer: instrument
+  expect: [ilmn-novaseq-x-plus]
+  reject: [ilmn-novaseq-x, ilmn-novaseq]
+- text: "Bulk RNA-seq was performed on the Illumina NovaSeq X plus with 2 x 150 bp reads."
+  gazetteer: instrument
+  expect: [ilmn-novaseq-x-plus]
+  reject: [ilmn-novaseq-x, ilmn-novaseq]
+- text: "Image analysis and base calling were conducted by the control software on the NovaSeqX Plus instrument."
+  gazetteer: instrument
+  expect: [ilmn-novaseq-x-plus]
+  reject: [ilmn-novaseq-x]
+- text: "The multiplexed libraries were sequenced on an Illumina NovaSeq X platform (San Diego, CA) using 2 x 150 bp paired-end reads."
+  gazetteer: instrument
+  expect: [ilmn-novaseq-x]
+  reject: [ilmn-novaseq-x-plus, ilmn-novaseq]
+- text: "Images were acquired with a 4K CETA complementary metal-oxide semiconductor camera (Thermo Fisher Scientific) at 120 kV."
+  gazetteer: instrument
+  expect: [thermo-ceta-camera]
+  reject: [thermo-falcon-detector]
+- text: "Micrographs were recorded on a 4k x 4k Ceta CMOS camera (Thermo Fisher Scientific) mounted on a Talos L120C."
+  gazetteer: instrument
+  expect: [thermo-ceta-camera]
+  reject: [thermo-falcon-detector]
+- text: "Movies were collected on a Falcon 4i direct electron detector mounted on a Titan Krios (Thermo Fisher Scientific)."
+  gazetteer: instrument
+  expect: [thermo-falcon-detector]
+  reject: [thermo-ceta-camera]
+- text: "Membranes were scanned and analyzed using ImageQuant software (GE Healthcare, USA) for densitometry."
+  gazetteer: instrument
+  expect: [cytiva-imagequant]
+  reject: [cytiva-typhoon]
+- text: "Chemiluminescence was captured on an ImageQuant LAS 4000 imager (GE Healthcare)."
+  gazetteer: instrument
+  expect: [cytiva-imagequant]
+  reject: [cytiva-typhoon]
+- text: "Gels were imaged on an Amersham Typhoon biomolecular imager (Cytiva) in phosphor mode."
+  gazetteer: instrument
+  expect: [cytiva-typhoon]
+  reject: [cytiva-imagequant]
+- text: "Institute of Clinical Neuroscience, University Medical Center Hamburg‐Eppendorf, Hamburg, Germany"
+  gazetteer: company
+  expect: []
+  reject: [eppendorf]
+- text: "Department of Neurology, University Medical Center Hamburg-Eppendorf (UKE), Germany"
+  gazetteer: company
+  expect: []
+  reject: [eppendorf]
+- text: "Lysates were cleared in 1.5 mL tubes on a Centrifuge 5424 R (Eppendorf, Hamburg, Germany)."
+  gazetteer: company
+  expect: [eppendorf]
+  reject: []
+- text: "Variants were annotated against gnomAD v4.1 (https://gnomad.broadinstitute.org/) and filtered with GATK (https://github.com/broadinstitute/gatk)."
+  gazetteer: company
+  expect: []
+  reject: [broad-institute]
+- text: "Stanley Center for Psychiatric Research, Broad Institute of MIT and Harvard, Cambridge, MA, USA"
+  gazetteer: company
+  expect: [broad-institute]
+  reject: []
+- text: "Sequencing data were processed in BaseSpace (https://basespace.illumina.com) following the vendor documentation."
+  gazetteer: company
+  expect: []
+  reject: [illumina]
+- text: "Libraries were prepared with the DNA Prep kit (Illumina, San Diego, CA) and run at the core facility."
+  gazetteer: company
+  expect: [illumina]
+  reject: []
+- text: "Correspondence: first.last@illumina.com; the sequencing was performed by an external provider."
+  gazetteer: company
+  expect: []
+  reject: [illumina]
+# ---------------- scale findings from an 89,165-paper backfill (2026-10-17): model names, academic methods, unspecified buckets ----------------
+- text: "Protein embeddings were computed with ESM-2 and structures folded with ESMFold; ESM3 generated the variants."
+  gazetteer: instrument
+  expect: [meta-esm, evolutionaryscale-esm3]
+  reject: []
+- text: "Protein embeddings were computed with ESM-2 and structures folded with ESMFold; ESM3 generated the variants."
+  gazetteer: company
+  expect: []
+  reject: [evolutionaryscale]
+- text: "Binders were designed with RFdiffusion and ProteinMPNN, then filtered by Boltz-2 co-folding and Chai-1 pose prediction."
+  gazetteer: instrument
+  expect: [rosettafold, boltz, chai-discovery-models]
+  reject: []
+- text: "Binders were designed with RFdiffusion and ProteinMPNN, then filtered by Boltz-2 co-folding and Chai-1 pose prediction."
+  gazetteer: company
+  expect: []
+  reject: [chai-discovery]
+- text: "Ludwig Boltz and colleagues reported the first cases in 1932."
+  gazetteer: instrument
+  expect: []
+  reject: [boltz]
+- text: "Reads were aligned with NVIDIA Clara Parabricks and the embedding model was fine-tuned in BioNeMo on H100 GPUs."
+  gazetteer: instrument
+  expect: [nvidia-parabricks, nvidia-bionemo]
+  reject: []
+- text: "GPUs were donated by NVIDIA Corporation; J.D. is an employee of NVIDIA."
+  gazetteer: company
+  expect: [nvidia]
+  reject: []
+- text: "Conformational ensembles were sampled with BioEmu and sequences generated with EvoDiff and ProGen2."
+  gazetteer: instrument
+  expect: [microsoft-bioemu, microsoft-evodiff, profluent-models]
+  reject: []
+- text: "Conformational ensembles were sampled with BioEmu and sequences generated with EvoDiff and ProGen2."
+  gazetteer: company
+  expect: []
+  reject: [microsoft-research, profluent]
+- text: "Variant effects were scored with Evo 2 and AlphaGenome; slides were embedded with H-optimus-0."
+  gazetteer: instrument
+  expect: [arc-evo, deepmind-alphagenome, bioptimus-h-optimus]
+  reject: []
+- text: "Variant effects were scored with Evo 2 and AlphaGenome; slides were embedded with H-optimus-0."
+  gazetteer: company
+  expect: []
+  reject: [arc-institute, google-deepmind, bioptimus]
+- text: "Reference atlases were downloaded from CZ CELLxGENE Discover and the Arc Virtual Cell Atlas."
+  gazetteer: instrument
+  expect: [czi-cellxgene, arc-virtual-cell-atlas]
+  reject: []
+- text: "Reference atlases were downloaded from CZ CELLxGENE Discover and the Arc Virtual Cell Atlas."
+  gazetteer: company
+  expect: []
+  reject: [chan-zuckerberg, arc-institute]
+- text: "This work was supported by the Chan Zuckerberg Initiative and the Arc Institute."
+  gazetteer: company
+  expect: [chan-zuckerberg, arc-institute]
+  reject: []
+- text: "Spatial transcriptomics was performed with Slide-seqV2 on 10-um fresh-frozen sections."
+  gazetteer: instrument
+  expect: [slide-seq]
+  reject: [curio-seeker]
+- text: "Slide-tags was applied to human cortex nuclei to recover spatial positions."
+  gazetteer: instrument
+  expect: [slide-seq]
+  reject: [curio-seeker]
+- text: "Sections were processed with the Curio Seeker kit (Curio Bioscience) following the Slide-seq protocol."
+  gazetteer: instrument
+  expect: [curio-seeker, slide-seq]
+  reject: []
+- text: "Libraries were sequenced on an Illumina platform (2 x 150 bp) at a core facility."
+  gazetteer: instrument
+  expect: [ilmn-sequencing]
+  reject: [ilmn-novaseq, ilmn-novaseq-6000]
+- text: "Long reads were generated by Oxford Nanopore sequencing on a PromethION 24 with R10.4.1 flow cells."
+  gazetteer: instrument
+  expect: [ont-chemistry, ont-promethion]
+  reject: []
+- text: "HiFi sequencing (PacBio) produced 20-kb reads that were assembled with hifiasm."
+  gazetteer: instrument
+  expect: [pacb-hifi]
+  reject: [pacb-revio, pacb-sequel-ii]
+- text: "Whole genomes were sequenced on the DNBSEQ platform (MGI, Shenzhen) to 30x."
+  gazetteer: instrument
+  expect: [mgi-dnbseq]
+  reject: [mgi-dnbseq-t7, mgi-dnbseq-g400]
+- text: "Paired-end reads were produced on a NovaSeq 6000 and, for the second batch, a NextSeq 2000."
+  gazetteer: instrument
+  expect: [ilmn-novaseq-6000, ilmn-nextseq-2000]
+  reject: [ilmn-novaseq, ilmn-nextseq, ilmn-sequencing]

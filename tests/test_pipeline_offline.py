@@ -80,7 +80,7 @@ def _sections(store, pid=PID):
 def test_metadata_only_refetch_keeps_methods_mentions_kind_and_date(tmp_path, monkeypatch):
     pipe = Pipeline(_settings(tmp_path), http=FakeHttp())
     _run(pipe, monkeypatch, [_preprint()])
-    assert {("pacb-revio", "methods"), ("ilmn-novaseq-x", "methods"), ("txg-xenium", "abstract")} <= _sections(pipe.store)
+    assert {("pacb-revio", "methods"), ("ilmn-novaseq-x-plus", "methods"), ("txg-xenium", "abstract")} <= _sections(pipe.store)
     assert pipe.store.body_for(PID).startswith("Introduction")
     pipe.store.close()
 
@@ -113,7 +113,7 @@ def test_restricted_licence_keeps_derived_facts_but_no_text(tmp_path, monkeypatc
     assert pipe.store.body_for(PID) == ""
     assert json.loads(row["extra_json"])["fulltext_policy"] == "facts_only"
     assert row["fulltext_available"] == 1  # the text was parsed, which is what the count reports
-    assert {("pacb-revio", "methods"), ("ilmn-novaseq-x", "methods")} <= _sections(pipe.store)
+    assert {("pacb-revio", "methods"), ("ilmn-novaseq-x-plus", "methods")} <= _sections(pipe.store)
     assert rep["counts"]["fulltext.policy_facts_only"] == 1 and rep["counts"]["fulltext.biorxiv"] == 1
     # nothing of the restricted TEXT is searchable: the Methods words are not indexed in any text column ...
     assert pipe.store.search("Libraries sequenced") == []
@@ -174,7 +174,7 @@ def test_rematch_cleans_legacy_restricted_fulltext_but_keeps_mentions(tmp_path):
     assert rep["counts"]["fulltext.purged"] == 1
     assert pipe.store.body_for(PID) == "" and "methods" not in json.loads(pipe.store.get_paper(PID)["sections_json"])
     assert json.loads(pipe.store.get_paper(PID)["extra_json"])["fulltext_policy"] == "facts_only"
-    assert {("pacb-revio", "methods"), ("ilmn-novaseq-x", "methods")} <= _sections(pipe.store)
+    assert {("pacb-revio", "methods"), ("ilmn-novaseq-x-plus", "methods")} <= _sections(pipe.store)
     pipe.store.close()
     rep2 = Pipeline(_settings(tmp_path), http=object()).rematch()
     assert rep2["counts"]["fulltext.purged"] == 0 and rep2["counts"]["rematched"] == 1
