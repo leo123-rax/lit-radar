@@ -41,10 +41,11 @@ from .sources import openfda as openfda_src
 from .sources import pride as pride_src
 from .sources import rss as rss_src
 from .sources import scielo as scielo_src
+from .sources import sec as sec_src
 from .sources import semantic_scholar as s2_src
 from .sources import sra as sra_src
 from .store import FULLTEXT_SECTIONS, Store, restricted_sections
-from .track import priority_multiplier
+from .track import priority_multiplier, sec_company_tickers
 
 log = logging.getLogger(__name__)
 
@@ -874,6 +875,33 @@ class Pipeline:
             log.warning(msg)
             self.errors.append(msg)
             sec_on = False
+        # SEC feeds are requested by CIK. EDGAR's legacy ticker lookup (CIK=<ticker>) lags company_tickers.json and
+        # answers an HTTP 200 HTML page ("No matching Ticker Symbol.") for recent listings and renamed registrants
+        # (8 of 46 watched tickers on 2026-10-18); the Atom reader can only turn that into zero items.
+        sec_cik: Dict[str, str] = {}
+        sec_unresolved: List[str] = []
+        if sec_on:
+            sec_tickers = sorted({e.ticker for e in self.companies.entries
+                                  if sec_src.is_plain_ticker(e.ticker) and raw_by_id.get(e.id, {}).get("watch_news")})
+            rows: List[Dict[str, str]] = []
+            if sec_tickers:
+                try:
+                    rows = sec_company_tickers(self.http, self.settings.cache_dir)
+                except Exception as exc:  # noqa: BLE001  (TrackError, network trouble, a client without .get)
+                    detail = str(exc).split("; pass --ticker", 1)[0]  # the `track` CLI hint means nothing in a run report
+                    msg = (f"sec: SEC ticker table unavailable ({detail}); 8-K feeds requested by ticker, which EDGAR cannot "
+                           f"resolve for recent listings or renamed registrants")
+                    log.warning(msg)
+                    self.errors.append(msg)
+            if rows:
+                sec_cik, sec_unresolved = sec_src.resolve(sec_tickers, rows)
+                if sec_unresolved:
+                    self.counts["news.sec_unresolved"] = len(sec_unresolved)
+                    msg = (f"sec: {len(sec_unresolved)} of {len(sec_tickers)} watched ticker(s) not in the SEC ticker table "
+                           f"(company_tickers.json), no 8-K feed collected for them: {', '.join(sec_unresolved)} "
+                           f"(a foreign, delisted or misspelled ticker in companies.yaml)")
+                    log.warning(msg)
+                    self.errors.append(msg)
         context_by_type = news_cfg.get("query_context") or {
             "tools": "(sequencing OR genomics OR proteomics OR \"life sciences\" OR instrument OR biotech)",
             "diagnostics": "(cancer OR diagnostic OR test OR genomics OR biotech OR FDA OR Medicare)",
@@ -929,13 +957,16 @@ class Pipeline:
                 q = f'"{e.name}" {ctx} when:7d'.strip()
                 feeds.append({"name": f"news:{e.name}", "kind": "gnews", "company": e.id,
                               "url": f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en"})
-            if sec_on and re.fullmatch(r"[A-Z]{1,5}", e.ticker or ""):
+            if sec_on and sec_src.is_plain_ticker(e.ticker) and e.ticker not in sec_unresolved:
+                # by CIK when the ticker table knows the ticker; by ticker only when the table could not be loaded
                 feeds.append({"name": f"SEC 8-K {e.ticker}", "kind": "sec", "company": e.id, "company_name": e.name,
-                              "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={e.ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"})
+                              "ticker": e.ticker, "url": sec_src.feed_url(sec_cik.get(e.ticker) or e.ticker)})
+        sec_not_atom: List[Tuple[str, str]] = []  # (ticker, EDGAR's explanation or the parse error)
         for f in feeds:
             try:
                 items: List[NewsItem] = []
-                for it in rss_src.news_items(self.http, f["name"], f["url"], since=since):
+                outcome: Dict[str, Any] = {}
+                for it in rss_src.news_items(self.http, f["name"], f["url"], since=since, outcome=outcome):
                     if f.get("kind") == "sec":
                         it.title = f"{f.get('company_name')}: {it.title} ({it.published})"
                     if not keep(it, f.get("company") if f.get("kind") == "gnews" else None):
@@ -946,8 +977,25 @@ class Pipeline:
                 added = self.store.upsert_news(items)
                 n += added
                 self.counts[f"news.{f['kind']}"] += added
+                if outcome.get("fetched") and not outcome.get("parsed"):
+                    # an HTTP 200 that is not a feed (EDGAR's "No matching ..." page, a challenge page): the HTTP layer
+                    # counted a success and the reader logged a WARNING, so the run report hears of it only from here
+                    if f.get("kind") == "sec":
+                        sec_not_atom.append((str(f.get("ticker")), sec_src.error_message(outcome.get("body")) or str(outcome.get("error"))))
+                    else:
+                        self.errors.append(f"feed {f['name']}: {outcome.get('error')}")
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"feed {f['name']}: {exc}")
+        sec_feeds = [f for f in feeds if f.get("kind") == "sec"]
+        if sec_feeds:
+            self.counts["news.sec_feeds"] = len(sec_feeds)
+        if sec_not_atom:
+            self.counts["news.sec_not_atom"] = len(sec_not_atom)
+            listed = ", ".join(f"{t} ({why})" for t, why in sorted(sec_not_atom))
+            msg = (f"sec: {len(sec_not_atom)} of {len(sec_feeds)} 8-K feed(s) answered an HTML page instead of Atom, "
+                   f"no filings collected for them: {listed}")
+            log.warning(msg)
+            self.errors.append(msg)
         if gdelt_on:
             batches: List[Tuple[str, List[Tuple[str, str]]]] = []
             short_names: List[str] = []
