@@ -76,7 +76,7 @@ Actions setup a matter of copying names.
 5. **Look at what you got** (**measured**: each command under 2 seconds):
 
    ```bash
-   python -m litradar status                  # exit 1 is expected here, see below
+   python -m litradar status                  # exit 0 once a run exists; see below for what makes it exit 1
    python -m litradar digest --days 1         # re-render from the database, no fetching
    python -m litradar dashboard --out site    # static site, open site/index.html
    python -m litradar serve                   # http://127.0.0.1:8787 ; Ctrl-C to stop
@@ -89,10 +89,11 @@ Actions setup a matter of copying names.
 
    **About `status` exiting 1.** `litradar status` is written for cron and the daily workflow: it
    exits 1 when there is no run yet, when the last run is older than three days, or when the last
-   run had errors on more than two sources. On a keyless laptop the third rule fires after every
-   run (the SEC skip counts as a source error, GDELT's 429 is chronic, and any upstream outage adds
-   one more), so **exit 1 right after a successful first run is normal**. Read the `!` lines at the
-   top of its output; `--max-failing-sources 4` raises the threshold if you script around it.
+   run had errors on more than two sources that genuinely failed. Configuration skips (the SEC feed
+   without `LITRADAR_CONTACT_EMAIL`) and rate-limited hosts (GDELT's 429) are still listed, tagged
+   `[configuration, not counted]` / `[degraded: rate-limited, not counted]`, so a keyless laptop
+   normally gets **exit 0 right after its first successful run**; `--max-failing-sources N` adjusts the
+   limit and docs/live.md spells out the rule.
 
 6. **Optional: a private watchlist.** Point `LITRADAR_CONFIG_DIR` at a directory outside the
    repository holding your own `companies.yaml` / `subgroups.yaml` and keep the shipped lists
@@ -221,9 +222,8 @@ dashboard in 15 files.
 | `litradar status` exits 1 after a successful run | more than two sources errored (SEC skip, GDELT 429, an outage); read the `!` line; see Part A step 5 |
 | `litradar serve` exits 2: `database not found` | run `litradar run --days 1` first, or pass `--db PATH` |
 | `litradar dashboard` exits 1: `no database at ...` | same cause; run the pipeline once |
-| `litradar digest` before any `run` writes a digest full of "nothing in this window" | `digest` only renders what the database holds and creates an empty database if there is none; run the pipeline first |
-| `litradar update --dry-run` leaves an empty `data/radar.sqlite` behind | the planner opens the store before deciding not to fetch; harmless, the file is tiny and git-ignored |
-| `pytest -q` shows dots but no "N passed" | `-q` is already in `pyproject.toml`; drop yours, or add `-o addopts=` |
+| `litradar digest` before any `run` exits 1 with `no runs yet; run litradar run --days 7 first` | expected: there is nothing to render yet; `--allow-empty` forces an empty digest |
+| `pytest -q` shows dots but no "N passed" | `-q` is already in `pyproject.toml`; run `python -m pytest -p no:warnings` (what CI does) |
 | the digest's news section is empty | GDELT answered 429 (see its row above); SEC needs `LITRADAR_CONTACT_EMAIL`; Google News is opt-in |
 | weekly run green, **pages** red at *Configure Pages* | the Pages source is not "GitHub Actions" yet (Part B step 4); set it and re-run **pages** |
 | **daily-update** red at *Freshness check* every day | Part B step 7 |
