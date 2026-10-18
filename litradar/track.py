@@ -47,6 +47,7 @@ SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_CACHE_MAX_AGE_DAYS = 7
 SEC_USER_AGENT = "lit-radar/0.1 {email}"  # the SEC's "<name> <e-mail>" format; a URL in the UA gets a 403
 TICKER_MIN_CONFIDENCE = 0.85  # below this the SEC match is shown but never written
+TICKER_CANDIDATE_FLOOR = 0.7  # below this a fuzzy SEC match is not even listed as a candidate (0.62 'ProShares Trust II' for a biotech name is noise)
 OPENALEX_AUTHORS_URL = "https://api.openalex.org/authors"
 ORCID_SEARCH_URL = "https://pub.orcid.org/v3.0/expanded-search/"
 
@@ -223,7 +224,28 @@ def _validate_subgroups(path: Path) -> None:
         raise TrackError("duplicate subgroup ids")
 
 
+_TOP_KEY_RE = re.compile(r"^([A-Za-z_][\w.-]*)\s*:")
+
+
+def duplicate_top_level_keys(text: str) -> List[str]:
+    """Top-level mapping keys that appear more than once in a block-style YAML document.
+
+    PyYAML silently keeps the last duplicate, so `priorities: {}` followed by a second `priorities:` block
+    loads without complaint while the file carries two headers; this catches it at edit time."""
+    seen: Dict[str, int] = {}
+    for ln in text.splitlines():
+        if not ln or ln[0] in " \t#-":
+            continue
+        m = _TOP_KEY_RE.match(ln)
+        if m:
+            seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+    return sorted(k for k, n in seen.items() if n > 1)
+
+
 def _validate_radar(path: Path) -> None:
+    dups = duplicate_top_level_keys(path.read_text(encoding="utf-8"))
+    if dups:
+        raise TrackError(f"duplicate top-level key(s): {', '.join(dups)}")
     data = load_yaml(path)
     if not isinstance(data, dict):
         raise TrackError("radar.yaml is not a mapping")
@@ -679,6 +701,52 @@ def remove_subgroup(settings: Settings, subgroup: str) -> Tuple[Dict[str, Any], 
 
 
 # ----------------------------------------------------------------------------- radar.yaml: watchlist terms
+def _flow_value_line(lines: Sequence[str], key: str) -> Optional[Tuple[int, str, str]]:
+    """(index, flow text, trailing comment) when the top-level `key:` carries an inline flow value
+    (`priorities: {}`, `watchlist_terms: [a, b]`), else None."""
+    rx = re.compile(rf"^{re.escape(key)}:\s*([\[{{].*?[\]}}])\s*(#.*)?$")
+    for i, ln in enumerate(lines):
+        m = rx.match(ln)
+        if m:
+            return i, m.group(1), m.group(2) or ""
+    return None
+
+
+def _block_lines(value: Any, indent: int) -> List[str]:
+    """Render a parsed mapping or list as block-style YAML lines at `indent` spaces."""
+    pad = " " * indent
+    out: List[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, (dict, list)) and v:
+                out.append(f"{pad}{_scalar(str(k))}:")
+                out.extend(_block_lines(v, indent + 2))
+            else:
+                rendered = f"{float(v):g}" if isinstance(v, float) else _scalar(v) if not isinstance(v, (dict, list)) else ("{}" if isinstance(v, dict) else "[]")
+                out.append(f"{pad}{_scalar(str(k))}: {rendered}")
+    elif isinstance(value, list):
+        for v in value:
+            out.append(f"{pad}- {_scalar(v)}")
+    return out
+
+
+def expand_flow_value(lines: List[str], key: str) -> List[str]:
+    """Rewrite a top-level `key: {...}` / `key: [...]` line into block form so the block editors can
+    extend it in place instead of appending a second top-level key. Comments on the line are kept;
+    lines are returned unchanged when the key is absent or already in block form."""
+    found = _flow_value_line(lines, key)
+    if found is None:
+        return lines
+    idx, flow, comment = found
+    try:
+        value = yaml.safe_load(flow)
+    except yaml.YAMLError:
+        return lines
+    header = f"{key}:" + (f"  {comment}" if comment else "")
+    body = _block_lines(value, 2) if isinstance(value, (dict, list)) else []
+    return lines[:idx] + [header] + body + lines[idx + 1 :]
+
+
 def _top_level_block(lines: Sequence[str], key: str) -> Tuple[int, int]:
     """(key line index, index after the block) for a top-level `key:` in a block-style file."""
     start = next((i for i, ln in enumerate(lines) if re.match(rf"^{re.escape(key)}:\s*(#.*)?$", ln)), None)
@@ -706,6 +774,7 @@ def add_term(settings: Settings, term: str) -> Tuple[str, Optional[Path]]:
         raise TrackError(f"refused: {term!r} is already a watchlist term")
 
     def transform(lines: List[str]) -> List[str]:
+        lines = expand_flow_value(list(lines), "watchlist_terms")  # `watchlist_terms: []` becomes a block first
         try:
             start, end = _top_level_block(lines, "watchlist_terms")
         except KeyError:
@@ -788,7 +857,9 @@ def set_priority(settings: Settings, kind: str, key: str, weight: Optional[float
     value = f"{float(weight):g}" if weight is not None else ""
 
     def transform(lines: List[str]) -> List[str]:
-        out = list(lines)
+        # the shipped radar.yaml carries `priorities: {}`: rewrite that line into block form and edit it in
+        # place, never append a second top-level `priorities:` key (PyYAML would keep only the last one)
+        out = expand_flow_value(list(lines), "priorities")
         try:
             start, end = _top_level_block(out, "priorities")
         except KeyError:
@@ -997,7 +1068,7 @@ def match_ticker(
             if qtoks[0] not in ttoks:
                 # the distinctive first word differs ("Azenta Life Sciences" vs "ENDRA Life Sciences"): show it, never write it
                 s = min(s, min_confidence - 0.01)
-        if s >= 0.5:
+        if s >= TICKER_CANDIDATE_FLOOR:
             scored.append((round(s, 3), r))
     scored.sort(key=lambda x: (-x[0], len(x[1]["title"]), len(x[1]["ticker"]), x[1]["ticker"]))
     top = scored[:5]

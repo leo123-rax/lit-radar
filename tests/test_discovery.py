@@ -271,8 +271,8 @@ def test_refresh_status_transitions_and_promote(tmp_path, gz):
     with pytest.raises(ValueError):
         d.set_status(st, "proteolyze", "bogus")
 
-    # promote without a track module -> yaml line, status promoted, promotion recorded
-    res = d.promote(st, "proteolyze", ticker=None, type_="pharma", add_company=None)
+    # promote with the write skipped on purpose (add_company=False) -> yaml line, status promoted, promotion recorded
+    res = d.promote(st, "proteolyze", ticker=None, type_="pharma", add_company=False)
     assert res["tracked"] is False and res["yaml"].startswith("- {id: proteolyze-therapeutics")
     assert "ticker: private" in res["yaml"] and "type: pharma" in res["yaml"] and "domains: [proteolyze.com]" in res["yaml"]
     assert d.get_candidate(st, "proteolyze")["status"] == "promoted"
@@ -284,6 +284,15 @@ def test_refresh_status_transitions_and_promote(tmp_path, gz):
     calls = []
     res = d.promote(st, "acme spatial", ticker="ACME", type_="tools", add_company=lambda entry: calls.append(entry))
     assert res["tracked"] is True and calls[0]["ticker"] == "ACME" and calls[0]["id"] == "acme-spatial-inc"
+    # a hook that refuses the entry -> PromotionError, status untouched
+    d.set_status(st, "acme spatial", "new")
+
+    def refuse(entry):
+        raise RuntimeError("refused: id 'acme-spatial-inc' already exists")
+
+    with pytest.raises(d.PromotionError, match="already exists"):
+        d.promote(st, "acme spatial", ticker="ACME", type_="tools", add_company=refuse)
+    assert d.get_candidate(st, "acme spatial")["status"] == "new"
     # reset back to new
     assert d.set_status(st, "acme spatial", "new")["status"] == "new"
 
@@ -299,6 +308,49 @@ def test_yaml_line_quotes_special_characters():
     assert line == '- {id: x, name: "Acme: Bio, Inc.", ticker: private, type: tools, watch_news: false, domains: [acme.bio], aliases: [Acme Bio]}'
 
 
+def test_promote_writes_the_company_through_track_add_company(tmp_path, monkeypatch):
+    """Integration: promote -> litradar.track.add_company (real signature) -> companies.yaml copy -> Gazetteer reload."""
+    import shutil
+
+    import yaml
+
+    from litradar.config import DEFAULT_CONFIG_DIR, Settings
+    from litradar.extract.gazetteer import Gazetteer
+
+    cfg = tmp_path / "config"
+    shutil.copytree(DEFAULT_CONFIG_DIR, cfg)
+    monkeypatch.setenv("LITRADAR_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("LITRADAR_CACHE_DIR", str(tmp_path / ".cache"))
+    monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "d.sqlite"))
+    st = _seed(tmp_path)
+    d.refresh(st, Gazetteer.from_yaml(yaml.safe_load((cfg / "companies.yaml").read_text(encoding="utf-8")), "company"),
+              "2026-10-01", "2026-10-17", today="2026-10-17")
+    before = (cfg / "companies.yaml").read_text(encoding="utf-8")
+
+    res = d.promote(st, "proteolyze", ticker=None, type_="diagnostics")  # settings resolved from LITRADAR_CONFIG_DIR
+    assert res["tracked"] is True and res["error"] == "" and res["entry"]["id"] == "proteolyze-therapeutics"
+    after = (cfg / "companies.yaml").read_text(encoding="utf-8")
+    assert after.splitlines()[:-1] == before.splitlines()  # exactly one line appended, nothing else touched
+    assert after.splitlines()[-1].startswith("- {id: proteolyze-therapeutics, name: Proteolyze Therapeutics, ticker: private, type: diagnostics, watch_news: false, domains: [proteolyze.com]")
+    assert d.get_candidate(st, "proteolyze")["status"] == "promoted" and d.get_candidate(st, "proteolyze")["promotion"]["tracked"] is True
+    # the written file loads through the normal config path and the gazetteer matches the new company
+    settings = Settings.from_env(config_dir=cfg)
+    gz = Gazetteer.from_yaml(settings.yaml("companies"), "company")
+    assert {m.entity_id for m in gz.find("Reagents were a gift from Proteolyze Therapeutics.")} == {"proteolyze-therapeutics"}
+    assert (DEFAULT_CONFIG_DIR / "companies.yaml").read_text(encoding="utf-8").count("proteolyze") == 0  # the repo config is untouched
+    # promoting it again is refused by the gazetteer check: PromotionError, status of the candidate unchanged
+    d.set_status(st, "proteolyze", "new")
+    with pytest.raises(d.PromotionError, match="already exists"):
+        d.promote(st, "proteolyze", ticker=None, type_="diagnostics")
+    assert d.get_candidate(st, "proteolyze")["status"] == "new"
+    assert (cfg / "companies.yaml").read_text(encoding="utf-8") == after
+    # an unknown type is a refused write too, not a silent success
+    with pytest.raises(d.PromotionError, match="type must be one of"):
+        d.promote(st, "acme spatial", ticker="ACME", type_="bogus")
+    assert d.get_candidate(st, "acme spatial")["status"] == "new"
+    st.close()
+
+
 def test_sec_ticker_hint_offline(tmp_path):
     rows = [(d.normalize_name(t), tk, t) for tk, t in (("ILMN", "ILLUMINA, INC."), ("TXG", "10x Genomics, Inc."), ("RLAY", "Relay Therapeutics, Inc."), ("ARCT", "Arcturus Therapeutics Holdings Inc."))]
     assert d.sec_ticker_hint("Illumina", tickers=rows)["ticker"] == "ILMN"
@@ -306,6 +358,12 @@ def test_sec_ticker_hint_offline(tmp_path):
     assert d.sec_ticker_hint("Arcturus Therapeutics", tickers=rows)["ticker"] == "ARCT"
     assert d.sec_ticker_hint("Proteolyze Therapeutics", tickers=rows) is None
     assert d.sec_ticker_hint("Meta", tickers=rows) is None  # too short to match fuzzily
+    # seen live: 'Arda Therapeutics' (private) was hinted as APRE 'Aprea Therapeutics, Inc.' at 0.91 on edit distance
+    # alone; the brand word has to agree before characters are compared
+    rows2 = rows + [(d.normalize_name("Aprea Therapeutics, Inc."), "APRE", "Aprea Therapeutics, Inc.")]
+    assert d.sec_ticker_hint("Arda Therapeutics", tickers=rows2) is None
+    assert d.sec_ticker_hint("Aprea Therapeutics", tickers=rows2)["ticker"] == "APRE"
+    assert d.sec_ticker_hint("Aprea Therapeutic", tickers=rows2)["ticker"] == "APRE"  # same brand word, a typo in the suffix
 
     class FakeHttp:
         def get_json(self, url):
@@ -328,10 +386,15 @@ def test_sec_ticker_hint_offline(tmp_path):
 
 # ---- CLI --------------------------------------------------------------------------------------
 def test_cli_candidates_roundtrip(tmp_path, monkeypatch, capsys):
+    import shutil
+
     from litradar.cli import main
+    from litradar.config import DEFAULT_CONFIG_DIR
 
     st = _seed(tmp_path)
     st.close()
+    shutil.copytree(DEFAULT_CONFIG_DIR, tmp_path / "config")  # promote writes companies.yaml: never the repo's copy
+    monkeypatch.setenv("LITRADAR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("LITRADAR_DB", str(tmp_path / "d.sqlite"))
     monkeypatch.setenv("LITRADAR_CACHE_DIR", str(tmp_path / ".cache"))
     assert main(["candidates", "refresh", "--since", "2026-10-01", "--until", "2026-10-17"]) == 0
@@ -344,7 +407,22 @@ def test_cli_candidates_roundtrip(tmp_path, monkeypatch, capsys):
     assert "status -> ignored" in capsys.readouterr().out
     assert main(["candidates", "promote", "proteolyze", "--type", "pharma"]) == 0
     out = capsys.readouterr().out
-    assert "status -> promoted" in out and "- {id: proteolyze-therapeutics" in out
+    assert "status -> promoted" in out and "entry handed to litradar.track.add_company" in out
+    written = (tmp_path / "config" / "companies.yaml").read_text(encoding="utf-8")
+    assert written.rstrip().splitlines()[-1].startswith("- {id: proteolyze-therapeutics, name: Proteolyze Therapeutics, ticker: private, type: pharma")
+    # a second promotion of the same company is refused by the gazetteer write: non-zero exit, status untouched
+    assert main(["candidates", "reset", "proteolyze"]) == 0
+    capsys.readouterr()
+    assert main(["candidates", "promote", "proteolyze", "--type", "pharma"]) == 2
+    err = capsys.readouterr().err
+    assert "not promoted" in err and "already exists" in err
+    assert main(["candidates", "show", "proteolyze", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "new"
+    assert main(["candidates", "promote", "proteolyze", "--type", "pharma", "--ticker", "PRTZ"]) == 2  # still the same id
+    capsys.readouterr()
+    (tmp_path / "config" / "companies.yaml").write_text(written.replace("proteolyze-therapeutics", "old-proteolyze").replace("Proteolyze Therapeutics", "Old Proteolyze").replace("proteolyze.com", "old.example"), encoding="utf-8")
+    assert main(["candidates", "promote", "proteolyze", "--type", "pharma"]) == 0
+    capsys.readouterr()
     assert main(["candidates", "show", "proteolyze", "--json"]) == 0
     row = json.loads(capsys.readouterr().out)
     assert row["status"] == "promoted" and row["promotion"]["entry"]["type"] == "pharma"

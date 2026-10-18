@@ -1131,34 +1131,63 @@ def build_entry(cand: Dict[str, Any], ticker: Optional[str] = None, type_: Optio
             "watch_news": False, "domains": list(cand.get("domains", [])), "aliases": aliases[:6]}
 
 
-def promote(store_or_conn, name: str, ticker: Optional[str] = None, type_: Optional[str] = None, add_company=None) -> Dict[str, Any]:
-    """Mark a candidate promoted. Calls litradar.track.add_company(entry) when that module exists,
-    otherwise returns the companies.yaml line to paste. Never raises on the hand-off itself."""
+class PromotionError(ValueError):
+    """The gazetteer write behind `candidates promote` was refused (duplicate id, alias collision, bad type, ...).
+
+    A ValueError so the command layer prints the message and exits non-zero; the candidate keeps its status."""
+
+
+def _track_add_company(entry: Dict[str, Any], settings=None) -> Tuple[Dict[str, Any], Optional[Path]]:
+    """Hand a built entry to litradar.track.add_company with its real keyword signature."""
+    from . import track as _track
+    from .config import Settings
+
+    settings = settings or Settings.from_env()
+    return _track.add_company(
+        settings,
+        entry["name"],
+        ticker=entry.get("ticker") or "",
+        type_=entry.get("type") or "tools",
+        aliases=list(entry.get("aliases") or []),
+        domains=list(entry.get("domains") or []),
+        watch_news=bool(entry.get("watch_news", False)),
+        entry_id=entry.get("id") or "",
+    )
+
+
+def promote(store_or_conn, name: str, ticker: Optional[str] = None, type_: Optional[str] = None, add_company=None, settings=None) -> Dict[str, Any]:
+    """Write a candidate to companies.yaml and mark it promoted.
+
+    The hand-off goes to ``litradar.track.add_company`` (called with its real keyword signature, against
+    `settings` or ``Settings.from_env()``) when `add_company` is None; a callable `add_company` is used
+    instead (it receives the entry dict); ``add_company=False`` skips the write and only returns the
+    flow-style line to paste. The status flips to ``promoted`` only when the write succeeded (or was
+    skipped on purpose): a refused write raises PromotionError and leaves the candidate as it was.
+    """
     conn = _conn(store_or_conn)
     cand = get_candidate(conn, name)
     if cand is None:
         raise LookupError(f"no candidate matches {name!r}")
     entry = build_entry(cand, ticker, type_)
-    fn = add_company
-    if fn is None:
-        try:
-            from . import track as _track  # type: ignore
-
-            fn = getattr(_track, "add_company", None)
-        except Exception:  # pragma: no cover - the module is optional
-            fn = None
     tracked = False
     error = ""
-    if fn is not None:
+    if add_company is not False:
         try:
-            try:
-                fn(entry)
-            except TypeError:
-                fn(**entry)
+            if add_company is None:
+                _track_add_company(entry, settings)
+            else:
+                try:
+                    add_company(entry)
+                except TypeError:
+                    add_company(**entry)
             tracked = True
-        except Exception as exc:  # the hand-off failing must not block the status change
+        except Exception as exc:  # noqa: BLE001 - every failure must surface; the status must not flip
             error = f"{type(exc).__name__}: {exc}"
-            log.warning("track.add_company failed: %s", error)
+            log.warning("track.add_company failed for %r: %s", entry.get("name"), error)
+            raise PromotionError(
+                f"{cand['display_name']}: not promoted; litradar.track.add_company refused the entry ({error}). "
+                f"Fix the conflict (or pass --ticker/--type) and retry, or add the line by hand: {yaml_line(entry)}"
+            ) from exc
     line = yaml_line(entry)
     payload = _loads(conn.execute("SELECT evidence_json FROM candidate_companies WHERE name_norm=?", (cand["name_norm"],)).fetchone()[0], {})
     if not isinstance(payload, dict):
@@ -1216,11 +1245,22 @@ def load_sec_tickers(http=None, cache_dir: Optional[Path] = None, contact_email:
     return rows
 
 
+def _brand_word(name: str) -> str:
+    """The first distinctive word of a company name, lower-cased ('Arda Therapeutics' -> 'arda')."""
+    words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower()) if w not in {"the"}]
+    return words[0] if words else ""
+
+
 def sec_ticker_hint(name: str, tickers: Optional[Sequence[Tuple[str, str, str]]] = None, **load_kwargs) -> Optional[Dict[str, Any]]:
-    """Best fuzzy match of a candidate name against SEC registrants: {'ticker', 'title', 'match'} or None."""
+    """Best fuzzy match of a candidate name against SEC registrants: {'ticker', 'title', 'match'} or None.
+
+    The brand word (first word) must agree before edit distance is consulted: 'Arda Therapeutics' and
+    'Aprea Therapeutics' share a sector suffix and score 0.91 on characters alone, but they are different
+    companies, so no hint is offered for them."""
     key = normalize_name(name)
     if len(key) < 4:
         return None
+    brand = _brand_word(name)
     rows = tickers if tickers is not None else load_sec_tickers(**load_kwargs)
     best: Optional[Tuple[float, str, str]] = None
     for norm, ticker, title in rows:
@@ -1228,6 +1268,8 @@ def sec_ticker_hint(name: str, tickers: Optional[Sequence[Tuple[str, str, str]]]
             continue
         if norm == key:
             ratio = 1.0
+        elif brand and _brand_word(title) != brand:
+            continue  # same sector word, different company: never a hint
         elif len(key) >= 5 and (norm.startswith(key) or key.startswith(norm)) and min(len(norm), len(key)) / max(len(norm), len(key)) >= 0.6:
             ratio = 0.9
         elif abs(len(norm) - len(key)) <= 3:

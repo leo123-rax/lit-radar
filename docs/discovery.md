@@ -68,10 +68,14 @@ while ignored and promoted rows are decisions and always survive. `<name>` may b
 normalised key or any unique substring.
 
 `promote` builds a gazetteer entry (`id` slug, display name, ticker or `private`, type, `watch_news: false`,
-the e-mail domains seen, the other spellings as aliases). If `litradar.track.add_company` exists it is called
-with that entry (`add_company(entry)`, falling back to `add_company(**entry)`); otherwise the command prints the
-flow-style line to paste under `entries:` in `config/companies.yaml`, after which `litradar rematch` picks the
-company up in the stored papers:
+the e-mail domains seen, the other spellings as aliases) and hands it to `litradar.track.add_company`, which
+appends one flow-style line to `config/companies.yaml` (the directory `LITRADAR_CONFIG_DIR` points at, else
+the repository's `config/`), backs the file up first and validates the result. The status flips to `promoted`
+**only when that write succeeded**; a refused write (an id that already exists, a name or alias another entry
+claims, an unknown `--type`) is reported with the reason, the command exits non-zero and the candidate stays
+`new`. Fix the conflict (`--ticker`, `--type`, or `litradar untrack` the other entry) and retry, or paste the
+printed line under `entries:` by hand. After a promotion, `litradar rematch` picks the company up in the
+stored papers:
 
 ```
 - {id: acme-spatial-inc, name: Acme Spatial Inc, ticker: private, type: tools, watch_news: false, domains: [acmespatial.com], aliases: [Acme Spatial]}
