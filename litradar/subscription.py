@@ -237,6 +237,28 @@ def extract_article(html_text: str, publisher: str) -> Dict[str, Any]:
     return out
 
 
+
+def _clear_stale_profile_lock(pdir: Path) -> None:
+    """Remove Chromium's Singleton* lock files when no live process uses this profile (a killed browser leaves them)."""
+    import subprocess
+
+    locks = [pdir / n for n in ("SingletonLock", "SingletonSocket", "SingletonCookie")]
+    if not any(lk.exists() or lk.is_symlink() for lk in locks):
+        return
+    try:
+        out = subprocess.run(["pgrep", "-f", f"user-data-dir={pdir}"], capture_output=True, text=True, timeout=5)
+        if out.stdout.strip():
+            return  # a live browser really owns the profile
+    except (OSError, subprocess.SubprocessError):
+        return
+    for lk in locks:
+        try:
+            lk.unlink()
+        except OSError:
+            pass
+    log.info("removed stale browser profile lock files in %s", pdir)
+
+
 # ---------------------------------------------------------------------------------------------- browser session
 @dataclass
 class Session:
@@ -255,7 +277,9 @@ class Session:
             except ImportError as exc:  # pragma: no cover
                 raise RuntimeError("Playwright is not installed: pip install 'lit-radar[browser]' && python -m playwright install chromium") from exc
             self._pw = sync_playwright().start()
-        self._context = self._pw.chromium.launch_persistent_context(str(profile_dir(self.settings)), headless=self.headless)
+        pdir = profile_dir(self.settings)
+        _clear_stale_profile_lock(pdir)
+        self._context = self._pw.chromium.launch_persistent_context(str(pdir), headless=self.headless)
         return self
 
     def __exit__(self, *exc: Any) -> None:
