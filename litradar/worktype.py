@@ -14,10 +14,14 @@ as `nejmc`, editorials as `nejme`, perspectives as `nejmp`), the venue name, the
 ("To the Editor:", "Reply to ...", "Supplementary Figure 2 from ...", "MassIVE MSV...", "github.com/..."). On a
 general repository (Zenodo, figshare) an explicit `work_type` of ``preprint`` is trusted and the record stays a
 paper; a data, software or protocol repository (MassIVE, PRIDE, Dryad, Code Ocean, protocols.io ...) never
-holds a research paper, whatever OpenAlex calls the record.
+holds a research paper, whatever OpenAlex calls the record. Instrument-facility data repositories (the DOE
+Environmental Molecular Sciences Laboratory records minted under the PNNL prefix, "Data for EMSL Project NNNNN from
+<month>") are a `facility_deposit`: a bulk re-dated record per project-month that credits every facility user as an
+author, so it must neither count as a paper nor as a tracked researcher's new work.
 
 `sql_predicate()` is the same rule as one SQL expression over the `papers` table (used by `Store.search` to put
-research papers first); the two are built from the same constants so they cannot drift apart.
+research papers first); the two are built from the same constants so they cannot drift apart. `labels=` restricts
+either side to some labels (`DEPOSIT_LABELS` is the set the tracked-author gate and the maintenance purge use).
 
 Stdlib only; nothing here reads the database.
 """
@@ -26,7 +30,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 # OpenAlex `type` values that are never research papers -> label
 NON_RESEARCH_WORK_TYPES: Dict[str, str] = {
@@ -60,6 +64,7 @@ REPOSITORY_DOI_PREFIXES: Dict[str, str] = {
     "10.24433": "software",     # Code Ocean
     "10.82595": "software",     # SciLifeLab Serve
     "10.17504": "protocol",     # protocols.io
+    "10.25582": "facility_deposit",  # DOE PNNL / EMSL instrument-facility data records
 }
 
 # venue (OpenAlex source display name) substrings, lower-case -> label; checked after the DOI prefix
@@ -77,11 +82,18 @@ REPOSITORY_VENUES: Dict[str, str] = {
     "brain image library": "dataset",
     "code ocean": "software",
     "protocols.io": "protocol",
+    "(pnnl) repository": "facility_deposit",  # "DOE Pacific Northwest National Laboratory (PNNL) Repository"
+    "environmental molecular sciences laboratory": "facility_deposit",
 }
 
 # general-purpose repositories host preprints too, so an explicit work_type of `preprint` is trusted there; a data,
 # software or protocol repository never holds a research paper, whatever OpenAlex calls the record
 GENERAL_REPOSITORY_LABELS = frozenset({"deposit"})
+
+# labels of records that are deposits (data, code, protocols, supplementary files, facility data records) rather than
+# writing: a deposit credits every depositor or facility user as an author, so it never yields a tracked-author hit
+# and never counts as a paper in the concept counts. Letters, editorials and notices are writing and are not in here.
+DEPOSIT_LABELS = frozenset({"dataset", "software", "deposit", "protocol", "supplement", "facility_deposit"})
 
 # NEJM article-type codes inside the DOI
 NEJM_DOI_TYPES: Dict[str, str] = {"10.1056/nejmc": "letter", "10.1056/nejme": "editorial", "10.1056/nejmp": "editorial"}
@@ -94,10 +106,12 @@ LETTER_TITLE_RE = re.compile(
 EDITORIAL_TITLE_RE = re.compile(r"^\s*editorial\s*[:—–-]", re.I)
 SUPPLEMENT_TITLE_RE = re.compile(r"^\s*supplementary\s+(?:figure|table|data|material|method|information|file|appendix)s?\b.*\bfrom\b", re.I)
 DATASET_TITLE_RE = re.compile(r"^\s*massive\s+msv\d+\b", re.I)
+FACILITY_TITLE_RE = re.compile(r"^\s*data\s+for\s+emsl\s+project\s+\d+\b", re.I)
 SOFTWARE_TITLE_RE = re.compile(r"^\s*(?:https?://)?(?:www\.)?(?:github|gitlab|bitbucket)\.(?:com|org)/", re.I)
 
 PHRASES: Dict[str, str] = {
     "dataset": "dataset deposit",
+    "facility_deposit": "instrument-facility data deposit",
     "software": "software deposit",
     "deposit": "repository deposit",
     "protocol": "protocol deposit",
@@ -147,6 +161,8 @@ def classify(title: str = "", abstract: str = "", doi: str = "", journal: str = 
         if needle in venue and not (wt == "preprint" and lab in GENERAL_REPOSITORY_LABELS):
             return RecordType(lab, f"venue {needle}")
     title = title or ""
+    if FACILITY_TITLE_RE.search(title):
+        return RecordType("facility_deposit", "title")
     if DATASET_TITLE_RE.search(title):
         return RecordType("dataset", "title")
     if SOFTWARE_TITLE_RE.search(title):
@@ -160,44 +176,66 @@ def classify(title: str = "", abstract: str = "", doi: str = "", journal: str = 
     return None
 
 
+def is_deposit(rtype: Optional[RecordType]) -> bool:
+    """True when a `classify` result is a deposit (`DEPOSIT_LABELS`): data, code, protocol, supplementary file or
+    instrument-facility record. None (a research paper) and the writing labels (letter, editorial, notice ...) are False."""
+    return rtype is not None and rtype.label in DEPOSIT_LABELS
+
+
 def _sql_str(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def sql_predicate(alias: str = "p") -> str:
+# title LIKE patterns per label (narrower than the regular expressions; the Python side is the reference)
+_TITLE_LIKE: Dict[str, Tuple[str, ...]] = {
+    "facility_deposit": ("data for emsl project %",),
+    "dataset": ("massive msv%",),
+    "software": ("github.com/%", "https://github.com/%", "http://github.com/%", "gitlab.com/%", "https://gitlab.com/%"),
+    "supplement": ("supplementary % from %",),
+    "letter": ("reply to%", "response to%", "in reply to%", "authors' reply to%", "comment on%", "commentary on%", "correspondence%",
+               "letter to the editor%", "letter:%"),
+    "editorial": ("editorial:%", "editorial -%", "editorial —%"),
+}
+
+
+def sql_predicate(alias: str = "p", labels: Optional[Iterable[str]] = None) -> str:
     """A 0/1 SQL expression over a `papers` row (`alias`) that is 1 for the records `classify` would flag.
 
     The same rules, written for the query planner: the `work_type` list, the repository DOI prefixes and venue
     substrings (both skipped when work_type is `preprint`), the title cues and the letter cues. Title cues are
     LIKE patterns, so they are a little narrower than the regular expressions (`github.com/...` without a scheme,
-    `Supplementary ... from ...`); the Python side is the reference."""
+    `Supplementary ... from ...`); the Python side is the reference. `labels` restricts the expression to the rules
+    that produce those labels (`DEPOSIT_LABELS` for the deposit-only form); None means every rule."""
+    want = None if labels is None else frozenset(labels)
+
+    def keep(label: str) -> bool:
+        return want is None or label in want
+
     a = alias
     wt = f"lower(coalesce(json_extract({a}.extra_json, '$.work_type'), ''))"
     doi = f"lower(coalesce({a}.doi, ''))"
     venue = f"lower(coalesce({a}.journal, ''))"
     title = f"lower(coalesce({a}.title, ''))"
     abstract = f"lower(coalesce({a}.abstract, ''))"
-    types = ", ".join(_sql_str(t) for t in NON_RESEARCH_WORK_TYPES)
-    nejm = " OR ".join(f"{doi} LIKE {_sql_str(code + '%')}" for code in NEJM_DOI_TYPES)
+    clauses: List[str] = []
+    types = ", ".join(_sql_str(t) for t, lab in NON_RESEARCH_WORK_TYPES.items() if keep(lab))
+    if types:
+        clauses.append(f"{wt} IN ({types})")
+    clauses += [f"{doi} LIKE {_sql_str(code + '%')}" for code, lab in NEJM_DOI_TYPES.items() if keep(lab)]
     general = " OR ".join(
-        [f"{doi} LIKE {_sql_str(p + '/%')}" for p, lab in REPOSITORY_DOI_PREFIXES.items() if lab in GENERAL_REPOSITORY_LABELS]
-        + [f"{venue} LIKE {_sql_str('%' + v + '%')}" for v, lab in REPOSITORY_VENUES.items() if lab in GENERAL_REPOSITORY_LABELS]
+        [f"{doi} LIKE {_sql_str(p + '/%')}" for p, lab in REPOSITORY_DOI_PREFIXES.items() if lab in GENERAL_REPOSITORY_LABELS and keep(lab)]
+        + [f"{venue} LIKE {_sql_str('%' + v + '%')}" for v, lab in REPOSITORY_VENUES.items() if lab in GENERAL_REPOSITORY_LABELS and keep(lab)]
     )
-    specific = " OR ".join(
-        [f"{doi} LIKE {_sql_str(p + '/%')}" for p, lab in REPOSITORY_DOI_PREFIXES.items() if lab not in GENERAL_REPOSITORY_LABELS]
-        + [f"{venue} LIKE {_sql_str('%' + v + '%')}" for v, lab in REPOSITORY_VENUES.items() if lab not in GENERAL_REPOSITORY_LABELS]
-    )
-    titles = " OR ".join(
-        f"{title} LIKE {_sql_str(pat)}"
-        for pat in ("massive msv%", "github.com/%", "https://github.com/%", "http://github.com/%", "gitlab.com/%", "https://gitlab.com/%",
-                    "supplementary % from %", "reply to%", "response to%", "in reply to%", "authors' reply to%", "comment on%",
-                    "commentary on%", "correspondence%", "letter to the editor%", "letter:%", "editorial:%", "editorial -%", "editorial —%")
-    )
-    letters = f"{abstract} LIKE 'to the editor%' OR {abstract} LIKE 'dear editor%'"
-    return (
-        f"(CASE WHEN {wt} IN ({types}) OR {nejm} OR {specific} OR ({wt} <> 'preprint' AND ({general})) OR {titles} OR {letters} "
-        f"THEN 1 ELSE 0 END)"
-    )
+    clauses += [f"{doi} LIKE {_sql_str(p + '/%')}" for p, lab in REPOSITORY_DOI_PREFIXES.items() if lab not in GENERAL_REPOSITORY_LABELS and keep(lab)]
+    clauses += [f"{venue} LIKE {_sql_str('%' + v + '%')}" for v, lab in REPOSITORY_VENUES.items() if lab not in GENERAL_REPOSITORY_LABELS and keep(lab)]
+    if general:
+        clauses.append(f"({wt} <> 'preprint' AND ({general}))")
+    clauses += [f"{title} LIKE {_sql_str(pat)}" for lab, pats in _TITLE_LIKE.items() if keep(lab) for pat in pats]
+    if keep("letter"):
+        clauses += [f"{abstract} LIKE 'to the editor%'", f"{abstract} LIKE 'dear editor%'"]
+    if not clauses:
+        return "(0)"
+    return f"(CASE WHEN {' OR '.join(clauses)} THEN 1 ELSE 0 END)"
 
 
 def record_type_of(row: Dict[str, object]) -> Optional[RecordType]:
@@ -213,4 +251,4 @@ def record_type_of(row: Dict[str, object]) -> Optional[RecordType]:
                     str(row.get("journal") or ""), str(wt or ""))
 
 
-__all__: Tuple[str, ...] = ("RecordType", "classify", "sql_predicate", "record_type_of", "PHRASES")
+__all__: Tuple[str, ...] = ("RecordType", "classify", "sql_predicate", "record_type_of", "is_deposit", "DEPOSIT_LABELS", "PHRASES")

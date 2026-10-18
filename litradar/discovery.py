@@ -231,6 +231,23 @@ class Candidate:
         return min(dates) if dates else ""
 
     @property
+    def first_seen_by_channel(self) -> Dict[str, str]:
+        """Earliest evidence date per channel (`evidence_channel`): which layer of the store first showed the name."""
+        out: Dict[str, str] = {}
+        for e in self.evidence:
+            if e.date:
+                ch = evidence_channel(e.evidence_type)
+                if ch not in out or e.date < out[ch]:
+                    out[ch] = e.date
+        return out
+
+    @property
+    def first_seen_channel(self) -> str:
+        """The channel that carries the earliest evidence ('' without dated evidence)."""
+        by = self.first_seen_by_channel
+        return min(by, key=lambda ch: (by[ch], ch)) if by else ""
+
+    @property
     def last_seen(self) -> str:
         dates = [e.date for e in self.evidence if e.date]
         return max(dates) if dates else ""
@@ -942,6 +959,66 @@ def group_candidates(evidence: Iterable[Evidence]) -> Dict[str, Candidate]:
 
 HIGH_PRECISION_TYPES = {"email_domain", "openalex_company", "news:nih-reporter", "news:clinicaltrials", "news:fda"}
 
+# evidence types grouped into the channel (layer of the store) that produced them. Each channel exists only for the
+# records whose text or metadata carries it, so each has its own history start (`channel_history`): competing-interest
+# and acknowledgement statements and author e-mails come from parsed full text and begin the day parsing began;
+# funding statements and company-typed affiliations ride on metadata and reach back through the backfill.
+EVIDENCE_CHANNELS: Dict[str, Tuple[str, ...]] = {
+    "coi statements": ("coi",),
+    "funding statements": ("funding",),
+    "acknowledgements": ("ack",),
+    "author e-mails": ("email_domain",),
+    "affiliations": ("openalex_company",),
+    "news": ("news:nih-reporter", "news:clinicaltrials", "news:fda", "news:press"),
+}
+
+
+def evidence_channel(evidence_type: str) -> str:
+    """The channel label of an evidence type (`EVIDENCE_CHANNELS`); unknown `news:*` types are 'news', others themselves."""
+    for label, types in EVIDENCE_CHANNELS.items():
+        if evidence_type in types:
+            return label
+    return "news" if str(evidence_type).startswith("news:") else str(evidence_type)
+
+
+def channel_history(conn: sqlite3.Connection) -> Dict[str, Optional[str]]:
+    """Earliest event date (publication date, else ingestion day) of the records each channel is read from: papers
+    with a stored COI / funding / acknowledgement section or author e-mails, 'unlisted:' company mentions, news items.
+    None when the channel has no records at all. A first appearance in a channel is only as old as the channel."""
+    event = "COALESCE(NULLIF(p.pub_date,''), substr(p.first_seen,1,10))"
+    out: Dict[str, Optional[str]] = {}
+
+    def one(sql: str) -> Optional[str]:
+        try:
+            row = conn.execute(sql).fetchone()
+        except sqlite3.Error:
+            return None
+        return str(row[0])[:10] if row and row[0] else None
+
+    for label, key in (("coi statements", "coi"), ("funding statements", "funding"), ("acknowledgements", "ack")):
+        out[label] = one(f"SELECT MIN({event}) FROM papers p WHERE json_valid(p.sections_json) AND COALESCE(json_extract(p.sections_json, '$.{key}'), '') != ''")
+    out["author e-mails"] = one(
+        f"SELECT MIN({event}) FROM papers p WHERE json_valid(p.extra_json) AND json_type(p.extra_json, '$.emails') = 'array' AND json_array_length(p.extra_json, '$.emails') > 0")
+    out["affiliations"] = one(f"SELECT MIN({event}) FROM mentions m JOIN papers p ON p.id = m.paper_id WHERE m.entity_id LIKE 'unlisted:%'")
+    out["news"] = one("SELECT MIN(COALESCE(NULLIF(substr(published,1,10),''), substr(first_seen,1,10))) FROM news_items")
+    return out
+
+
+def short_history_channels(conn: sqlite3.Connection, since: str, until: str) -> Dict[str, str]:
+    """{channel: history start} for the channels whose history does not cover the comparison period (the stretch of
+    the window's length right before `since`), by the trends module's `period_coverage`: a first appearance dated
+    inside the window from such a channel may be the channel's start, not the name's."""
+    from .trends import period_coverage
+
+    d0, d1 = date.fromisoformat(since[:10]), date.fromisoformat(until[:10])
+    length = max(1, (d1 - d0).days + 1)
+    prev_start, prev_end = (d0 - timedelta(days=length)).isoformat(), (d0 - timedelta(days=1)).isoformat()
+    out: Dict[str, str] = {}
+    for label, start in channel_history(conn).items():
+        if start and period_coverage(start, prev_start, prev_end)["partial"]:
+            out[label] = start
+    return out
+
 
 def signal_family(evidence_type: str) -> str:
     """coi / funding / ack are one family: the same sentence is often stored in two of them."""
@@ -998,6 +1075,8 @@ def _row_to_dict(row: Tuple, cols: Sequence[str]) -> Dict[str, Any]:
     d["domains"] = payload.get("domains", []) if isinstance(payload, dict) else []
     d["promotion"] = payload.get("promotion") if isinstance(payload, dict) else None
     d["confident"] = payload.get("confident", True) if isinstance(payload, dict) else True
+    d["first_seen_by_channel"] = payload.get("first_seen_by_channel", {}) if isinstance(payload, dict) else {}
+    d["first_seen_channel"] = payload.get("first_seen_channel", "") if isinstance(payload, dict) else ""
     return d
 
 
@@ -1022,6 +1101,8 @@ def refresh(store_or_conn, gazetteer, since: str, until: Optional[str] = None, t
             "variants": cand.variants,
             "domains": cand.domains,
             "confident": any(e.confident for e in cand.evidence),
+            "first_seen_by_channel": cand.first_seen_by_channel,
+            "first_seen_channel": cand.first_seen_channel,
             "refreshed_at": now,
             "window": [since, until],
         }
@@ -1294,8 +1375,24 @@ def _md_cell(s: Any) -> str:
     return str(s).replace("|", "/").replace("\n", " ").strip()
 
 
+def first_seen_label(row: Dict[str, Any], short: Dict[str, str]) -> str:
+    """'2026-10-14 (coi statements)' for a candidate whose earliest evidence comes from a channel with enough history;
+    '≤ 2026-10-10 (coi statements; parsed since then)' when that channel's history is shorter than the comparison
+    window (`short` = `short_history_channels`), so the date is the channel's start, not a first appearance."""
+    first = str(row.get("first_seen") or "")[:10]
+    channel = str(row.get("first_seen_channel") or "")
+    if not first:
+        return ""
+    if not channel:
+        return first
+    if channel in short:
+        return f"≤ {short[channel]} ({channel}; parsed since then)"
+    return f"{first} ({channel})"
+
+
 def render_candidates_markdown(store_or_conn, since: str, until: str, top: int = 15) -> str:
-    """Markdown block "Companies spotted (not yet tracked)" for the digest; reads the candidate table only."""
+    """Markdown block "Companies spotted (not yet tracked)" for the digest; reads the candidate table only, plus the
+    channel history starts that decide whether a first appearance can be dated (`short_history_channels`)."""
     rows = list_candidates(store_or_conn, since=since, min_score=0.0, statuses=("new",), limit=None)
     rows = [r for r in rows if (r.get("first_seen") or "") <= until][:top]
     md = ["## Companies spotted (not yet tracked)\n"]
@@ -1308,8 +1405,10 @@ def render_candidates_markdown(store_or_conn, since: str, until: str, top: int =
     if not rows:
         md.append("_no new candidates in this window_\n")
         return "\n".join(md)
-    header = "| Candidate | Score | Signals | Papers / items | Last seen | Evidence |"
-    lines = [header, "|---|---|---|---|---|---|"]
+    short = short_history_channels(_conn(store_or_conn), since, until)
+    header = "| Candidate | Score | Signals | Papers / items | First seen | Last seen | Evidence |"
+    lines = [header, "|---|---|---|---|---|---|---|"]
+    used_short: Dict[str, str] = {}
     for r in rows:
         types = ", ".join(f"{k} ({v})" for k, v in sorted((r.get("types") or {}).items()))
         ev = (r.get("evidence") or [{}])[0]
@@ -1320,8 +1419,17 @@ def render_candidates_markdown(store_or_conn, since: str, until: str, top: int =
         if ev.get("url"):
             label += f" ([source]({ev['url']}))"
         flag = "" if r.get("confident", True) else " <sub>(low confidence)</sub>"
-        lines.append(f"| {_md_cell(r['display_name'])}{flag} | {r['score']:.1f} | {_md_cell(types)} | {r['papers']} | {r.get('last_seen') or ''} | {label} |")
+        channel = str(r.get("first_seen_channel") or "")
+        if channel in short:
+            used_short[channel] = short[channel]
+        lines.append(f"| {_md_cell(r['display_name'])}{flag} | {r['score']:.1f} | {_md_cell(types)} | {r['papers']} | {_md_cell(first_seen_label(r, short))} | "
+                     f"{r.get('last_seen') or ''} | {label} |")
     md.append("\n".join(lines) + "\n")
+    if used_short:
+        starts = "; ".join(f"{ch} since {d}" for ch, d in sorted(used_short.items()))
+        md.append(f"_'First seen' is the earliest evidence date with the channel it came from. '≤ date' marks channels whose history is shorter than "
+                  f"the comparison window ({starts}): a name first seen there this window may have been present earlier — the channel is new, "
+                  "not necessarily the company._\n")
     return "\n".join(md)
 
 

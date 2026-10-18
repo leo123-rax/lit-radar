@@ -29,7 +29,7 @@ def test_gsa_human_rows_use_the_adapters_archive_id_in_the_census(tmp_path):
     md = out["markdown"]
     assert "## Instruments behind newly public sequencing data (NCBI SRA, GSA-Human)\n" in md
     census = md[md.index("## Instruments behind"): md.index("### Proteomics")]
-    assert "| DNBSEQ-T7 | MGI Tech | 688114.SS | 2 | 1 | gsa-human |" in census
+    assert "| DNBSEQ-T7 | MGI Tech | 688114.SS | 2 | 1 | 100% HRA1 | gsa-human |" in census  # one study = the whole row: named
     assert "3 new sequencing experiments in public archives" in md
     assert {r["archive"] for r in out["summary"]["archive"]} == {"gsa-human", "sra"}
     st.close()

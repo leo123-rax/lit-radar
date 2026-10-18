@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
 from urllib.parse import urlsplit
 
-from . import gsa_snapshots, policy
+from . import gsa_snapshots, policy, worktype
 from .config import Settings
 from .extract.gazetteer import Gazetteer
 from .extract.jats import parse_jats
@@ -797,8 +797,14 @@ class Pipeline:
         # "new paper" when the record is not a paper at all: a dataset or supplement deposit credits every facility
         # user or depositor as an author (DOE / EMSL data records list 100+ names), so those records get no hits.
         hits: List[Tuple[str, str, str]] = []
-        if not is_paper_record((p.extra or {}).get("work_type"), p.title):
+        work_type = (p.extra or {}).get("work_type")
+        if not is_paper_record(work_type, p.title):
             self.counts["tracked_hits.skipped_non_paper"] += 1
+            return list(merged.values()), hits
+        # a deposit that arrived without a work_type (live OpenAlex pulls do not record one): the DOI prefix, venue or
+        # title says what it is (instrument-facility data records, dataset / software / protocol repositories ...)
+        if worktype.is_deposit(worktype.classify(p.title or "", p.abstract or "", p.doi or "", p.journal or "", str(work_type or ""))):
+            self.counts["tracked_hits.skipped_deposit"] += 1
             return list(merged.values()), hits
         topical: Optional[Set[str]] = None
         configured_groups: Optional[Set[str]] = None

@@ -74,11 +74,12 @@ Measured on a copy of a live store (3,562 papers): re-upserting 200 unchanged pa
   |---|---|---|
   | `--stats-by-table` (default) | row counts and on-disk bytes per table and index (FTS shadow tables included), page/freelist totals, a warning when SRA placeholder rows exist | `Store.table_stats()` (bytes via the `dbstat` virtual table; `bytes_available: false` on builds without it) |
   | `--purge-sra-placeholders` | deletes `archive_records` rows whose accession is a synthetic `SRA-UID-...` (an older SRA parser wrote them when the experiment accession was missing; they carry no study, platform or strategy and cannot be de-duplicated against ENA) and reports found / deleted / remaining | `Store.purge_sra_placeholders()`, `Store.count_sra_placeholders()` |
+  | `--relabel-deposits` | deposit records that arrived without an OpenAlex `work_type` (live pulls record none) and are recognised from their DOI prefix, venue or title (`litradar.worktype`, `DEPOSIT_LABELS`) get the matching type written into `extra_json.work_type` (`facility_deposit` and `dataset` → `dataset`, `software` → `software`, `supplement` → `supplementary-materials`; general repositories such as Zenodo and protocols are left alone, there the missing type is the very thing that cannot be inferred), and every tracked-author hit sitting on a deposit record is deleted (a deposit credits each facility user or depositor as an author). Reports papers relabelled per label and hits found / deleted / remaining; `--stats-by-table` warns while such hits exist. Measured on a production copy (71,872 papers): 77 instrument-facility records (`10.25582/...`, "Data for EMSL Project NNNNN from <month>", re-dated to October 2026) relabelled, 154 tracked-author hits deleted (77 records × 2 tracked authors), 2,246 → 2,092 hits. The equivalent one-off SQL: `DELETE FROM tracked_author_hits WHERE paper_id IN (SELECT id FROM papers WHERE lower(doi) LIKE '10.25582/%' OR lower(journal) LIKE '%(pnnl) repository%' OR lower(title) LIKE 'data for emsl project %'); UPDATE papers SET extra_json = json_set(CASE WHEN json_valid(extra_json) THEN extra_json ELSE '{}' END, '$.work_type', 'dataset') WHERE (lower(doi) LIKE '10.25582/%' OR lower(journal) LIKE '%(pnnl) repository%' OR lower(title) LIKE 'data for emsl project %') AND json_extract(extra_json, '$.work_type') IS NULL;` | `Store.relabel_deposit_records()`, `Store.purge_deposit_tracked_hits()`, `Store.count_deposit_tracked_hits()` |
   | `--refresh-entity-names` | rewrites `entity_name` and `ticker` (plus `vendor` and `category` for instruments; company rows keep the parent / provenance those columns hold) of every stored mention from the current gazetteers and refreshes the FTS `mentions` column of the papers touched. Ids are stable, display names are not: `rematch` re-derives most rows, but the rows it keeps because their text is not stored under the data policy would otherwise show the old name (after the 2026-10-17 renames a rematched copy still showed "Illumina sequencing" on kept rows) | `Store.refresh_entity_metadata(entries)` |
   | `--fts-rebuild` | drops and re-creates `papers_fts` from `papers` (bodies and the `mentions` column preserved) and merges the segments | `Store.rebuild_fts()` |
   | `--vacuum` | checkpoint, `VACUUM`, checkpoint; reports bytes before / after and the freelist it reclaimed | `Store.vacuum()` |
 
-  Actions run in the order purge, refresh, rebuild, vacuum; the stats describe the store afterwards. `--json` prints
+  Actions run in the order purge, relabel, refresh, rebuild, vacuum; the stats describe the store afterwards. `--json` prints
   the report as data. Measured on a copy of the live store (137,060,352 bytes; 3,562 papers, 123,164 archive records,
   freelist 4,290 pages): `--purge-sra-placeholders` found and removed 5,755 rows (4.7 % of the archive census, leaving
   117,409), `--fts-rebuild` wrote 3,562 rows, and `--vacuum` took the file from 137,060,352 to 114,896,896 bytes
@@ -114,6 +115,33 @@ want to answer HTTP 400.
   and `limit` then counts papers.
 * `Store.entity_names(kind=None)` maps entity ids to display names from the mentions table (used to label news
   groups by company name rather than id).
+* `Store.new_entities_report(since, kind, until=None)` lists the entities whose **first appearance** in the corpus
+  falls inside the window, by publication date (`pub_date`, else the ingestion day), each labelled with the
+  **channel** it first appeared in (`MENTION_CHANNELS`: `title/abstract`, `methods`, `funding/COI` = funding + coi +
+  ack, `affiliations`). A channel exists only for records whose text or metadata carries it — parsed Methods and
+  COI text begin on the day full-text parsing began — so every supplier named only in Methods looked "new" on that
+  day (on a production copy: 1,282 companies and 351 instruments by the old `first_seen >= since` rule; 187 companies
+  and 3 instruments after this change, with 19 companies and 42 instruments withheld). For each section the
+  history start is the earliest event date of any mention in it; a section takes part only when
+  `litradar.trends.period_coverage` says it fully covers the **comparison period** (the stretch of the window's
+  length right before `since`). An entity whose mentions all sit in sections that do not take part is counted in
+  `withheld` by channel instead of being listed. The result is `{rows, withheld, channels, has_history, since,
+  until, comparison_period}`; `channels[label]` carries `sections`, `history_from`, `covers` and `short_sections`
+  (the sections whose history is too short, with their start dates — funding statements reach back through the
+  backfill while COI text does not, so one channel can be half covered). `Store.new_entities(since, kind,
+  until=None)` returns the rows alone (`until` defaults to the seventh day from `since`). The digest prints the rows
+  with their channel and a one-line note on what was withheld and why; the JSON summary carries both reports under
+  `first_appearances`.
+* `Store.archive_instrument_counts(since, until, archives=None)` and `Store.archive_strategy_counts(since, until,
+  limit=15, archives=None)` carry a **concentration measure** per row: `largest_study` (the `study_accession` with
+  most experiments in the row), `largest_study_experiments`, `largest_study_share` (0..1 of the row's experiments;
+  rows without a study accession count in the total but never as the largest) and `largest_study_title`. Measured on
+  a production copy for 2026-10-10..17: one 35,759-experiment study was 99.1 % of the Bisulfite-Seq row (36,077) and
+  56 % of the NovaSeq 6000 row (64,846 of which 36,376), so the strategy table read as a methylation boom. The digest
+  prints the share in a *Largest study* column (naming the accession at 50 % or more, `render.CONCENTRATION_SHARE`),
+  appends it to the library-strategies line and adds a *Concentration:* footnote naming every row one study carries;
+  the summary JSON carries the rows (`archive`, `archive_strategies`). The dashboard has no archive census table
+  (its archive series are weekly totals by vendor), so nothing changed there.
 
 ## 7. Mention roles: used vs re-analysis vs mentioned
 

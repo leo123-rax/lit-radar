@@ -92,8 +92,21 @@ most candidates are private and get no hint.
 
 `render_candidates_markdown(store, since, until, top=15)` returns a Markdown block headed
 **"Companies spotted (not yet tracked)"** with a table of the top new candidates (score, signals, papers/items,
-last seen, one evidence snippet with a source link) and the commands to act on them. It reads only the
+first seen, last seen, one evidence snippet with a source link) and the commands to act on them. It reads only the
 candidate table, so `refresh` must have run for the window.
+
+**First seen, by channel.** Every evidence type belongs to a channel (`EVIDENCE_CHANNELS`: `coi statements`,
+`funding statements`, `acknowledgements`, `author e-mails`, `affiliations`, `news`), and each channel exists only
+for the records that carry it: COI and acknowledgement text and author e-mails come from parsed full text and begin
+on the day parsing began, while funding statements and company-typed affiliations ride on metadata back through the
+backfill. `refresh` stores `first_seen_by_channel` and `first_seen_channel` (the channel of the earliest evidence)
+with each candidate; `channel_history(conn)` gives each channel's earliest record date, and
+`short_history_channels(conn, since, until)` the channels whose history does not cover the comparison period (the
+stretch of the window's length right before `since`), judged by `litradar.trends.period_coverage`. The *First seen*
+column prints `2026-10-12 (funding statements)` for a datable first appearance and `≤ 2026-10-10 (coi statements;
+parsed since then)` when the channel is that young — a name first seen there this window may have been present
+earlier; the channel is new, not necessarily the company — with a footnote naming the channels concerned. Rows
+written before the channel fields existed print the bare date until the next `refresh`.
 
 Wiring (as applied):
 

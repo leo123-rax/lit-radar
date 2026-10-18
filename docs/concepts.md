@@ -48,7 +48,9 @@ form is kept for display.
 
 `concept_counts(term, week, papers)` holds distinct papers per term per ISO week (Monday key), built from
 the paper's `pub_date` or, when a feed has no date, its `first_seen`. Only paper records are counted: a row whose
-`extra_json.work_type` is not article / preprint / review (a dataset, supplement, peer review or software deposit)
+`extra_json.work_type` is not article / preprint / review (a dataset, supplement, peer review or software deposit), or
+whose DOI prefix, venue or title marks it as a deposit although no work_type was recorded (`litradar.worktype`:
+instrument-facility data records, dataset / software / protocol repositories)
 or whose title is a figure / table / data component of an article ("Figure S5 from ...") is skipped
 (`litradar.models.is_paper_record`), so one article with eleven supplementary-figure DOIs is not a twelve-paper burst. `concept_papers(term, paper_id,
 week, channel)` keeps the links so examples, co-mentioned instruments/companies (a join on `mentions`)
@@ -70,15 +72,40 @@ the report is flagged **weak baseline**: the z-scores then mostly reflect raw co
 is "new", so read the list as candidates, not as bursts. A separate **new this month** list ranks terms
 whose very first appearance in the corpus falls inside the current window (at least 3 papers).
 
-### Frequency-list mode (fewer than 8 baseline weeks)
+### Comparable weeks: the coverage step reaches the concepts
+
+Only baseline weeks that are **comparable** with the current week enter the mean and std. The rule is the trends
+module's (`litradar.trends.paper_week_comparability`, imported — not re-implemented here; see docs/trends.md,
+"Source mix (comparable weeks)"): a baseline week is comparable when the sources represented in it supply at least
+75 % of the current week's papers. A capped single-source backfill under a multi-source live week fails it, and a
+z-score against those weeks would measure the step in coverage, not a change in the literature. The trends rule
+buckets seven-day weeks ending on a date; `burst_report` ends them on the Sunday of the current ISO week, so bucket
+*k* is exactly the ISO week `current Monday − 7k days` and the verdicts map onto the Monday keys used here.
+
+Measured on a production copy for the window ending 2026-10-18 (26 OpenAlex-only backfill weeks under a live week
+fed by bioRxiv 1,254 / Crossref 887 / OpenAlex 818 / Europe PMC 425 / RSS 311 / medRxiv 101 / arXiv 37 papers):
+before the rule every one of the 26 baseline weeks was used and the top riser read `z 12.18` (39 papers against a
+1.73/week baseline); after it 0 of the 26 weeks are comparable, the report is a frequency list with
+`mode_reason: "coverage_step"`, and the rendered section says so.
+
+Each riser carries `baseline_mean` (over the comparable weeks; what the z used) and `baseline_mean_all_weeks` (over
+every baseline week that holds papers, shown in coverage-step mode as *Baseline /wk (not comparable)* for
+information only). The report's `comparability` block names the rule, the current week's source mix, the dropped
+baseline weeks (`dropped_source_mix`, Monday keys with `covered_share` and the `missing` sources) and the
+thresholds; `baseline_comparable_weeks` sits next to `baseline_active_weeks`.
+
+### Frequency-list mode (fewer than 8 comparable baseline weeks)
 
 `burst_report` labels every report with `mode`: `"burst"` when the baseline supports burst detection,
-`"frequency_list"` when fewer than `WEAK_BASELINE_WEEKS` (8) baseline weeks hold papers. In frequency-list mode
-the rendered section says so in plain words — *"this is a frequency list, not burst detection"* — renames the Score
-column *Score (count-driven)*, and adds a **First seen in corpus** column: the ISO week (Monday) in which the term
-first appeared in the counted corpus, or `≤ <week> (corpus start)` when the term was already present in the first
-counted week, so its true first appearance is unknown. The report carries the data behind the column
-(`corpus_start_week`, `history_weeks` = counted weeks before the current window, and `first_seen` /
+`"frequency_list"` when fewer than `WEAK_BASELINE_WEEKS` (8) baseline weeks are comparable with the current week,
+and `mode_reason` says why: `"few_weeks"` (too few baseline weeks hold papers at all) or `"coverage_step"` (enough
+weeks hold papers, too few are comparable); `null` in burst mode. In frequency-list mode the rendered section says
+so in plain words — *"this is a frequency list, not burst detection"*, headed *Weak baseline* or *Coverage step*
+with the step spelt out (which sources the current week has that the baseline weeks lack, and the 75 % rule) —
+renames the Score column *Score (count-driven)*, and adds a **First seen in corpus** column: the ISO week (Monday)
+in which the term first appeared in the counted corpus, or `≤ <week> (corpus start)` when the term was already
+present in the first counted week, so its true first appearance is unknown. The report carries the data behind the
+column (`corpus_start_week`, `history_weeks` = counted weeks before the current window, and `first_seen` /
 `first_seen_label` per riser and per new term), so `--json` consumers can rebuild it.
 
 The column follows the mode automatically; `render_report_markdown(report, first_seen_column=True | False)` and

@@ -79,7 +79,12 @@ Public API
 there and printed by the renderer); ``render_trends_markdown(trends, window_note=None)`` turns
 it into a compact "What changed" section; ``top_movers(trends)`` picks the risers and fallers
 the renderer shows; ``digest_window_note(since, until)`` builds the sentence that reconciles the
-digest window with the seven-day trend week.
+digest window with the seven-day trend week. Two pieces of the coverage logic are exported for other
+modules so the rule is implemented once: ``paper_week_comparability(store, until, weeks)`` (which
+earlier weeks are comparable with the current one; ``litradar.concepts`` uses it to decide whether its
+burst z-scores mean anything) and ``period_coverage(covered_from, start, end)`` (how much of a period a
+layer that began on ``covered_from`` covers; the store's first-appearance lists and the discovery module
+use it to tell a channel's start from a genuine first appearance).
 """
 from __future__ import annotations
 
@@ -251,15 +256,28 @@ def _comparable_weeks(
     return keep, dropped
 
 
-def _week_coverage(covered_from: Optional[str], prev_start: str, prev_end: str) -> Dict[str, Any]:
-    """How much of 'last week' the runs (and, for papers, a recorded backfill) that built this store fetched for."""
-    if covered_from is None or covered_from <= prev_start:
-        days = 7
-    elif covered_from > prev_end:
+def period_coverage(covered_from: Optional[str], start: str, end: str) -> Dict[str, Any]:
+    """How much of the period `start`..`end` (inclusive ISO dates) a layer whose records begin on `covered_from`
+    covers: `{covered_from, days_covered, partial}`; `partial` is True when the layer began inside or after the
+    period, so a comparison against that period would measure the layer's start, not a change in the literature.
+
+    `covered_from` None means "no start recorded" and counts as full coverage. Used for 'last week' against the
+    earliest run / backfill (`compute_trends`), and by other modules for any layer with a start date: a mention
+    channel (parsed Methods, funding and COI text) against the period a digest window is compared with
+    (`Store.new_entities_report`), a discovery evidence type against the same (`discovery`)."""
+    length = (_parse_date(end) - _parse_date(start)).days + 1
+    if covered_from is None or covered_from <= start:
+        days = length
+    elif covered_from > end:
         days = 0
     else:
-        days = (_parse_date(prev_end) - _parse_date(covered_from)).days + 1
-    return {"covered_from": covered_from, "days_covered": days, "partial": days < 7}
+        days = (_parse_date(end) - _parse_date(covered_from)).days + 1
+    return {"covered_from": covered_from, "days_covered": days, "partial": days < length}
+
+
+def _week_coverage(covered_from: Optional[str], prev_start: str, prev_end: str) -> Dict[str, Any]:
+    """How much of 'last week' the runs (and, for papers, a recorded backfill) that built this store fetched for."""
+    return period_coverage(covered_from, prev_start, prev_end)
 
 
 def _plural(n: int, noun: str) -> str:
@@ -527,6 +545,44 @@ def _conversions(conn: sqlite3.Connection, week_start: str, until: str) -> List[
 
 
 # ----------------------------------------------------------------------------- main entry point
+def paper_week_comparability(
+    store: Any,
+    until: str,
+    weeks: int = DEFAULT_WEEKS,
+    min_week_fraction: float = MIN_WEEK_FRACTION,
+    min_source_coverage: float = MIN_SOURCE_COVERAGE,
+) -> Dict[str, Any]:
+    """The comparable-week (coverage-step) rule on its own, for modules that compare a current window with earlier
+    weeks without the full trends computation (`litradar.concepts`).
+
+    Week k is the seven-day bucket ending on `until - 7k` (k = 0 the current week), as in `compute_trends`; a
+    baseline week (1..`weeks`) is comparable when its source mix covers the current week's (`_comparable_weeks`,
+    the one implementation of the rule). Returns `{until, week_start, weeks, weeks_with_papers, comparable_weeks,
+    dropped_source_mix, current_week_sources, week_bounds, min_week_fraction, min_source_coverage}`:
+    `comparable_weeks` and `weeks_with_papers` are week indices, `dropped_source_mix` the non-comparable weeks as
+    `{week, start, end, total, covered_share, missing}`, `week_bounds` `{k: [start, end]}` for every bucket, so a
+    caller can map its own week keys onto the buckets."""
+    if weeks < 1:
+        raise ValueError("weeks must be >= 1")
+    end = _parse_date(until)
+    until = _iso(end)
+    since = _iso(end - timedelta(days=7 * (weeks + 1) - 1))
+    by_source = _source_weekly_counts(store.conn, {"until": until, "since": since}, weeks)
+    comparable, dropped = _comparable_weeks(by_source, weeks, min_week_fraction, min_source_coverage, end)
+    return {
+        "until": until,
+        "week_start": _iso(end - timedelta(days=6)),
+        "weeks": weeks,
+        "weeks_with_papers": [w for w in range(1, weeks + 1) if sum((by_source.get(w) or {}).values()) > 0],
+        "comparable_weeks": comparable,
+        "dropped_source_mix": dropped,
+        "current_week_sources": dict(sorted((by_source.get(0) or {}).items(), key=lambda kv: (-kv[1], kv[0]))),
+        "week_bounds": {k: list(_week_bounds(end, k)) for k in range(0, weeks + 1)},
+        "min_week_fraction": min_week_fraction,
+        "min_source_coverage": min_source_coverage,
+    }
+
+
 def compute_trends(
     store: Any,
     until: str,

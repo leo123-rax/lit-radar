@@ -27,7 +27,15 @@ bioRxiv, Europe PMC, a journal feed).
 (`tracked_hits.skipped_non_paper`) - an OpenAlex `type` of dataset / supplementary-materials / software / peer-review
 (`extra_json.work_type`) or a figure / table / data component title ("Figure S5 from ..."). A data deposit credits
 every facility user or depositor as an author (DOE / EMSL data records list 100+ names, bulk-attributed to each
-of them), so it is never a tracked researcher's new paper. Then, for every author on the record:
+of them), so it is never a tracked researcher's new paper. The work_type alone is not enough: live OpenAlex pulls
+record none, and on a production copy 77 EMSL records ("Data for EMSL Project NNNNN from <month>", DOI prefix
+`10.25582`, venue "DOE Pacific Northwest National Laboratory (PNNL) Repository", typed `preprint`, re-dated to
+October 2026) matched one tracked structural-biology author and one AI-bio author 77 times each. So the gate also
+asks `litradar.worktype.classify` and refuses every record whose label is a deposit (`worktype.DEPOSIT_LABELS`:
+dataset, software, protocol, supplementary file, general repository deposit, instrument-facility data record),
+counted as `tracked_hits.skipped_deposit`; `Store.add_tracked_author_hit` applies the same rule for any other
+writer, and `litradar maintenance --relabel-deposits` removes hits already stored on such records (docs/store.md
+§4). Then, for every author on the record:
 
 1. If the record's author carries an OpenAlex id that is in the tracked list, it is a hit with `matched_by`
    `openalex_id`. This is exact and is never capped.
