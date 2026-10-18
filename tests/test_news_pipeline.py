@@ -10,6 +10,7 @@ from pathlib import Path
 import requests
 import yaml
 
+from litradar import track
 from litradar.config import Settings
 from litradar.pipeline import Pipeline
 from litradar.sources import gdelt
@@ -50,6 +51,16 @@ SEC_ATOM = """<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>8-K  - Cur
 GNEWS = """<?xml version="1.0"?><rss version="2.0"><channel><title>g</title>
 <item><title>Google-sourced Illumina story</title><link>https://news.google.com/rss/articles/{N}</link><pubDate>Tue, 14 Oct 2026 00:00:00 GMT</pubDate></item>
 </channel></rss>"""
+# the SEC's company_tickers.json shape (two rows); the CIKs are the real ones so the expected URLs read like production
+SEC_TICKER_TABLE = {"0": {"cik_str": 1110803, "ticker": "ILMN", "title": "ILLUMINA, INC."}, "1": {"cik_str": 1699031, "ticker": "GRAL", "title": "GRAIL, Inc."}}
+# EDGAR's HTTP 200 text/html answer when its legacy ticker table does not know the symbol (shape recorded live 2026-10-18)
+SEC_HTML = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<html lang="ENG"><head><title>Company Information: </title><script language="JavaScript" src="/include/sec.js" type="text/javascript"></script></head>
+<body style="margin: 0"><p>Home | EDGAR Search Home | Latest Filings | Previous Page --> No matching Ticker Symbol.</body></html>"""
+
+
+def sec_url(cik_or_ticker):
+    return f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_or_ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"
 
 
 def _gdelt(*titles):
@@ -61,15 +72,19 @@ def _gdelt(*titles):
 
 
 class FakeHttp:
-    """get_text answers RSS by URL prefix; get answers GDELT from a per-company table."""
+    """get_text answers RSS by URL prefix; get answers GDELT from a per-company table and the SEC ticker table
+    (``tickers=None`` makes that download fail, as an unreachable sec.gov would)."""
 
-    def __init__(self, rss, gdelt_by_company, blocked=()):
+    def __init__(self, rss, gdelt_by_company, blocked=(), tickers=SEC_TICKER_TABLE):
         self.rss = rss
         self.gdelt_by_company = gdelt_by_company
         self.blocked_hosts = set(blocked)
         self.urls = []
         self.gdelt_queries = []
+        self.table_requests = 0
+        self.tickers = tickers
         self.stats = {}
+        self.contact_email = "contact@example.org"  # track.sec_company_tickers refuses to go online without one
 
     def get_text(self, url, params=None, cache=False, retries=None):
         self.urls.append(url)
@@ -79,6 +94,15 @@ class FakeHttp:
         return None
 
     def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,), retries=None):
+        if url == track.SEC_TICKERS_URL:
+            self.table_requests += 1
+            if self.tickers is None:
+                return None
+            r = requests.Response()
+            r.status_code = 200
+            r._content = json.dumps(self.tickers).encode()
+            r.url = url
+            return r
         assert url == gdelt.DOC_API
         self.gdelt_queries.append(params["query"])
         for name, resp in self.gdelt_by_company.items():
@@ -92,7 +116,8 @@ def _pipeline(tmp_path: Path, http, radar=RADAR, contact="contact@example.org", 
     cfg.mkdir(exist_ok=True)
     for name, data in (("companies", COMPANIES), ("instruments", INSTRUMENTS), ("feeds", feeds), ("radar", radar)):
         (cfg / f"{name}.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
-    settings = Settings(config_dir=cfg, db_path=tmp_path / "t.sqlite", contact_email=contact, radar=radar)
+    # cache_dir inside tmp_path: the SEC ticker table is cached there, never in the repository's .cache
+    settings = Settings(config_dir=cfg, db_path=tmp_path / "t.sqlite", cache_dir=tmp_path / "cache", contact_email=contact, radar=radar)
     return Pipeline(settings, http=http)
 
 
@@ -147,8 +172,80 @@ def test_sec_feeds_require_a_contact_email(tmp_path):
     http = FakeHttp({"https://trade.example": RSS, "https://wire.example": WIRE, "https://www.sec.gov": SEC_ATOM}, {"Illumina": _gdelt(), "GRAIL": _gdelt()})
     pipe = _pipeline(tmp_path, http, contact="")
     pipe.fetch_news("2026-10-10")
-    assert not any(u.startswith("https://www.sec.gov") for u in http.urls)
+    assert not any(u.startswith("https://www.sec.gov") for u in http.urls) and http.table_requests == 0
     assert any("LITRADAR_CONTACT_EMAIL" in e for e in pipe.errors)
+
+
+def _sec_urls(http):
+    return [u for u in http.urls if u.startswith("https://www.sec.gov")]
+
+
+def test_sec_feeds_are_requested_by_cik_and_tickers_the_table_lacks_are_reported(tmp_path):
+    """EDGAR's legacy CIK=<ticker> lookup answers an HTML "No matching Ticker Symbol." page for recent listings and
+    renamed registrants (8 of 46 watched tickers on 2026-10-18), so feeds go out by CIK from company_tickers.json; a
+    ticker that table does not know is not requested at all and is named in the run's error list."""
+    from litradar.incremental import classify_error, error_sources
+
+    companies = {"entries": COMPANIES["entries"] + [{"id": "newco", "name": "Newco Genomics", "ticker": "NEWCO", "type": "tools", "watch_news": True}]}
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    for name, data in (("companies", companies), ("instruments", INSTRUMENTS), ("feeds", FEEDS), ("radar", RADAR)):
+        (cfg / f"{name}.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    http = FakeHttp({"https://www.sec.gov": SEC_ATOM}, {})
+    settings = Settings(config_dir=cfg, db_path=tmp_path / "t.sqlite", cache_dir=tmp_path / "cache", contact_email="contact@example.org", radar=RADAR)
+    pipe = Pipeline(settings, http=http)
+    pipe.fetch_news("2026-10-10")
+    urls = _sec_urls(http)
+    assert sorted(urls) == [sec_url("0001110803"), sec_url("0001699031")]  # ILMN, GRAL by 10-digit CIK
+    assert not any("CIK=ILMN" in u or "CIK=GRAL" in u or "CIK=NEWCO" in u for u in urls)
+    feeds = sorted(r["feed"] for r in pipe.store.news_in_window("2026-10-10", limit=100) if r["feed"].startswith("SEC"))
+    assert feeds == ["SEC 8-K GRAL", "SEC 8-K ILMN"]  # the feed label still carries the ticker
+    assert pipe.counts["news.sec_feeds"] == 2 and pipe.counts["news.sec_unresolved"] == 1 and "news.sec_not_atom" not in pipe.counts
+    sec_errors = [e for e in pipe.errors if e.startswith("sec:")]
+    assert sec_errors == ["sec: 1 of 3 watched ticker(s) not in the SEC ticker table (company_tickers.json), no 8-K feed collected for them: "
+                          "NEWCO (a foreign, delisted or misspelled ticker in companies.yaml)"]
+    assert error_sources(sec_errors) == ["sec"] and classify_error(sec_errors[0]) == "failed"
+    # the table was downloaded once and cached on disk: a second pipeline in the same cache dir does not ask again
+    assert http.table_requests == 1 and (tmp_path / "cache" / "sec_company_tickers.json").exists()
+    pipe2 = Pipeline(settings, http=http, store=pipe.store)
+    pipe2.fetch_news("2026-10-10")
+    assert http.table_requests == 1 and len(_sec_urls(http)) == 4
+
+
+def test_sec_html_answer_is_reported_in_the_run_errors_not_only_logged(tmp_path, caplog):
+    """An HTTP 200 text/html body (EDGAR's "No matching ..." page, a challenge page) parses to zero items and the HTTP
+    layer counts a success, so the run report must hear of it from the news layer: once per source for the SEC feeds,
+    naming each ticker with EDGAR's own explanation; per feed for the other kinds."""
+    import logging
+
+    from litradar.coverage import error_source_id
+
+    html_trade ="<!doctype html><html><head><title>Just a moment...</title></head><body>challenge</body></html>"
+    http = FakeHttp({"https://trade.example": html_trade, "https://wire.example": WIRE, "https://www.sec.gov": SEC_HTML}, {})
+    pipe = _pipeline(tmp_path, http, radar={**RADAR, "news": {**RADAR["news"], "gdelt": False}})
+    with caplog.at_level(logging.WARNING, logger="litradar.pipeline"):
+        n = pipe.fetch_news("2026-10-10")
+    rows = pipe.store.news_in_window("2026-10-10", limit=100)
+    assert n == len(rows) == 1 and rows[0]["feed"] == "Wire"  # the wire feed still parsed
+    assert pipe.counts["news.sec_feeds"] == 2 and pipe.counts["news.sec_not_atom"] == 2 and pipe.counts["news.sec"] == 0
+    assert pipe.errors == [
+        "feed Trade RSS: not XML (syntax error: line 1, column 0; body starts '<!doctype html><html><head><title>Just a moment...</title></head><body>challenge')",
+        "sec: 2 of 2 8-K feed(s) answered an HTML page instead of Atom, no filings collected for them: "
+        "GRAL (No matching Ticker Symbol.), ILMN (No matching Ticker Symbol.)",
+    ]
+    assert [error_source_id(e) for e in pipe.errors] == ["rss", "sec"]  # `--sources rss` / `--sources sec` in the coverage hint
+    assert sum("answered an HTML page" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_sec_ticker_table_unavailable_falls_back_to_ticker_urls_and_says_so(tmp_path):
+    http = FakeHttp({"https://www.sec.gov": SEC_ATOM}, {}, tickers=None)
+    pipe = _pipeline(tmp_path, http, radar={**RADAR, "news": {**RADAR["news"], "gdelt": False}}, feeds={"feeds": []})
+    pipe.fetch_news("2026-10-10")
+    assert http.table_requests == 1
+    assert sorted(_sec_urls(http)) == [sec_url("GRAL"), sec_url("ILMN")]  # the pre-fix URLs, which EDGAR resolves for most tickers
+    assert pipe.counts["news.sec_feeds"] == 2 and pipe.counts["news.sec"] == 2 and "news.sec_unresolved" not in pipe.counts
+    assert pipe.errors == ["sec: SEC ticker table unavailable (could not download https://www.sec.gov/files/company_tickers.json (no response)); "
+                           "8-K feeds requested by ticker, which EDGAR cannot resolve for recent listings or renamed registrants"]
 
 
 def test_gdelt_rate_limit_is_reported_not_silent(tmp_path):
