@@ -1,0 +1,21 @@
+# Keeps the SHA-pinned GitHub Actions and the Python dependencies current. Every action in the workflows is pinned
+# to a full commit SHA with its tag in a comment; Dependabot updates the SHA and the comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+    commit-message:
+      prefix: "ci"
+    labels: [dependencies]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+    commit-message:
+      prefix: "deps"
+    labels: [dependencies]
+    open-pull-requests-limit: 5

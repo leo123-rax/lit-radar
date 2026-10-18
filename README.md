@@ -1,5 +1,7 @@
 # lit-radar
 
+[![ci](https://github.com/leo123-rax/lit-radar/actions/workflows/ci.yml/badge.svg)](https://github.com/leo123-rax/lit-radar/actions/workflows/ci.yml) [![weekly digest](https://github.com/leo123-rax/lit-radar/actions/workflows/weekly.yml/badge.svg)](https://github.com/leo123-rax/lit-radar/actions/workflows/weekly.yml) [![dashboard](https://img.shields.io/badge/dashboard-GitHub%20Pages-blue)](https://leo123-rax.github.io/lit-radar/) [![latest digest](https://img.shields.io/badge/digest-latest-success)](digests/latest.md) [![licence: MIT](https://img.shields.io/badge/licence-MIT-lightgrey)](LICENSE)
+
 A weekly **science-literature radar** for people who follow life-science tools, genomics,
 diagnostics and biotech. Every week it:
 
