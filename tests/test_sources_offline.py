@@ -69,6 +69,27 @@ def test_openalex_abstract_and_company_institutions():
     assert p.authors[0].openalex_id == "A5"
 
 
+def test_openalex_company_institution_needs_the_raw_affiliation_to_agree():
+    """digest-D8: OpenAlex's ROR resolution typed an ORCID URL as a social-media company, 'Mivax Therapeutics' as the
+    unrelated 'Mabvax Therapeutics' and 'Immunology Discovery Research, AbbVie' as 'Discovery Laboratories'."""
+    ok = openalex.affiliation_corroborates
+    assert ok("Twitter (United States)", ["https://orcid.org/0000-0001-5035-7655"]) is False
+    assert ok("Mabvax Therapeutics (United States)", ["Mivax Therapeutics Inc., San Francisco, CA, USA"]) is False  # 'Therapeutics' is not identity
+    assert ok("Discovery Laboratories (United States)", ["Immunology Discovery Research, AbbVie Bioresearch Center"]) is False  # no distinctive token: whole name needed
+    assert ok("Discovery Laboratories (United States)", ["Discovery Laboratories Inc., Warrington, PA"]) is True
+    assert ok("BGI Genomics", ["C2i Genomics Inc., New York, NY"]) is False
+    # genuine affiliations survive: a superscript glued to the name, a longer trading name, a shorter one
+    assert ok("Genentech", ["4Genentech, South San Francisco, CA;"]) is True
+    assert ok("Amazon (United States)", ["3Amazon Web Services, Seattle, WA"]) is True
+    assert ok("Thermo Fisher Scientific (United States)", ["Thermo Fisher, Waltham, MA, USA"]) is True
+    assert ok("10x Genomics (United States)", ["10x Genomics, Pleasanton, CA"]) is True
+    # nothing to check against -> accepted as typed
+    assert ok("Illumina (United States)", []) is True and ok("Illumina (United States)", ["", None]) is True
+    assert openalex.institution_tokens("Mabvax Therapeutics (United States)") == ["mabvax"]
+    assert openalex.institution_tokens("Thermo Fisher Scientific (United States)") == ["thermo", "fisher"]
+    assert openalex.institution_tokens("Discovery Laboratories (United States)") == []
+
+
 def test_crossref_to_paper_strips_jats_abstract():
     it = {"DOI": "10.1038/X", "title": ["Great paper"], "abstract": "<jats:p>Hello <jats:italic>there</jats:italic></jats:p>", "author": [{"given": "A", "family": "B", "affiliation": [{"name": "Twist Bioscience"}]}],
           "container-title": ["Nature Methods"], "published": {"date-parts": [[2026, 10, 13]]}, "URL": "https://doi.org/10.1038/X", "type": "journal-article", "funder": [{"name": "Wellcome Trust"}]}

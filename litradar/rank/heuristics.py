@@ -19,6 +19,9 @@ without a language model.
                       but never scored, as supplier involvement or otherwise
   companies           +0.5 for the FIRST commercial company named (company_cap = 1); institutes, foundations,
                       plasmid repositories and AI tools / software credits are listed but never scored
+  unlisted            OpenAlex company-typed affiliations the gazetteer does not know (`unlisted:<slug>` ids from
+                      Pipeline.extract) are listed as candidates, never scored and never counted as a company
+                      mention or a company author: the typing is noisy and nobody has verified the name
   company author      +1.0 if an author has a commercial-company affiliation
   watchlist terms     +1.0 per matched watchlist term (cap 3)
   tracked author      +3.0 when matched by OpenAlex author id; +1.5 for a name-only match (`tracked_author` may be
@@ -108,6 +111,7 @@ SOFTWARE_CATEGORIES = ("software",)  # analysis software and models: listed, nev
 # non-profit repositories ... and the AI tools / software credited for language polishing or structure prediction
 INSTITUTE_COMPANY_TYPES = ("institute", "foundation", "non_profit", "nonprofit", "non-profit")
 AI_TOOL_COMPANY_TYPES = ("software", "ai_tool", "ai-tool", "ai tool", "llm")
+UNLISTED_PREFIX = "unlisted:"  # Pipeline.extract's synthetic id for an OpenAlex company-typed institution the gazetteer does not know
 SUBJECT_SECTIONS = ("title", "abstract")
 TIERS = ("A", "B", "C")
 
@@ -118,7 +122,12 @@ def is_platform(category: str) -> bool:
 
 
 def company_role(entity_id: str, company_types: Optional[Dict[str, str]]) -> str:
-    """'company' (commercial, scored), 'institute' or 'ai_tool' (listed, not scored) for a company mention."""
+    """'company' (commercial, scored), 'institute' or 'ai_tool' (listed, not scored) for a company mention, or
+    'unlisted' for an affiliation-derived `unlisted:<slug>` id: an OpenAlex company-typed institution the gazetteer
+    does not know, listed as a candidate but never scored, never a company mention and never asserted as a
+    company-affiliated author (OpenAlex's institution resolution is noisy and nobody has verified the name)."""
+    if str(entity_id).startswith(UNLISTED_PREFIX):
+        return "unlisted"
     t = ((company_types or {}).get(entity_id) or "").lower()
     if t in INSTITUTE_COMPANY_TYPES:
         return "institute"
@@ -310,7 +319,8 @@ def _is_topical(comps: Sequence[Component], company_ids: Sequence[str], author_c
         ctype = types.get(str(cid).lower(), "")
         if ctype and ctype not in NON_TOPICAL_COMPANY_TYPES:
             return True  # a gazetteer tools, diagnostics, pharma, CRO or ai_bio company named or affiliated
-        # an affiliation-derived `unlisted:` company or one of unknown type says nothing about the field
+        # a company of unknown type says nothing about the field (affiliation-derived `unlisted:` ids never get
+        # here: company_role lists them apart, unscored)
     return False
 
 
@@ -381,6 +391,7 @@ def score_paper_v2(
     companies: List[str] = []
     institutes: List[str] = []
     ai_tools: List[str] = []
+    unlisted: List[str] = []  # `unlisted:` affiliations: candidates for the gazetteer, never evidence about the paper
     author_companies: List[str] = []
     subject_companies: List[str] = []  # named in title / abstract / affiliations: the paper is about them or from them
     for m in company_mentions:
@@ -395,9 +406,12 @@ def score_paper_v2(
                 subject_companies.append(eid)
         elif role == "institute":
             institutes.append(eid)
+        elif role == "unlisted":
+            unlisted.append(eid)
         else:
             ai_tools.append(eid)
     companies, institutes, ai_tools, author_companies = _ordered(companies), _ordered(institutes), _ordered(ai_tools), _ordered(author_companies)
+    unlisted = _ordered(unlisted)
     facts.update(platforms=platform_names, companies=[company_names.get(c, c) for c in companies],
                  author_companies=[company_names.get(c, c) for c in author_companies])
 
@@ -422,6 +436,9 @@ def score_paper_v2(
         comps.append(Component("institutes", f"{len(institutes)} institute mention(s), not scored", 0.0, [company_names.get(c, c) for c in institutes]))
     if ai_tools:
         comps.append(Component("ai_tools", f"{len(ai_tools)} AI tool(s), not scored", 0.0, [company_names.get(c, c) for c in ai_tools]))
+    if unlisted:
+        comps.append(Component("unlisted_companies", f"{len(unlisted)} company-type institution(s) not in the gazetteer, not scored", 0.0,
+                               [company_names.get(c, c) for c in unlisted]))
     if author_companies:
         comps.append(Component("company_author", "company-affiliated author", w["company_author"], facts["author_companies"]))
 

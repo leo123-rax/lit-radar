@@ -448,6 +448,29 @@ def test_render_uses_v2_shows_why_and_subgroup_and_can_fall_back(tmp_path):
     st.close()
 
 
+def test_unlisted_company_institutions_are_listed_but_never_scored_or_asserted():
+    """digest-D8: an `unlisted:<slug>` id (an OpenAlex company-typed affiliation the gazetteer does not know) was scored
+    as a company mention and a company author and printed verbatim as 'names X; company-affiliated author (X)'."""
+    paper = dict(BASE, id="doi:10.1/unl", kind="article", journal="Nature Methods", title="A cancer-genomics toolkit", abstract="We present a workflow.")
+    unl = _m("company", "unlisted:mabvax-therapeutics-united-states", "affiliations", category="openalex-company", name="Mabvax Therapeutics (United States)")
+    types = {"abbvie": "pharma"}
+    assert H.company_role("unlisted:mabvax-therapeutics-united-states", types) == "unlisted" and H.company_role("unlisted:x", None) == "unlisted"
+    res = H.score_paper_v2(paper, [unl], "A", [], None, company_types=types)
+    assert res.component("companies") is None and res.component("company_author") is None
+    assert res.facts["companies"] == [] and res.facts["author_companies"] == []
+    listed = res.component("unlisted_companies")
+    assert listed is not None and listed.points == 0 and listed.detail == ["Mabvax Therapeutics (United States)"]
+    assert "1 company-type institution(s) not in the gazetteer, not scored" in res.reasons
+    assert res.raw == H.score_paper_v2(paper, [], "A", [], None, company_types=types).raw
+    why = why_it_matters(res, paper, types)
+    assert "Mabvax" not in why and "company-affiliated" not in why and "names" not in why
+    # next to a verified gazetteer company only the gazetteer company is named
+    res2 = H.score_paper_v2(paper, [_m("company", "abbvie", "affiliations", name="AbbVie"), unl], "A", [], None, company_types=types)
+    assert res2.facts["companies"] == ["AbbVie"] and res2.facts["author_companies"] == ["AbbVie"]
+    why2 = why_it_matters(res2, paper, types)
+    assert "company-affiliated author (AbbVie)" in why2 and "Mabvax" not in why2
+
+
 def test_topical_gate_withholds_the_venue_prior_for_off_topic_tier_a_papers():
     from litradar.rank.heuristics import DEFAULT_WEIGHTS, score_paper_v2
 

@@ -384,14 +384,51 @@ def _dictionary():
     return words
 
 
+_INFLECTION_SUFFIXES = ("ing", "est", "ies", "ied", "ier", "es", "ed", "er", "s")
+
+
+def _inflected_stem(compact: str, words) -> str:
+    """The dictionary word that `compact` is a regular inflection of ('smarter' -> 'smart', 'latitudes' -> 'latitude'),
+    or ''. Deliberately narrow, so brand names do not trip it: a plural stem needs six letters ('GenePS' is not
+    'genep' + s), the restored silent e needs a five-letter stem ('Bruker' is not 'bruke' + r), '-es' only follows a
+    sibilant, and doubled consonants are not undone ('CoolLED' is not 'cool' + ed)."""
+    low = compact.lower()
+    for suffix in _INFLECTION_SUFFIXES:
+        if not low.endswith(suffix):
+            continue
+        stem = low[: -len(suffix)]
+        candidates = []
+        if suffix in ("s", "es"):
+            if suffix == "es" and not stem.endswith(("s", "x", "z", "ch", "sh")):
+                continue
+            if len(stem) >= 6:
+                candidates.append(stem)
+        elif suffix in ("ies", "ied", "ier"):
+            if len(stem) >= 4:
+                candidates.append(stem + "y")
+        else:
+            if len(stem) >= 4:
+                candidates.append(stem)
+            if len(stem) >= 5:
+                candidates.append(stem + "e")
+        for cand in candidates:
+            if cand in words:
+                return cand
+    return ""
+
+
 def _risky(alias: str, words) -> str:
-    """'dict' if the alias is a plain dictionary word (<= 10 letters), 'short' if a 2-4 letter token, else ''.
-    Tokens containing a digit are exempt: the regex keeps the digit sequence whatever the case flag."""
+    """'dict' if the alias is a plain dictionary word (<= 10 letters), 'inflected' if it is a regular inflection of
+    one (the dictionary lists 'smart', not 'smarter'; the matcher is case-insensitive, so 'SMARTer' read the
+    comparative), 'short' if a 2-4 letter token, else ''. Tokens containing a digit are exempt: the regex keeps the
+    digit sequence whatever the case flag."""
     compact = re.sub(r"[\s\-\.]+", "", alias)
     if not compact or any(ch.isdigit() for ch in compact):
         return ""
     if compact.isalpha() and len(compact) <= 10 and compact.lower() in words:
         return "dict"
+    if compact.isalpha() and len(compact) <= 10 and _inflected_stem(compact, words):
+        return "inflected"
     if compact.isalpha() and 2 <= len(compact) <= 4:
         return "short"
     return ""
@@ -424,6 +461,12 @@ def test_dictionary_sweep_helper_examples():
     assert _risky("E.Z.N.A.", words) == "short"  # dots stripped -> 4 letters
     assert _risky("DS-11", words) == ""  # digit -> exempt
     assert _risky("NovaSeq X Plus", words) == ""
+    # inflected forms the plain membership test missed (DATA-06: 'SMARTer' matched the comparative in 23 of 30 hits)
+    assert _risky("SMARTer", words) == "inflected" and _inflected_stem("SMARTer", words) == "smart"
+    assert _risky("Latitude S", words) == "inflected"  # the optional separator makes the regex read 'latitudes'
+    assert _risky("ENrich S", words) == "inflected"
+    for brand in ("Bruker", "Cellares", "CoolLED", "GenePS", "Illumina", "NovaSeq"):
+        assert _risky(brand, words) == "", brand
 
 
 # ---------------------------------------------------------------- fixture-driven regression cases

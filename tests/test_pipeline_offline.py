@@ -870,6 +870,38 @@ def test_openalex_country_slices_repeat_each_topic_query_per_country(tmp_path, m
         pipe2.store.close()
 
 
+def test_openalex_company_institutions_are_dropped_when_the_raw_affiliation_disagrees(tmp_path):
+    """digest-D8: every OpenAlex `type: company` institution became an affiliation mention, so ROR mis-resolutions
+    (an ORCID URL -> a social-media company, 'Mivax' -> 'Mabvax', 'Immunology Discovery Research, AbbVie' ->
+    'Discovery Laboratories') reached the digest as 'company-affiliated author (X)'."""
+    pipe = Pipeline(_settings(tmp_path), http=object())
+
+    def author(name, raw, *insts):
+        return Author(name=name, affiliation=raw, institutions=[{"name": n, "type": "company", "ror": ""} for n in insts])
+
+    authors = [
+        author("A", "https://orcid.org/0000-0001-5035-7655", "Twitter (United States)"),
+        author("B", "Mivax Therapeutics Inc., San Francisco, CA, USA", "Mabvax Therapeutics (United States)"),
+        author("C", "Immunology Discovery Research, AbbVie Bioresearch Center", "AbbVie (United States)", "Discovery Laboratories (United States)"),
+        author("D", "4Genentech, South San Francisco, CA", "Genentech"),
+        author("E", "3Amazon Web Services, Seattle, WA", "Amazon (United States)"),
+        author("F", "", "Acme Spatial Inc (United States)"),  # no raw string: nothing to check against
+    ]
+    insts = sorted({i["name"] for a in authors for i in a.institutions})
+    p = Paper(id="doi:10.1000/d8", source="openalex", title="A toolkit for focal amplifications", abstract="We present a workflow.",
+              pub_date="2026-10-12", authors=authors, affiliations=[a.affiliation for a in authors if a.affiliation],
+              extra={"company_institutions": insts})
+    mentions, _ = pipe.extract(p)
+    ids = {m.entity_id for m in mentions if m.kind == "company"}
+    assert not {"unlisted:twitter-united-states", "unlisted:mabvax-therapeutics-united-states", "unlisted:discovery-laboratories-united-states"} & ids
+    assert {"abbvie", "genentech", "unlisted:amazon-united-states", "unlisted:acme-spatial-inc-united-states"} <= ids
+    assert pipe.counts["company_institutions.uncorroborated"] == 3
+    # rows stored before author institutions were kept cannot be checked and are taken at face value
+    legacy = Paper(id="doi:10.1000/d8-legacy", source="openalex", title="T", authors=[Author(name="A", affiliation="Somewhere else")],
+                   affiliations=["Somewhere else"], extra={"company_institutions": ["Twitter (United States)"]})
+    assert "unlisted:twitter-united-states" in {m.entity_id for m in pipe.extract(legacy)[0]}
+
+
 def test_shipped_radar_yaml_wires_the_global_corpus_sources():
     sources = Settings.from_env().radar["sources"]
     for name in ("gsa", "gsa_human", "chinaxiv", "scielo", "kci"):

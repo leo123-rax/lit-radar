@@ -74,7 +74,7 @@ Defaults live in `DEFAULT_WEIGHTS`; `ranking.weights` in config/radar.yaml overr
 | platform central | +1.0 when a platform is named in the title or abstract | mention section | `platform named in title/abstract: Xenium (+1.0)` |
 | lab tools | +0.2 each, cap 3 | infrastructure categories; `software` entities are listed, never scored | `8 lab tool(s) (+0.6)`, `2 software / model(s), not scored` |
 | companies | +0.5 for the **first** commercial company only (`company_cap: 1`); institutes, foundations and AI tools listed, not scored | `mentions` + `type` from config/companies.yaml | `23 company mention(s), scored 1 (+0.5)`, `1 institute mention(s), not scored` |
-| company author | +1.0 | a commercial company in `affiliations` | `company-affiliated author (+1.0)` |
+| company author | +1.0 | a gazetteer company of commercial type in `affiliations` (never an `unlisted:` institution) | `company-affiliated author (+1.0)` |
 | watchlist | +1.0 per term, cap 3 | `watchlist_terms` in title/abstract | `watchlist: single-cell, spatial transcriptomics (+2.0)` |
 | tracked author | +3.0 by OpenAlex id, +1.5 by name only | `tracked_author_hits.matched_by` | `tracked author (+3.0)`, `tracked author (name match) (+1.5)` |
 | novelty cues | +0.5 per cue, cap 1.0 | `NOVELTY_RE` | `3 novelty cue(s) (+1.0)` |
@@ -231,6 +231,7 @@ Company mentions are scored by the entry's `type` in `config/companies.yaml` (`P
 | tools, diagnostics, synthesis, ai_bio, pharma, cro, unknown | `company` | counted in "N company mention(s)" and eligible for the company-author bonus |
 | institute, foundation, non_profit | `institute` | listed as "N institute mention(s), not scored"; an institute affiliation is not a company-affiliated author |
 | software, ai_tool, llm | `ai_tool` | listed as "N AI tool(s), not scored" (language-polishing and structure-prediction credits are not commercial signals) |
+| *(no entry)* `unlisted:<slug>` | `unlisted` | an OpenAlex company-typed affiliation the gazetteer does not know (`Pipeline.extract`); listed as "N company-type institution(s) not in the gazetteer, not scored", never a company mention, never a company-affiliated author and never named in "why it matters". OpenAlex's institution resolution is noisy (an ORCID URL typed as a social-media company, "Mivax" resolved to "Mabvax"), so the pipeline already drops a company-typed institution whose name the author's raw affiliation string does not corroborate (docs/gazetteer.md, Sections); what survives is a candidate for `companies.yaml`, not evidence about the paper |
 
 The top list applies the same split: its per-paper line reads `Companies: ...`, `Institutes / funders: ...`
 and `AI tools: ...`, and an entity that appears only in funding, competing-interest or acknowledgement text

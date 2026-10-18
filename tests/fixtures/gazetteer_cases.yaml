@@ -31,6 +31,43 @@ cases:
   gazetteer: instrument
   expect: []
   reject: [pacb-revio]
+# ---------------- inflected dictionary words (DATA-06: SMARTer read the comparative 'smarter') ----------------
+- text: "CAR-NK cell therapy in acute myeloid leukemia: safer, smarter, and moving toward clinical translation"
+  gazetteer: instrument
+  expect: []
+  reject: [takara-smart-seq]
+- text: "When, Where, and How Much: Toward Smarter Design and Delivery of CAR T-Cell Therapy"
+  gazetteer: instrument
+  expect: []
+  reject: [takara-smart-seq]
+- text: "PD19-05 SMARTER SCREENING AND TREATMENT (S3T): MITIGATING HARM VIA AGE- AND BASELINE-PSA STRATIFIED PATHWAYS"
+  gazetteer: instrument
+  expect: []
+  reject: [takara-smart-seq]
+- text: "For full-length transcript sequencing, cDNA was synthesized using the SMARTer PCR cDNA Synthesis Kit (Takara Bio) and size-selected."
+  gazetteer: instrument
+  expect: [takara-smart-seq]
+  reject: []
+- text: "Here we compare three sequencing protocols, SMARTer, Smart-Seq and Tang, in terms of their dropout rate using 33 datasets."
+  gazetteer: instrument
+  expect: [takara-smart-seq]
+  reject: []
+- text: "Herring hold a broad distribution throughout the North Pacific, from the Arctic to temperate latitudes."
+  gazetteer: instrument
+  expect: []
+  reject: [gatan-k3]
+- text: "Movies were recorded on a K3 direct detector using Latitude S (Gatan) for automated acquisition."
+  gazetteer: instrument
+  expect: [gatan-k3]
+  reject: []
+- text: "Cultures were grown overnight to enrich S. aureus before plating on blood agar."
+  gazetteer: instrument
+  expect: []
+  reject: [biorad-ngc]
+- text: "The lysate was loaded on an ENrich S cation-exchange column run on an NGC chromatography system (Bio-Rad)."
+  gazetteer: instrument
+  expect: [biorad-ngc]
+  reject: []
 # ---------------- dictionary-word aliases ----------------
 - text: "A 100-Hounsfield-unit attenuation was evident on the monitor and an evident score indicated enhancement."
   gazetteer: instrument
