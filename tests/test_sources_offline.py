@@ -139,6 +139,90 @@ def test_sra_fetch_uses_real_accessions_and_counts_synthetic_ones(caplog):
     assert "1 record(s) had no parseable experiment accession" in caplog.text
 
 
+class _Resp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _StatusHttp:
+    """Mimics litradar.http.Http.get: queued Response-like objects, plus get_json for the esummary pages."""
+
+    def __init__(self, responses, json_payloads=()):
+        self.responses = list(responses)
+        self.json_payloads = list(json_payloads)
+        self.calls = []
+
+    def get(self, url, params=None, headers=None, cache=False, ok_statuses=(200,)):
+        self.calls.append((url, dict(params or {})))
+        return self.responses.pop(0) if self.responses else None
+
+    def get_json(self, url, params=None, cache=False):
+        self.calls.append((url, dict(params or {})))
+        return self.json_payloads.pop(0) if self.json_payloads else None
+
+
+def test_sra_api_key_is_sent_only_when_it_looks_like_a_key(caplog):
+    from litradar.sources import sra
+
+    sra._warned_bad_key = False
+    assert sra.usable_api_key("0123456789abcdef0123456789abcdef0123") == "0123456789abcdef0123456789abcdef0123"
+    assert sra.usable_api_key("") == "" and sra.usable_api_key("   ") == ""
+    with caplog.at_level("WARNING", logger="litradar.sources.sra"):
+        # what a README-literal `cp .env.example .env` used to load: the inline comment became the key value
+        assert sra.usable_api_key("# https://account.ncbi.nlm.nih.gov/settings/   E-utilities 3 -> 10 requests/s") == ""
+        assert sra.usable_api_key("abc def") == "" and sra.usable_api_key("key#1") == ""
+    assert sra.usable_api_key("K") == "K"  # short but well-formed keys are NCBI's problem to refuse (HTTP 400 -> SraError)
+    assert caplog.text.count("does not look like an NCBI key") == 1  # warned once, not per request
+    esearch = {"esearchresult": {"count": "0", "webenv": "", "querykey": ""}}
+    http = _StatusHttp([_Resp(200, esearch)])
+    assert list(sra.fetch(http, "2026-10-10", "2026-10-17", api_key="# comment text")) == []
+    assert "api_key" not in http.calls[0][1]
+    http = _StatusHttp([_Resp(200, esearch)])
+    list(sra.fetch(http, "2026-10-10", "2026-10-17", api_key="0123456789abcdef0123456789abcdef0123"))
+    assert http.calls[0][1]["api_key"] == "0123456789abcdef0123456789abcdef0123"
+    # GEO shares the rule
+    from litradar.sources import geo
+
+    assert "api_key" not in geo._params("# not a key", term="x") and geo._params("0123456789abcdef0123456789abcdef0123", term="x")["api_key"]
+
+
+def test_sra_fetch_raises_on_esearch_failures_instead_of_an_empty_census():
+    import pytest
+
+    from litradar.sources import sra
+
+    # HTTP 400 (what a garbage api_key earns): the status, NCBI's body and the hint are in the message
+    http = _StatusHttp([_Resp(400, None, text='{"error":"API key invalid","api-key":"# comment"}')])
+    with pytest.raises(sra.SraError, match=r"HTTP 400 .*check NCBI_API_KEY.*API key invalid"):
+        list(sra.fetch(http, "2026-10-10", "2026-10-17"))
+    # an error envelope with HTTP 200
+    http = _StatusHttp([_Resp(200, {"error": "API rate limit exceeded", "api-key": "1.2.3.4", "count": 3, "limit": 3})])
+    with pytest.raises(sra.SraError, match="API rate limit exceeded"):
+        list(sra.fetch(http, "2026-10-10", "2026-10-17"))
+    # NCBI's own ERROR field inside esearchresult
+    http = _StatusHttp([_Resp(200, {"esearchresult": {"ERROR": "Database: sra - is not supported"}})])
+    with pytest.raises(sra.SraError, match="is not supported"):
+        list(sra.fetch(http, "2026-10-10", "2026-10-17"))
+    # the client gave up (retries exhausted / host blocked)
+    with pytest.raises(sra.SraError, match="gave no answer"):
+        list(sra.fetch(_StatusHttp([None]), "2026-10-10", "2026-10-17"))
+    # a count without a WebEnv cannot be paged: say so
+    http = _StatusHttp([_Resp(200, {"esearchresult": {"count": "12", "webenv": "", "querykey": ""}})])
+    with pytest.raises(sra.SraError, match="no WebEnv"):
+        list(sra.fetch(http, "2026-10-10", "2026-10-17"))
+    # a genuine zero is not an error
+    assert list(sra.fetch(_StatusHttp([_Resp(200, {"esearchresult": {"count": "0", "idlist": []}})]), "2026-10-10", "2026-10-17")) == []
+    # count() stays advisory: logs and returns 0 rather than raising
+    assert sra.count(_StatusHttp([_Resp(400, None, text="bad")]), "x[PDAT]") == 0
+
+
 def test_crossref_filters_on_created_date_and_falls_back_to_online_pub_date():
     empty = {"status": "ok", "message": {"items": [], "next-cursor": "c1"}}
     hit = {"status": "ok", "message": {"items": [{"DOI": "10.1016/x"}], "next-cursor": None}}
