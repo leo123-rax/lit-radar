@@ -50,11 +50,40 @@ log = logging.getLogger(__name__)
 
 INSTRUMENT_SECTIONS = ("title", "abstract", "methods")
 COMPANY_SECTIONS = ("title", "abstract", "methods", "funding", "coi", "ack", "affiliations")
+# `--sources` ids, by pipeline stage. `rss` is the journal / subject paper feeds AND the whole news layer (historical
+# behaviour); the NEWS_SOURCES ids select the news layer alone: `news` = every sub-layer, the others one each (the
+# feed kinds `news` / `press` / `gnews` of feeds.yaml, the SEC 8-K feeds, GDELT). `sec`, `gdelt` and `gnews` are also
+# the ids the error list and HOST_SOURCES use, so the `litradar run --sources <id> -v` hint of status / coverage works.
+PAPER_SOURCES = ("biorxiv", "medrxiv", "europepmc", "openalex", "crossref", "arxiv", "rss", "chinaxiv", "scielo", "kci", "jstage")
 ARCHIVE_SOURCES = ("sra", "ena", "geo", "pride", "cellxgene", "gsa", "gsa_human")
+NEWS_SOURCES = ("news", "press", "sec", "gdelt", "gnews")
 SIGNAL_SOURCES = ("nih_reporter", "clinicaltrials", "openfda")
+ENRICHMENT_SOURCES = ("semantic_scholar",)
+RUN_SOURCES = PAPER_SOURCES + ARCHIVE_SOURCES + NEWS_SOURCES + SIGNAL_SOURCES + ENRICHMENT_SOURCES
 SIGNAL_FEEDS = ("nih-reporter", "clinicaltrials", "fda-510k", "fda-pma", "fda-denovo")
 DEFAULT_NAME_MATCH_CAP = 5  # per run, per tracked name, when the match is by name only (common names)
 FTS_OPTIMIZE_MIN_CHANGES = 50  # FTS rows rewritten in one run before the segments are merged (radar.yaml: fts_optimize_after)
+# SEC EDGAR 8-K Atom feed per ticker: built here for the pipeline and reused by `litradar fetch sec`
+SEC_8K_ATOM_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"
+
+
+def sec_feed_url(ticker: str) -> str:
+    """The EDGAR 8-K Atom feed for a plain US ticker (the company's filings, newest first, 20 entries)."""
+    return SEC_8K_ATOM_URL.format(ticker=ticker)
+
+
+def unknown_sources(only: Optional[Sequence[str]]) -> List[str]:
+    """The entries of a `--sources` list that no pipeline stage reads (so a typo is reported instead of fetching nothing)."""
+    return [s for s in (only or ()) if s not in RUN_SOURCES]
+
+
+def news_layers(only: Optional[Sequence[str]]) -> Optional[Set[str]]:
+    """Which news sub-layers a `--sources` subset selects: None = all of them (no subset, or `rss` / `news` named),
+    else the named ids among NEWS_SOURCES (empty set = the news layer was not asked for)."""
+    if only is None or "rss" in only or "news" in only:
+        return None
+    return {s for s in only if s in NEWS_SOURCES}
+
 
 # API hosts -> the source id a user would pass to `litradar run --sources`; used when a host is skipped
 # (429 circuit breaker) or never answered successfully, so the run's error list names the source
@@ -908,8 +937,13 @@ class Pipeline:
                 log.exception("gsa_human failed")
         return n
 
-    def fetch_news(self, since: str) -> int:
+    def fetch_news(self, since: str, only: Optional[Sequence[str]] = None) -> int:
         """Trade press, press wires, SEC 8-K filings and per-company news.
+
+        ``only`` is the ``--sources`` subset: ``None``, ``rss`` or ``news`` run every layer below as configured;
+        ``press`` / ``news`` (feed kinds), ``sec``, ``gdelt`` and ``gnews`` run that layer alone, and like
+        ``_enabled`` an explicitly named layer overrides its ``enabled`` / ``news.gdelt`` switch. Google News is
+        the exception: it stays off unless ``news.google_news`` is true, whatever ``only`` says (see below).
 
         Layers (all configurable under ``news:`` and ``sources:`` in radar.yaml):
         * publisher RSS / press-wire RSS from config/feeds.yaml (kinds ``news`` and ``press``);
@@ -934,22 +968,31 @@ class Pipeline:
 
         n = 0
         news_cfg = self.cfg.get("news") or {}
-        google_on = bool(news_cfg.get("google_news", False))
-        gdelt_on = bool(news_cfg.get("gdelt", True))
+        layers = news_layers(only)  # None = every layer; else the subset of NEWS_SOURCES asked for
+
+        def layer_on(kind: str) -> bool:
+            return layers is None or kind in layers
+
+        # Google News is a legal opt-in, never switched on by --sources alone
+        google_on = bool(news_cfg.get("google_news", False)) and layer_on("gnews")
+        gdelt_on = bool(news_cfg.get("gdelt", True)) if layers is None else "gdelt" in layers
         gdelt_timespan = str(news_cfg.get("gdelt_timespan") or "7d")
         gdelt_language = str(news_cfg.get("gdelt_language") or "english")
         gdelt_max_chars = int(news_cfg.get("gdelt_max_query_chars") or gdelt_src.MAX_QUERY_CHARS)
         gdelt_batch_size = int(news_cfg.get("gdelt_batch_size", gdelt_src.DEFAULT_BATCH_SIZE) or 0)
         feeds: List[Dict[str, Any]] = []
         for f in self.feeds:
-            if f.get("kind") == "gnews" and not google_on:
+            kind = str(f.get("kind") or "news")
+            if not layer_on(kind):
+                continue
+            if kind == "gnews" and not google_on:
                 self.counts["news.gnews_skipped"] += 1
                 continue
             feeds.append(dict(f))
         if self.feeds and not google_on and self.counts["news.gnews_skipped"]:
             log.info("Google News RSS is opt-in (news.google_news: false); skipped %d configured gnews feed(s)", self.counts["news.gnews_skipped"])
         raw_by_id = {x.get("id"): x for x in (self.settings.yaml("companies") or {}).get("entries", [])}
-        sec_on = bool(self._src("sec").get("enabled", True))
+        sec_on = bool(self._src("sec").get("enabled", True)) if layers is None else "sec" in layers
         if sec_on and not self.settings.contact_email:
             # prefixed with the source id so status / coverage tooling maps it to `--sources sec`
             msg = "sec: SEC 8-K feeds skipped (LITRADAR_CONTACT_EMAIL not set; EDGAR requires '<tool> <contact e-mail>' in the User-Agent and answers 403 otherwise)"
@@ -1013,7 +1056,7 @@ class Pipeline:
                               "url": f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en"})
             if sec_on and re.fullmatch(r"[A-Z]{1,5}", e.ticker or ""):
                 feeds.append({"name": f"SEC 8-K {e.ticker}", "kind": "sec", "company": e.id, "company_name": e.name,
-                              "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={e.ticker}&type=8-K&dateb=&owner=include&count=20&output=atom"})
+                              "url": sec_feed_url(e.ticker)})
         for f in feeds:
             try:
                 items: List[NewsItem] = []
@@ -1414,8 +1457,8 @@ class Pipeline:
             self.ingest(papers)
             if only is None or any(s in only for s in ARCHIVE_SOURCES):
                 self.fetch_archives(since, until, only=only)
-            if only is None or "rss" in only:
-                self.fetch_news(since)
+            if only is None or "rss" in only or any(s in only for s in NEWS_SOURCES):
+                self.fetch_news(since, only=only)
             if only is None or any(s in only for s in SIGNAL_SOURCES):
                 self.fetch_signals(since, until, only=only)
             if self._enabled("semantic_scholar", only):

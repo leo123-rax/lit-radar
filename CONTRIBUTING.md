@@ -53,9 +53,13 @@ ruff check litradar tests
    `context_required: true` and list `context_terms`. The tests in `tests/test_gazetteer.py` show the
    pattern.
 3. **New sources.** Add a module under `litradar/sources/` that yields `Paper`, `ArchiveRecord` or
-   `NewsItem` objects, wire it into `litradar/pipeline.py`, add an offline test with a canned payload,
-   and add a note under `docs/sources/` with the source's terms and documented rate limit. Only
-   documented API endpoints and RSS feeds that serve scripts are accepted (see the ground rules).
+   `NewsItem` objects, wire it into `litradar/pipeline.py` (and into the `--sources` id tuples there,
+   so `litradar run --sources <id>` reaches it), add a `SourceSpec` to `REGISTRY` in
+   `litradar/toolkit.py` so `litradar fetch <id>` can probe it on its own (the registry test in
+   `tests/test_toolkit_fetch.py` fails for any adapter module without one), add an offline test with a
+   canned payload, and add a note under `docs/sources/` with the source's terms and documented rate
+   limit. Only documented API endpoints and RSS feeds that serve scripts are accepted (see the ground
+   rules).
 4. **OpenAlex topic ids and author ids** in `config/subgroups.yaml`; these make researcher tracking exact.
 
 ## Ground rules

@@ -317,6 +317,12 @@ In addition, at the end of a run (`Pipeline._fold_http_errors`):
 Hosts map to source ids through `pipeline.HOST_SOURCES`; a source that already reported its own error (gdelt,
 OpenAlex) is not listed twice.
 
+Every id that can appear there is accepted by `litradar run --sources` (`pipeline.RUN_SOURCES`; anything else is a
+usage error, exit 2). The news layer has its own ids: `news` runs all of it, `press`, `sec`, `gdelt` and `gnews` run
+one sub-layer each (the feed kinds of `config/feeds.yaml`, the SEC 8-K feeds, GDELT), so the re-run hint for
+`sec: ...` or `gdelt: ...` does what it says; `rss` still runs the journal / subject paper feeds plus the whole news
+layer. Google News stays off unless `news.google_news` is true, whatever `--sources` names.
+
 ## 12. Coverage and method block
 
 The digest's "Coverage and method" section separates two kinds of numbers that used to be mixed:

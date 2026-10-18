@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -21,7 +22,7 @@ from typing import List, Optional
 from .. import incremental
 from .. import query as Q
 from ..config import Settings
-from ..pipeline import Pipeline
+from ..pipeline import RUN_SOURCES, Pipeline, unknown_sources
 from ..store import Store
 
 log = logging.getLogger(__name__)
@@ -45,25 +46,42 @@ def _last_run_readonly(db_path: Path) -> Optional[dict]:
         conn.close()
 
 
-def cmd_update(args) -> int:
-    settings = Settings.from_env(config_dir=args.config_dir)
-    only: Optional[List[str]] = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
-    if args.dry_run:
-        # read-only on purpose: the store is opened only on the fetching path, so a dry run creates no data/radar.sqlite
-        last = _last_run_readonly(Path(settings.db_path))
-        plan = incremental.compute_window(last["until"] if last else None, overlap_days=args.overlap_days, max_days=args.max_days, since=args.since, until=args.until)
-        print(json.dumps({"dry_run": True, "plan": plan, "sources": only or "all", "db_path": str(settings.db_path), "last_run": last}, indent=1, default=str))
-        return 0
-
-    store = Store(settings.db_path)
-    last = incremental.last_run(store.conn)
-    plan = incremental.compute_window(
+def _plan(args, last: Optional[dict]) -> dict:
+    return incremental.compute_window(
         last["until"] if last else None,
         overlap_days=args.overlap_days,
         max_days=args.max_days,
         since=args.since,
         until=args.until,
     )
+
+
+def cmd_update(args) -> int:
+    settings = Settings.from_env(config_dir=args.config_dir)
+    only: Optional[List[str]] = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
+    bad = unknown_sources(only)
+    if bad:
+        print(f"litradar update: error: unknown source(s) {', '.join(bad)}; choose from: {', '.join(RUN_SOURCES)}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        # read-only on purpose: the store is opened only on the fetching path, so a dry run creates no data/radar.sqlite
+        last = _last_run_readonly(Path(settings.db_path))
+        try:
+            plan = _plan(args, last)
+        except ValueError as exc:  # --since after --until, or an impossible overlap / cap
+            print(f"litradar update: error: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps({"dry_run": True, "plan": plan, "sources": only or "all", "db_path": str(settings.db_path), "last_run": last}, indent=1, default=str))
+        return 0
+
+    store = Store(settings.db_path)
+    last = incremental.last_run(store.conn)
+    try:
+        plan = _plan(args, last)
+    except ValueError as exc:
+        store.close()
+        print(f"litradar update: error: {exc}", file=sys.stderr)
+        return 2
     log.info("update window %s..%s (%s days, basis=%s%s)", plan["since"], plan["until"], plan["days"], plan["basis"], ", capped" if plan["capped"] else "")
     started = _now()
     pipe = Pipeline(settings, store=store)
@@ -104,7 +122,7 @@ def register(sub) -> None:
     p.add_argument("--max-days", type=int, default=incremental.DEFAULT_MAX_DAYS, help=f"cap on the window length (default {incremental.DEFAULT_MAX_DAYS}); repair a longer outage with --since")
     p.add_argument("--since", type=Q.iso_date_arg, help="override the window start (YYYY-MM-DD)")
     p.add_argument("--until", type=Q.iso_date_arg, help="override the window end (YYYY-MM-DD; default today UTC)")
-    p.add_argument("--sources", help="comma-separated subset: biorxiv,europepmc,openalex,crossref,arxiv,rss,sra,ena")
+    p.add_argument("--sources", help="comma-separated subset of the ids `litradar run --sources` takes (biorxiv,europepmc,openalex,crossref,arxiv,rss,sra,ena,news,sec,gdelt ...); an unknown id is a usage error")
     p.add_argument("--llm", action="store_true", help="score the shortlist with Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--no-fulltext", action="store_true", help="skip full-text retrieval (default: on)")
     p.add_argument("--dry-run", action="store_true", help="print the window that would be fetched and exit")
