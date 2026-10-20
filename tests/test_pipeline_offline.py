@@ -543,7 +543,7 @@ def test_semantic_scholar_total_failure_is_an_error(tmp_path, monkeypatch):
     summary = {"candidates": 2848, "requested": 0, "matched": 0, "updated": 0, "unmatched": 0, "batches": 2, "failed_batches": 2, "citations": {}}
     monkeypatch.setattr(pl.s2_src, "enrich_citations", lambda *a, **k: dict(summary))
     rep = _run(pipe, monkeypatch, [_preprint(fulltext_url="")], attach=_no_attach, only=("biorxiv", "semantic_scholar"))
-    assert rep["errors"] == ["semantic_scholar: 2 batch(es) failed and no DOI was matched (0 of 2848 candidate DOIs requested)"]
+    assert rep["errors"] == ["semantic_scholar: rate-limited (shared pool throttling): 2 batch(es) failed and no DOI was matched (0 of 2848 candidate DOIs requested)"]
     # a partial failure with matches is not an error (it is counted)
     monkeypatch.setattr(pl.s2_src, "enrich_citations", lambda *a, **k: dict(summary, failed_batches=1, matched=5, requested=500))
     pipe2 = Pipeline(_settings(tmp_path), http=FakeHttp())
@@ -904,9 +904,10 @@ def test_openalex_company_institutions_are_dropped_when_the_raw_affiliation_disa
 
 def test_shipped_radar_yaml_wires_the_global_corpus_sources():
     sources = Settings.from_env().radar["sources"]
-    for name in ("gsa", "gsa_human", "chinaxiv", "scielo", "kci"):
+    for name in ("gsa", "gsa_human", "chinaxiv", "scielo"):
         assert sources[name]["enabled"] is True, name
     assert sources["jstage"]["enabled"] is False  # terms: 24-hour caching clause and credit requirement; opt-in only
+    assert sources["kci"]["enabled"] is False  # opt-in since 2026-10-19: empty OAI responses in hosted runs, ~0 recent yield
     assert sources["openalex"]["country_slices"] == ["CN"]
     assert sources["gsa"]["center"] == "NGDC" and sources["gsa"]["statistics_snapshot"] is False
     assert sources["chinaxiv"]["life_science_only"] is True and sources["kci"]["keywords"]

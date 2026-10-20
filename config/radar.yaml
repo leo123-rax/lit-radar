@@ -105,7 +105,8 @@ sources:
     max_articles: 2000      # article fetches per run (one request each, after one per identifier page and one per journal)
 
   kci:
-    enabled: true           # KCI (Korea Citation Index) OAI-PMH. Live check 2026-10-17: page 1 = 100 records, all 2013-2016 re-processed
+    enabled: false          # KCI (Korea Citation Index) OAI-PMH; opt-in since 2026-10-19: the endpoint answered a hosted run with an empty
+                            # response and the recent-yield after filtering is ~0. Live check 2026-10-17: page 1 = 100 records, all 2013-2016 re-processed
                             # back catalogue (the datestamp is KCI's processing date), so the filters below do the real work
     keywords: [genom, sequenc, 유전체, 시퀀싱, proteom, 단백체, single-cell, 단일세포, spatial transcriptom, 공간전사체, CRISPR, 크리스퍼]
     categories: []          # KCI subject strings, e.g. [의학, 생물학, 약학]; empty = all

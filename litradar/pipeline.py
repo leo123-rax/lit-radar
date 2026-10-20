@@ -1288,7 +1288,7 @@ class Pipeline:
                 self.counts[f"semantic_scholar.{k}"] = int(s2.get(k, 0) or 0)
             failed = int(s2.get("failed_batches", 0) or 0)
             if failed and not int(s2.get("matched", 0) or 0) and int(s2.get("candidates", 0) or 0):
-                msg = (f"semantic_scholar: {failed} batch(es) failed and no DOI was matched "
+                msg = (f"semantic_scholar: rate-limited (shared pool throttling): {failed} batch(es) failed and no DOI was matched "
                        f"({int(s2.get('requested', 0) or 0)} of {int(s2.get('candidates', 0) or 0)} candidate DOIs requested)")
                 log.warning(msg)
                 self.errors.append(msg)
@@ -1602,7 +1602,15 @@ class Pipeline:
             if src in covered:
                 continue
             n = int((r.get("failures_by_host") or {}).get(host, 0) or 0)
-            msg = f"{src}: all {n} request(s) to {host} failed; no successful response this run"
+            fetched = sum(int(v or 0) for k, v in (getattr(self, "counts", {}) or {}).items()
+                          if str(k).startswith(f"fetched.{src}") or str(k).startswith(f"news.{src}"))
+            if fetched > 0:
+                # one dead host of a multi-host source (a feed that 403s scripted clients): the source itself delivered,
+                # so the run is degraded, not failed; `status` keys on the "degraded:" marker
+                msg = (f"{src}: degraded: all {n} request(s) to {host} failed while the source's other hosts answered "
+                       f"({fetched} record(s) fetched)")
+            else:
+                msg = f"{src}: all {n} request(s) to {host} failed; no successful response this run"
             log.warning(msg)
             self.errors.append(msg)
             covered.add(src)

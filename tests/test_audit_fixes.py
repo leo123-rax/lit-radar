@@ -375,3 +375,12 @@ def test_digest_before_the_first_run_exits_1_with_a_hint_and_creates_nothing(liv
     _seed_run(st, SINCE, UNTIL, NOW - timedelta(hours=1))
     st.close()
     assert main(["digest", "--since", SINCE, "--until", UNTIL]) == 0
+
+
+def test_throttling_and_partial_host_failures_are_degraded_not_failed():
+    from litradar.incremental import classify_error
+
+    assert classify_error("semantic_scholar: rate-limited (shared pool throttling): 2 batch(es) failed and no DOI was matched") == "degraded"
+    assert classify_error("rss: degraded: all 3 request(s) to www.example.org failed while the source's other hosts answered (219 record(s) fetched)") == "degraded"
+    assert classify_error("rss: all 3 request(s) to www.example.org failed; no successful response this run") == "failed"
+    assert classify_error("kci: KCI OAI-PMH: empty response (HTTP_ERROR)") == "failed"

@@ -126,7 +126,8 @@ def error_sources(errors: Sequence[str]) -> List[str]:
 CONFIG_ERROR_MARKERS = ("not set", "not configured", "api key", "api_key", "contact_email", "litradar_", "budget", "insufficient")
 # Error text that says the remote host throttled us (HTTP 429 or the client's own circuit breaker): the run went on
 # without that host, the pipeline reports exactly what it skipped, and tomorrow's run retries. Degraded, not failed.
-RATE_LIMIT_MARKERS = ("rate-limited", "rate limited", "http 429", "too many requests")
+RATE_LIMIT_MARKERS = ("rate-limited", "rate limited", "http 429", "too many requests", "throttl", "shared pool",
+                      "degraded:")  # "degraded:" is the pipeline's own prefix for a partial failure (one host of many)
 
 ERROR_CLASSES = ("failed", "degraded", "config")
 
