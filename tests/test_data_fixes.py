@@ -2,7 +2,7 @@
 preprint kind, one work = one row (version DOIs, DOI-less twins), backfill tags the tagger can read, tracked-author
 gates (non-paper records, ORCID, topical plausibility), RSS item dates and the Europe PMC index-date window."""
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 from litradar import backfill, concepts, i18n
 from litradar import pipeline as pl
@@ -411,7 +411,7 @@ def test_rss_dates_come_from_nested_and_prism_elements():
     items = {it["title"]: it for it in rss.parse_feed(RDF, feed_name="JCO")}
     assert items["Nested date"]["date"] == "2026-09-08" and items["Nested date"]["doi"] == "10.1200/jco-26-00469" and items["Nested date"]["authors"] == ["A Person"]
     assert items["Cover date only"]["date"] == "2026-10-20"
-    today = date.today().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()  # the parser caps at the UTC date, not the local one
     assert items["In press, month precision"]["date"] == today  # a future issue month: the item is online now
     assert items["No date at all"]["date"] == ""
     assert rss._parse_date("2026-09", today=date(2026, 10, 18)) == "2026-09-01" and rss._parse_date("2026-13") == ""

@@ -61,14 +61,19 @@ class FakePage:
     def content(self):
         return self._html if isinstance(self._html, str) else "<html></html>"
     def close(self):
-        pass
+        pages = getattr(self.ctx, "pages", None)
+        if pages is not None and self in pages:
+            pages.remove(self)  # Playwright drops closed pages from context.pages
 
 
 class FakeContext:
     def __init__(self, html, redirect):
         self.html, self.redirect = html, redirect  # html: str, or {url-substring: html}
+        self.pages = []
     def new_page(self):
-        return FakePage(self, self.html, "")
+        pg = FakePage(self, self.html, "")
+        self.pages.append(pg)
+        return pg
     def close(self):
         pass
 
@@ -122,3 +127,41 @@ def test_read_one_facts_only_and_keep_text(tmp_path, monkeypatch):
     locked = S.read_one(pipe, settings, "10.1038/s41592-026-00000-0", html_override=PAYWALL_HTML)
     assert "paywall markers present" in locked.error
     assert "Methods" in S.format_card(r)
+
+
+def test_login_probes_only_after_the_sign_in_redirect(tmp_path):
+    settings = Settings(cache_dir=tmp_path)
+    login_url = S.PUBLISHERS["nature"]["login_url"]
+    probes = []
+    class CountingPW(FakePW):
+        def launch_persistent_context(self, user_data_dir, headless=True):
+            ctx = super().launch_persistent_context(user_data_dir, headless)
+            orig = ctx.new_page
+            def new_page():
+                pg = orig()
+                orig_goto = pg.goto
+                def goto(url, **kw):
+                    if S.PUBLISHERS["nature"]["probe_url"] in url:
+                        probes.append(url)
+                    return orig_goto(url, **kw)
+                pg.goto = goto
+                return pg
+            ctx.new_page = new_page
+            return ctx
+    ticks = [0.0]
+    def clock():
+        ticks[0] += 5.0
+        return ticks[0]
+    # no redirect: the paywalled login page stays put, and no probe tab opens before quiet_s
+    pw_out = lambda: CountingPW(PAYWALL_HTML, {})  # noqa: E731
+    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=pw_out, sleep=lambda s: None, clock=clock, probe_every_s=30, quiet_s=60)
+    assert rep["logged_in"] is False and probes == [S.PUBLISHERS["nature"]["probe_url"]]  # the initial status check only
+    # redirect to the publisher host: probed on the next poll and detected
+    probes.clear()
+    ticks[0] = 0.0
+    pw_in = lambda: CountingPW({"nature.com": NATURE_HTML, "idp.nature.com": PAYWALL_HTML}, {login_url: "https://www.nature.com/"})  # noqa: E731
+    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=pw_in, sleep=lambda s: None, clock=clock, probe_every_s=30, quiet_s=60)
+    assert rep["logged_in"] is True
+    assert S._left_sign_in(["https://idp.nature.com/auth/personal/springernature"], S.PUBLISHERS["nature"]) is False
+    assert S._left_sign_in(["https://www.nature.com/"], S.PUBLISHERS["nature"]) is True
+    assert S._left_sign_in(["https://www.science.org/action/showLogin?redirectUri=%2F"], S.PUBLISHERS["science"]) is False

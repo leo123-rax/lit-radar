@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlparse, urlsplit
 
 from lxml import html as lxml_html
 
@@ -290,6 +290,11 @@ class Session:
             if self._pw is not None and hasattr(self._pw, "stop"):
                 self._pw.stop()
 
+    def page_urls(self) -> List[str]:
+        """URLs of every open tab in the window (empty when the driver exposes none)."""
+        pages = getattr(self._context, "pages", None) or []
+        return [str(getattr(pg, "url", "") or "") for pg in pages]
+
     def fetch(self, url: str, wait_until: str = "domcontentloaded", timeout_ms: int = 45000) -> Tuple[str, str]:
         page = self._context.new_page()
         try:
@@ -318,7 +323,20 @@ def is_logged_in(session: Session, publisher: str) -> bool:
     return bool(pub["logged_in"](final_url, html_text))
 
 
-def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll_s: float = 4.0, factory: Optional[Callable[[], Any]] = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> Dict[str, Any]:
+def _left_sign_in(urls: List[str], pub: Dict[str, Any]) -> bool:
+    """True when any open tab sits on the publisher's own host and no longer on a sign-in page: the redirect that
+    follows a successful login (idp.* hosts and URLs containing 'login' do not count)."""
+    for u in urls:
+        low = (u or "").lower()
+        if not low.startswith("http") or "login" in low:
+            continue
+        host = urlparse(low).netloc
+        if host in pub.get("hosts", []) and not host.startswith("idp."):
+            return True
+    return False
+
+
+def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll_s: float = 4.0, factory: Optional[Callable[[], Any]] = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic, probe_every_s: float = 30.0, quiet_s: float = 60.0) -> Dict[str, Any]:
     """Open the publisher's sign-in page in a VISIBLE window and wait until the user has signed in.
 
     The code never fills the form: the user types their own credentials in their own browser window.
@@ -331,12 +349,32 @@ def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll
             return {"publisher": publisher, "logged_in": True, "seconds": 0.0, "note": "already signed in"}
         page = s.open_for_user(PUBLISHERS[publisher]["login_url"])
         print(f"A browser window is open on the {publisher} sign-in page. Sign in there; this command waits up to {wait_s // 60} minutes.", flush=True)
+        # The probe opens a tab of its own, which steals focus from the form the user is typing in, so it runs
+        # only after a tab has left the sign-in page (the post-login redirect) and at most every `probe_every_s`;
+        # without that signal it waits `quiet_s` before a first probe and then probes every 3 x probe_every_s.
         ok = False
+        last_probe: Optional[float] = None
+        told = False
+        pub = PUBLISHERS[publisher]
         while clock() - start < wait_s:
             sleep(poll_s)
+            now = clock()
+            redirected = _left_sign_in(s.page_urls(), pub)
+            interval = probe_every_s if redirected else 3 * probe_every_s
+            if last_probe is None:
+                due = redirected or (now - start) >= quiet_s
+            else:
+                due = (now - last_probe) >= interval
+            if not due:
+                continue
+            last_probe = now
             if is_logged_in(s, publisher):
                 ok = True
                 break
+            if redirected and not told:
+                told = True
+                print("Sign-in redirect seen, but the probe article still looks paywalled; probing again every "
+                      f"{int(probe_every_s)} s (a personal subscription must cover the flagship journal).", flush=True)
         try:
             page.close()
         except Exception:  # noqa: BLE001
