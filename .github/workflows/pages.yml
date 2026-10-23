@@ -1,7 +1,8 @@
 # Publishes the static trends dashboard to GitHub Pages.
 #
-# Runs after the weekly digest finishes (workflow_run) so the site is rebuilt from the database the
-# digest just published, and on demand (workflow_dispatch). The database is restored from the
+# Runs after the weekly digest and after the daily update finish (workflow_run) so the site is rebuilt from the
+# database those jobs just published, and on demand (workflow_dispatch). The daily rebuild keeps the static search
+# index current for `litradar read-queue`, which picks its candidates from it. The database is restored from the
 # `radar.sqlite.zst` asset on the rolling `db-latest` release that the weekly and daily workflows
 # publish; nothing here fetches from any API and nothing here writes to the repository.
 # Besides the dashboard, the site carries `feed.xml`: an Atom feed of the newest digests, built from
@@ -23,7 +24,7 @@
 name: pages
 on:
   workflow_run:
-    workflows: ["weekly-digest"]
+    workflows: ["weekly-digest", "daily-update"]   # daily too: the static search index feeds the local reading queue
     types: [completed]
   workflow_dispatch:
     inputs:
