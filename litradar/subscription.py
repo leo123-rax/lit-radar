@@ -12,6 +12,7 @@ digest, coverage report and export can tell it apart. Nothing here is used by th
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -196,6 +197,16 @@ def extract_article(html_text: str, publisher: str) -> Dict[str, Any]:
         return out
     markers = PUBLISHERS.get(publisher, {}).get("paywall_markers", [])
     body_text = _text(root)
+    # reference lists are not article text: cited reports and author surnames would otherwise read as company /
+    # instrument mentions ("Takeda" the author, a cited vendor technical report)
+    for el in root.cssselect("section#references, section[id^='ref-list'], section[id^='references'], .references, ol.references, "
+                             ".c-article-references, [role='doc-bibliography'], div#bibliography, section.ref-list, div.ref-list"):
+        el.drop_tree()
+    for sec in root.cssselect("section"):
+        heads = sec.cssselect("h2, h3")
+        if heads and re.match(r"^\s*(references?|references and notes|notes and references|bibliography)\s*$", _text(heads[0]), re.I):
+            sec.drop_tree()
+    out["preview"] = bool(re.search(r"accelerated article preview|this is an unedited manuscript|unedited manuscript that has been accepted", body_text, re.I))
     buckets: Dict[str, List[str]] = {}
 
     def add(title: str, text: str) -> None:
@@ -232,7 +243,13 @@ def extract_article(html_text: str, publisher: str) -> Dict[str, Any]:
             if not heads:
                 continue
             title = _text(heads[0])
-            text = _text(sec)
+            # a wrapper section's text must not include the top-level sections nested inside it (science.org nests
+            # the whole body, references included, under one element): subtract nested sections that own an h2
+            own = copy.deepcopy(sec)
+            for nested in own.cssselect("section"):
+                if nested is not own and nested.cssselect("h2") and nested.getparent() is not None:
+                    nested.drop_tree()
+            text = _text(own)
             if text and title:
                 seen_any = True
                 add(title, text[len(title):].strip() if text.startswith(title) else text)
@@ -252,6 +269,8 @@ def extract_article(html_text: str, publisher: str) -> Dict[str, Any]:
                 kept.append(c)
         out["sections"][key] = "\n\n".join(kept)
     out["paywalled"] = (not out["sections"].get("methods")) and any(m in body_text or m in html_text for m in markers)
+    methods = out["sections"].get("methods") or ""
+    out["methods_in_supplement"] = bool(methods) and len(methods) < 800 and bool(re.search(r"supplementary (information|materials?)", methods, re.I))
     if not out["title"]:
         m = root.cssselect("meta[name='dc.title'], meta[property='og:title']")
         if m:
@@ -526,6 +545,8 @@ class ReadResult:
     score: Optional[float] = None
     stored_as: str = ""
     error: str = ""
+    preview: bool = False
+    methods_in_supplement: bool = False
     methods: str = ""
 
 
@@ -556,8 +577,13 @@ def read_one(pipe: Any, settings: Settings, target: str, keep_text: bool = False
     r.title, r.paywalled = art["title"], art["paywalled"]
     r.methods = art["sections"].get("methods", "")
     r.methods_chars = len(r.methods)
+    r.methods_in_supplement = bool(art.get("methods_in_supplement"))
     if r.paywalled or not r.methods:
-        r.error = f"no full text returned: {'paywall markers present' if r.paywalled else 'no Methods section found'}. Run `litradar login {pub}` first, then retry."
+        if art.get("preview"):
+            r.preview = True
+            r.error = "accelerated article preview: the publisher has only the unedited PDF online so far; retry after the final version appears"
+        else:
+            r.error = f"no full text returned: {'paywall markers present' if r.paywalled else 'no Methods section found'}. Run `litradar login {pub}` first, then retry."
         return r
     # metadata from the public indexes, then the sections from the page
     paper: Optional[Paper] = None

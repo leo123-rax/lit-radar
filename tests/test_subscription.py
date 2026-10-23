@@ -192,3 +192,41 @@ def test_login_checks_in_the_live_window_after_cookies_change_and_saves_the_sess
     rep = S.login(settings, "nature", wait_s=60, poll_s=1, factory=lambda: CountingPW({"nature.com": PAYWALL_HTML}, {}), sleep=lambda s: None, clock=clock, stdin_ready=lambda: True)
     assert rep["ended_by"] in ("timeout", "window closed") and probes[0] is False and len(probes) >= 2
     assert S._left_sign_in(["https://www.nature.com/"], S.PUBLISHERS["nature"]) is True
+
+
+SCIENCE_NESTED_HTML = """<html><body><h1 class="article-title">Nested page</h1>
+<section id="bodymatter"><h2>Main</h2>
+  <section><h2>Materials and Methods</h2><p>Cells were lysed and sequenced on a NovaSeq 6000 with TruSeq kits.</p></section>
+  <section id="references"><h2>References and Notes</h2><p>1 T. Takeda, Autonomous binder design with Claude, Anthropic technical report (2026). Google Scholar</p></section>
+</section></body></html>"""
+
+NATURE_PREVIEW_HTML = """<html><body><h1 class="c-article-title">Preview paper</h1>
+<section data-title="Abstract"><div class="c-article-section__content">This is an unedited manuscript that has been accepted for publication.</div></section>
+<p>Accelerated Article Preview</p></body></html>"""
+
+NATURE_SUPPLEMENT_HTML = """<html><body><h1 class="c-article-title">Supplement paper</h1>
+<section data-title="Abstract"><div class="c-article-section__content">Abstract text.</div></section>
+<section data-title="Methods"><div class="c-article-section__content">For completeness, the methods used in this study are described in the Supplementary Information.</div></section></body></html>"""
+
+
+def test_reference_lists_and_nested_wrappers_stay_out_of_the_methods_text():
+    art = S.extract_article(SCIENCE_NESTED_HTML, "science")
+    methods = art["sections"]["methods"]
+    assert "NovaSeq 6000" in methods and "Takeda" not in methods and "Anthropic" not in methods and "Google Scholar" not in methods
+
+
+def test_preview_and_supplement_only_pages_are_labelled(tmp_path, monkeypatch):
+    settings = Settings.from_env()
+    settings.db_path = tmp_path / "p.sqlite"
+    settings.cache_dir = tmp_path
+    monkeypatch.setattr("litradar.ingest.Resolver.resolve", lambda self, ident: None, raising=False)
+    art = S.extract_article(NATURE_PREVIEW_HTML, "nature")
+    assert art["preview"] is True and not art["sections"].get("methods")
+    from litradar.pipeline import Pipeline
+    pipe = Pipeline(settings, http=object())
+    r = S.read_one(pipe, settings, "10.1038/s41586-026-00001-1", html_override=NATURE_PREVIEW_HTML, store=False)
+    assert r.preview is True and r.error.startswith("accelerated article preview")
+    art2 = S.extract_article(NATURE_SUPPLEMENT_HTML, "nature")
+    assert art2["methods_in_supplement"] is True and 0 < len(art2["sections"]["methods"]) < 800
+    r2 = S.read_one(pipe, settings, "10.1038/s41586-026-00002-2", html_override=NATURE_SUPPLEMENT_HTML, store=False)
+    assert r2.methods_in_supplement is True and not r2.error
