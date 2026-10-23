@@ -128,6 +128,12 @@ jobs:
             echo "release exists but holds no $DB_ASSET yet: starting from an empty database"
             echo "restored=empty" >> "$GITHUB_OUTPUT"
           fi
+      - name: Import the reading facts committed under reads/ (no article text; docs/reading-assist.md)
+        # Facts only: which sections a paywalled paper had, how long its Methods were, and the gazetteer
+        # mentions. No publisher session and no article text ever reaches this runner. Advisory: a bad or
+        # empty facts file must never stop the daily update.
+        continue-on-error: true
+        run: python -m litradar reads-import
       - name: Update the corpus
         id: update
         run: |

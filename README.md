@@ -138,6 +138,7 @@ Every command reads `config/` and `.env` from the repo root; `python -m litradar
 | `backfill --from 2018-01 --to 2026-10` | grow the corpus from OpenAlex by topic and month (resumable; snapshot mode too) |
 | `tag [--translate]` · `export --parquet DIR` · `rematch` · `check-config` · `stats` | language/country tags, exports, re-annotation after gazetteer edits, validation |
 | `fetch <source> ...` · `fetch --list` · `browser-check` | raw access to every source client (24, one per adapter the pipeline runs, SEC 8-K and GDELT included) as JSON lines; the optional real-browser fetcher |
+| `login nature\|science` · `read <doi>` · `read-queue [--limit 20]` · `reads-import` | **optional, local only**: read the paywalled papers *your own* subscription covers. You sign in yourself in a real browser window; `read-queue` then reads the day's best candidates unattended (capped at 20/day, 20 s apart) and commits **facts only** to `reads/<date>.jsonl` — sections present, Methods length, instrument and company mentions, never a sentence of text. `reads-import` folds those facts into the database on CI, which never signs in anywhere. `docs/reading-assist.md` |
 
 Full docs: `docs/FORKING.md` (fork checklist), `docs/deploy.md` (GitHub Actions, Pages, laptop scheduling),
 `docs/DESIGN.md` (architecture and cost model), `docs/SOURCES.md` (every source, verified), `docs/COOKBOOK.md`
