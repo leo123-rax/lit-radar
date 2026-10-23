@@ -60,11 +60,22 @@ litradar read 10.1038/s41592-026-03265-w --no-store
   through `litradar add` and the open sources.
 
 
-### How the sign-in wait behaves (changed 2026-10-22)
+### How the sign-in wait behaves (final form, 2026-10-23)
 
-While the sign-in window is open the command does nothing at all: no probe tab, no reload, no timer-driven
-navigation, because a probe tab steals focus from the form and the publisher's own "log in" button may open a
-tab of its own. Sign in on whatever tab the publisher gives you, accept its cookie banner, then **close the
-browser window** (or press Enter in the terminal). Only then is the window closed from the code side (the
-profile keeps the cookies) and the flagship article fetched once, headless, to decide. If you sign in and walk
-away, the check still runs when `--wait` elapses.
+`litradar login nature|science` opens a window titled **Google Chrome for Testing** on the publisher's sign-in page
+and then leaves it completely alone: no probe tab, no reload, no timer-driven navigation while you type (a probe
+tab steals focus from the form, and the publisher's own "log in" button may open a tab of its own). Sign in
+**inside that window** — a login in your everyday browser does not count, the window keeps its own cookies — on
+whatever tab the publisher gives you, accept the cookie banner, and leave the window open.
+
+The command watches the profile's cookies (read-only). About ten seconds after they change it fetches the
+flagship article once in a tab of the *same* window; when the Methods come back it prints "signed in", saves the
+publisher's cookies and the window's user agent to `.cache/browser-profile/<publisher>-state.json` (mode 600,
+git-ignored) and closes the window itself. Publisher log-in cookies are session cookies, so this saved state is
+what makes later headless `read` calls signed in: every `Session` re-adds the cookies and, headless, reuses the
+window's user agent with the full Chromium build (a plain headless browser announces itself as "HeadlessChrome"
+and science.org's bot wall challenges it again). Enter in an interactive terminal forces a check; closing the
+window or the `--wait` timeout ends the wait with one final headless check.
+
+Verified 2026-10-23: both publishers signed in within about 45 seconds each; a paywalled Nature article returned
+29,807 characters of Methods and a Science article 38,161, headless, through the saved sessions.
