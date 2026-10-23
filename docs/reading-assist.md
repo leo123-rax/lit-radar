@@ -58,3 +58,13 @@ litradar read 10.1038/s41592-026-03265-w --no-store
 - The profile directory holds the publisher cookies. Delete `.cache/browser-profile/` to sign out everywhere.
 - Only `nature.com` and `science.org` are routed through the subscription session; every other DOI goes
   through `litradar add` and the open sources.
+
+
+### How the sign-in wait behaves (changed 2026-10-22)
+
+While the sign-in window is open the command does nothing at all: no probe tab, no reload, no timer-driven
+navigation, because a probe tab steals focus from the form and the publisher's own "log in" button may open a
+tab of its own. Sign in on whatever tab the publisher gives you, accept its cookie banner, then **close the
+browser window** (or press Enter in the terminal). Only then is the window closed from the code side (the
+profile keeps the cookies) and the flagship article fetched once, headless, to decide. If you sign in and walk
+away, the check still runs when `--wait` elapses.

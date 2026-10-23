@@ -27,7 +27,7 @@ def register(sub) -> None:
     p = sub.add_parser("login", help="sign in to a personal publisher subscription in a real browser window (you type the password; the code never sees it)")
     p.add_argument("publisher", nargs="?", choices=sorted(subscription.PUBLISHERS), help="nature or science")
     p.add_argument("--status", action="store_true", help="report which publishers have a live session")
-    p.add_argument("--wait", type=int, default=subscription.DEFAULT_WAIT_S, help="seconds to wait for you to finish signing in (default 300)")
+    p.add_argument("--wait", type=int, default=subscription.DEFAULT_WAIT_S, help="seconds to wait for you to sign in and close the browser window (default 300; Enter in the terminal also ends the wait)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_login)
     sys.modules.setdefault("litradar.commands.login", sys.modules[__name__])

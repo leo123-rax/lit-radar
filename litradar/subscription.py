@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import re
+import select
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -336,50 +338,53 @@ def _left_sign_in(urls: List[str], pub: Dict[str, Any]) -> bool:
     return False
 
 
-def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll_s: float = 4.0, factory: Optional[Callable[[], Any]] = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic, probe_every_s: float = 30.0, quiet_s: float = 60.0) -> Dict[str, Any]:
-    """Open the publisher's sign-in page in a VISIBLE window and wait until the user has signed in.
+def _stdin_ready() -> bool:
+    """True when the user pressed Enter in an interactive terminal (never blocks; False when stdin is not a TTY)."""
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return False
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if ready:
+            sys.stdin.readline()
+            return True
+    except (OSError, ValueError):
+        return False
+    return False
 
-    The code never fills the form: the user types their own credentials in their own browser window.
-    Returns {'publisher', 'logged_in', 'seconds'}."""
+
+def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll_s: float = 2.0, factory: Optional[Callable[[], Any]] = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic, stdin_ready: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    """Open the publisher's sign-in page in a VISIBLE window, leave it completely alone while the user signs in, and
+    check the session only afterwards.
+
+    The code never fills the form and never touches the window: no probe tab opens while it is up (a probe steals
+    focus from the form, and the publisher's own "log in" button may open a tab of its own). The wait ends when the
+    user closes the browser window, presses Enter in an interactive terminal, or `wait_s` elapses; the window is then
+    closed (cookies persist in the profile) and the flagship article is fetched once, headless, to decide.
+    Returns {'publisher', 'logged_in', 'seconds', 'ended_by'}."""
     if publisher not in PUBLISHERS:
         raise ValueError(f"unknown publisher {publisher!r}; choose from {sorted(PUBLISHERS)}")
     start = clock()
+    ready = stdin_ready or _stdin_ready
     with Session(settings, headless=False, factory=factory) as s:
         if is_logged_in(s, publisher):
-            return {"publisher": publisher, "logged_in": True, "seconds": 0.0, "note": "already signed in"}
-        page = s.open_for_user(PUBLISHERS[publisher]["login_url"])
-        print(f"A browser window is open on the {publisher} sign-in page. Sign in there; this command waits up to {wait_s // 60} minutes.", flush=True)
-        # The probe opens a tab of its own, which steals focus from the form the user is typing in, so it runs
-        # only after a tab has left the sign-in page (the post-login redirect) and at most every `probe_every_s`;
-        # without that signal it waits `quiet_s` before a first probe and then probes every 3 x probe_every_s.
-        ok = False
-        last_probe: Optional[float] = None
-        told = False
-        pub = PUBLISHERS[publisher]
+            return {"publisher": publisher, "logged_in": True, "seconds": 0.0, "note": "already signed in", "ended_by": "already"}
+        s.open_for_user(PUBLISHERS[publisher]["login_url"])
+        print(f"A browser window is open on the {publisher} sign-in page. Sign in there (any tab the publisher opens is fine), "
+              f"then CLOSE the browser window: the session is checked only after that. This command waits up to "
+              f"{wait_s // 60} minutes; pressing Enter here also ends the wait.", flush=True)
+        ended_by = "timeout"
         while clock() - start < wait_s:
-            sleep(poll_s)
-            now = clock()
-            redirected = _left_sign_in(s.page_urls(), pub)
-            interval = probe_every_s if redirected else 3 * probe_every_s
-            if last_probe is None:
-                due = redirected or (now - start) >= quiet_s
-            else:
-                due = (now - last_probe) >= interval
-            if not due:
-                continue
-            last_probe = now
-            if is_logged_in(s, publisher):
-                ok = True
+            if not s.page_urls():
+                ended_by = "window closed"
                 break
-            if redirected and not told:
-                told = True
-                print("Sign-in redirect seen, but the probe article still looks paywalled; probing again every "
-                      f"{int(probe_every_s)} s (a personal subscription must cover the flagship journal).", flush=True)
-        try:
-            page.close()
-        except Exception:  # noqa: BLE001
-            pass
-        return {"publisher": publisher, "logged_in": ok, "seconds": round(clock() - start, 1)}
+            if ready():
+                ended_by = "enter"
+                break
+            sleep(poll_s)
+        # leaving the context closes the window (if still open) and persists the profile's cookies
+    with Session(settings, headless=True, factory=factory) as probe:
+        ok = is_logged_in(probe, publisher)
+    return {"publisher": publisher, "logged_in": ok, "seconds": round(clock() - start, 1), "ended_by": ended_by}
 
 
 def status(settings: Settings, factory: Optional[Callable[[], Any]] = None) -> Dict[str, bool]:

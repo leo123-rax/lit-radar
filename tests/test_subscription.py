@@ -129,20 +129,21 @@ def test_read_one_facts_only_and_keep_text(tmp_path, monkeypatch):
     assert "Methods" in S.format_card(r)
 
 
-def test_login_probes_only_after_the_sign_in_redirect(tmp_path):
+def test_login_leaves_the_window_alone_and_checks_after_it_closes(tmp_path):
     settings = Settings(cache_dir=tmp_path)
-    login_url = S.PUBLISHERS["nature"]["login_url"]
     probes = []
+    contexts = []
     class CountingPW(FakePW):
         def launch_persistent_context(self, user_data_dir, headless=True):
             ctx = super().launch_persistent_context(user_data_dir, headless)
+            contexts.append((headless, ctx))
             orig = ctx.new_page
             def new_page():
                 pg = orig()
                 orig_goto = pg.goto
                 def goto(url, **kw):
                     if S.PUBLISHERS["nature"]["probe_url"] in url:
-                        probes.append(url)
+                        probes.append(headless)
                     return orig_goto(url, **kw)
                 pg.goto = goto
                 return pg
@@ -152,16 +153,33 @@ def test_login_probes_only_after_the_sign_in_redirect(tmp_path):
     def clock():
         ticks[0] += 5.0
         return ticks[0]
-    # no redirect: the paywalled login page stays put, and no probe tab opens before quiet_s
+    # the user never closes the window and never presses Enter: nothing is probed while it is up; the wait times out,
+    # the window is closed and one headless probe decides (still paywalled here)
     pw_out = lambda: CountingPW(PAYWALL_HTML, {})  # noqa: E731
-    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=pw_out, sleep=lambda s: None, clock=clock, probe_every_s=30, quiet_s=60)
-    assert rep["logged_in"] is False and probes == [S.PUBLISHERS["nature"]["probe_url"]]  # the initial status check only
-    # redirect to the publisher host: probed on the next poll and detected
+    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=pw_out, sleep=lambda s: None, clock=clock, stdin_ready=lambda: False)
+    assert rep["logged_in"] is False and rep["ended_by"] == "timeout"
+    assert probes == [False, True]  # the initial "already signed in?" check in the visible session, then the final headless probe
+    # the user signs in and closes the window: detected on the next poll, then one headless probe says signed in
     probes.clear()
+    contexts.clear()
     ticks[0] = 0.0
-    pw_in = lambda: CountingPW({"nature.com": NATURE_HTML, "idp.nature.com": PAYWALL_HTML}, {login_url: "https://www.nature.com/"})  # noqa: E731
-    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=pw_in, sleep=lambda s: None, clock=clock, probe_every_s=30, quiet_s=60)
-    assert rep["logged_in"] is True
+    # the visible session starts paywalled (not signed in yet); the headless re-check after the window closes sees the session
+    def signs_in_meanwhile():
+        calls = [0]
+        def factory():
+            calls[0] += 1
+            return CountingPW(PAYWALL_HTML if calls[0] == 1 else {"nature.com": NATURE_HTML, "idp.nature.com": PAYWALL_HTML}, {})
+        return factory
+    def closes_window(_seconds):
+        for headless, ctx in contexts:
+            if not headless:
+                ctx.pages.clear()  # the user closed the window
+    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=signs_in_meanwhile(), sleep=closes_window, clock=clock, stdin_ready=lambda: False)
+    assert rep["logged_in"] is True and rep["ended_by"] == "window closed"
+    assert probes == [False, True]  # nothing probed while the window was up
+    # Enter in the terminal ends the wait too
+    contexts.clear()
+    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=signs_in_meanwhile(), sleep=lambda s: None, clock=clock, stdin_ready=lambda: True)
+    assert rep["logged_in"] is True and rep["ended_by"] == "enter"
     assert S._left_sign_in(["https://idp.nature.com/auth/personal/springernature"], S.PUBLISHERS["nature"]) is False
     assert S._left_sign_in(["https://www.nature.com/"], S.PUBLISHERS["nature"]) is True
-    assert S._left_sign_in(["https://www.science.org/action/showLogin?redirectUri=%2F"], S.PUBLISHERS["science"]) is False
