@@ -307,6 +307,28 @@ browser:
   min_interval: 5          # seconds between page loads per host
   max_pages: 150           # per run
 
+# Personal subscription reading assist (docs/reading-assist.md). Local only: the GitHub Actions jobs
+# never sign in anywhere and never see an article's text, only the facts committed under reads/.
+reading:
+  # journal -> publisher routing for `litradar read-queue`. Matched on the exact journal name, so
+  # "Nature" never pulls in "Nature Methods". The defaults are the flagship journals, which is what a
+  # personal subscription covers; add the Nature Research or Science family titles YOUR subscription
+  # actually includes (the full candidate lists are in litradar/reader.py and docs/reading-assist.md).
+  # An unsubscribed title just comes back paywalled and costs a read against the daily cap.
+  journals:
+    nature: ["Nature"]
+    science: ["Science"]
+  # Where the published search index is read from (the candidate list). Empty = LITRADAR_INDEX_URL, else
+  # https://<owner>.github.io/<repo>/search-index.json derived from the git remote.
+  index_url: ""
+  # Where the committed facts files live, relative to the repository root.
+  reads_dir: "reads"
+
+# Daily cap and pacing for `litradar read` / `read-queue` (LITRADAR_READ_CAP, LITRADAR_READ_INTERVAL win).
+subscription:
+  cap_per_day: 20
+  interval: 20             # seconds between articles
+
 # Coverage priorities written by `litradar prioritize` (kind -> {target: weight}); 1.0 = neutral.
 priorities: {}
 

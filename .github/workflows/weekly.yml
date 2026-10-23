@@ -123,6 +123,12 @@ jobs:
             echo "::error::could not query the $STATE_RELEASE release: $out"
             exit 1
           fi
+      - name: Import the reading facts committed under reads/ (no article text; docs/reading-assist.md)
+        # Facts only: which sections a paywalled paper had, how long its Methods were, and the gazetteer
+        # mentions. No publisher session and no article text ever reaches this runner. Advisory: a bad or
+        # empty facts file must never stop the weekly run.
+        continue-on-error: true
+        run: python -m litradar reads-import
       - name: Restore the HTTP cache (an optimisation only; evicted by GitHub after 7 idle days)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

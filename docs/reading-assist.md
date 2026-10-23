@@ -26,6 +26,91 @@ any other paywalled item. `--keep-text` stores the sections locally as well, lab
 and must never be redistributed, committed, or exported. The weekly harvester and the GitHub Actions
 jobs never use these sessions or see these credentials.
 
+## Auto-run
+
+`litradar read` is the manual door; `read-queue` is the same door opened once a day by a timer, and
+`reads-import` is how the result reaches the hosted database.
+
+**What runs where**
+
+| Where | What | What it touches |
+|---|---|---|
+| your Mac, daily 07:30 | `litradar read-queue --limit 20` through a LaunchAgent | the signed-in browser profile, the local database, `reads/<date>.jsonl` |
+| your Mac, right after | `git add reads && git commit && git pull --rebase && git push` | the repository (facts only; nothing is committed when nothing was read) |
+| GitHub Actions | `python -m litradar reads-import`, one step in `daily.yml` and `weekly.yml` right after the database is restored | the hosted database |
+
+**Privacy, stated plainly: the sessions and the article text never leave the Mac.** The browser profile,
+the publisher cookies and every sentence of every article stay in `.cache/` on the machine that holds the
+subscription. What is committed and what the hosted job sees is a *facts record* per article: DOI, title,
+journal, publication date, publisher, the time of the read, how many characters of Methods the page had,
+**which** sections were present (names only, never their text), and the gazetteer mentions — each with its
+`kind`, `entity_id`, `section`, `count` and matched `alias`. No abstract, no Methods, no body, and no
+snippets at all unless you pass `--snippets`, which caps each one at 240 characters. CI never signs in
+anywhere and has no way to.
+
+**Picking the queue.** Candidates come from the published `search-index.json` (the dashboard's own index:
+the last 180 days of records, a few MB) rather than the 1 GB database, so the laptop downloads almost
+nothing; `--source db` reads the local store instead. A candidate must be in a journal listed under
+`reading.journals` in `config/radar.yaml`, published inside `--days`, and not read before. The list is
+ordered by score, cut to `--limit` and to whatever the daily cap has left, and read one article at a time
+with the usual 20-second pacing.
+
+```yaml
+reading:
+  journals:
+    nature: ["Nature"]          # the flagship journals only: that is what a personal subscription covers
+    science: ["Science"]
+```
+
+The Nature Research titles (*Nature Methods*, *Nature Biotechnology*, *Nature Genetics*, …) and the Science
+family (*Science Advances*, *Science Translational Medicine*, …) are **separate subscriptions**. The full
+candidate lists are `NATURE_RESEARCH_TITLES` and `SCIENCE_FAMILY_TITLES` in `litradar/reader.py`: add the
+ones your subscription actually includes. An unsubscribed title simply comes back paywalled and costs a
+read against the daily cap.
+
+**Not signed in.** Sessions expire. When the publisher a queued article needs has no live session, the run
+reads nothing at all, says so, posts a macOS notification telling you to run `litradar login <publisher>`,
+and exits 0. Nothing is committed and no cap is spent.
+
+**Articles that are not ready.** A Nature *accelerated article preview* (the unedited manuscript, PDF-only
+for days to weeks) has no Methods to extract: the queue writes one record with `status: "preview"` and no
+mentions, and puts that DOI back in the queue a week later, up to three times. Pages whose Methods defer to
+the Supplementary Information (common on science.org, where the HTML stub is a few hundred characters
+against 20k–47k for a Nature page) are recorded with `status: "supplement_only"`, `methods_in_supplement:
+true` and, when the page offers one, the `supplement_url` — recorded, never downloaded.
+
+**Installing the timer** (do it yourself; the repository never installs anything):
+
+```bash
+scripts/reader_schedule.sh install      # writes and loads ~/Library/LaunchAgents/com.lit-radar.reader.plist
+scripts/reader_schedule.sh status       # installed? loaded? last lines of the log
+scripts/reader_schedule.sh run          # one run by hand, exactly what the agent does
+scripts/reader_schedule.sh uninstall
+```
+
+The plist is generated from `scripts/com.lit-radar.reader.plist.template` with the repository path and the
+Python interpreter *discovered*, never hard-coded (override with `LITRADAR_READER_PYTHON`,
+`LITRADAR_READER_HOUR`, `LITRADAR_READER_MINUTE`, `LITRADAR_READER_LIMIT`). Logs go to `.cache/reader.log`.
+A run is skipped while a `litradar login` window is open (the browser profile has one writer) and while
+another run holds `.cache/reader.lock`.
+
+**On the hosted side**, `litradar reads-import` folds `reads/*.jsonl` into whatever `LITRADAR_DB` points
+at: for each DOI the database already holds, it sets `extra_json.fulltext_source = "personal_subscription"`
+and `methods_chars`, records the sections present as keys with empty text, replaces that paper's full-text
+mentions with the record's, and re-scores it. A DOI the database does not hold is counted
+(`reads.unknown_doi`) and skipped — facts never create papers. The step is `continue-on-error: true`: a bad
+facts file can never stop the daily update.
+
+```
+reads.imported=12 reads.skipped=1 reads.unknown_doi=3
+```
+
+To fold a hand-run batch into the same format:
+
+```bash
+litradar reads-import --from-read-json cards.jsonl --to reads/2026-10-23.jsonl   # drops every text field
+```
+
 ## Terms, in plain language
 
 A personal subscription licenses *you* to read articles in a browser. This tool keeps to that: your
