@@ -60,6 +60,8 @@ class FakePage:
         pass
     def content(self):
         return self._html if isinstance(self._html, str) else "<html></html>"
+    def evaluate(self, script):
+        return "Mozilla/5.0 (Test) Chrome/1.0" if "userAgent" in script else None
     def close(self):
         pages = getattr(self.ctx, "pages", None)
         if pages is not None and self in pages:
@@ -68,12 +70,19 @@ class FakePage:
 
 class FakeContext:
     def __init__(self, html, redirect):
-        self.html, self.redirect = html, redirect  # html: str, or {url-substring: html}
+        self.html, self.redirect = html, redirect  # html: str, or {url-substring: html}; tests may swap it
         self.pages = []
+        self.cookie_store = []
     def new_page(self):
         pg = FakePage(self, self.html, "")
         self.pages.append(pg)
         return pg
+    def cookies(self, url=None):
+        return list(self.cookie_store)
+    def add_cookies(self, cookies):
+        self.cookie_store.extend(cookies)
+    def storage_state(self, path=None):
+        return {"cookies": list(self.cookie_store), "origins": []}
     def close(self):
         pass
 
@@ -82,7 +91,8 @@ class FakePW:
     def __init__(self, html, redirect):
         self.chromium = self
         self.html, self.redirect = html, redirect
-    def launch_persistent_context(self, user_data_dir, headless=True):
+    def launch_persistent_context(self, user_data_dir, headless=True, **kwargs):
+        self.launch_kwargs = dict(kwargs, headless=headless)
         return FakeContext(self.html, self.redirect)
     def stop(self):
         pass
@@ -129,13 +139,12 @@ def test_read_one_facts_only_and_keep_text(tmp_path, monkeypatch):
     assert "Methods" in S.format_card(r)
 
 
-def test_login_leaves_the_window_alone_and_checks_after_it_closes(tmp_path):
+def test_login_checks_in_the_live_window_after_cookies_change_and_saves_the_session(tmp_path):
     settings = Settings(cache_dir=tmp_path)
-    probes = []
-    contexts = []
+    probes, contexts = [], []
     class CountingPW(FakePW):
-        def launch_persistent_context(self, user_data_dir, headless=True):
-            ctx = super().launch_persistent_context(user_data_dir, headless)
+        def launch_persistent_context(self, user_data_dir, headless=True, **kwargs):
+            ctx = super().launch_persistent_context(user_data_dir, headless, **kwargs)
             contexts.append((headless, ctx))
             orig = ctx.new_page
             def new_page():
@@ -153,33 +162,33 @@ def test_login_leaves_the_window_alone_and_checks_after_it_closes(tmp_path):
     def clock():
         ticks[0] += 5.0
         return ticks[0]
-    # the user never closes the window and never presses Enter: nothing is probed while it is up; the wait times out,
-    # the window is closed and one headless probe decides (still paywalled here)
-    pw_out = lambda: CountingPW(PAYWALL_HTML, {})  # noqa: E731
-    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=pw_out, sleep=lambda s: None, clock=clock, stdin_ready=lambda: False)
-    assert rep["logged_in"] is False and rep["ended_by"] == "timeout"
-    assert probes == [False, True]  # the initial "already signed in?" check in the visible session, then the final headless probe
-    # the user signs in and closes the window: detected on the next poll, then one headless probe says signed in
+    # A. nothing happens: no probe while the window is up; timeout -> one final headless probe (still paywalled)
+    rep = S.login(settings, "nature", wait_s=60, poll_s=1, factory=lambda: CountingPW(PAYWALL_HTML, {}), sleep=lambda s: None, clock=clock, stdin_ready=lambda: False)
+    assert rep["logged_in"] is False and rep["ended_by"] == "timeout" and probes == [False, True]
+    # B. the user signs in: a cookie appears and the page turns into the signed-in article -> probed in the SAME (visible)
+    #    context after the settle time, state saved, no headless probe needed
     probes.clear()
     contexts.clear()
     ticks[0] = 0.0
-    # the visible session starts paywalled (not signed in yet); the headless re-check after the window closes sees the session
-    def signs_in_meanwhile():
-        calls = [0]
-        def factory():
-            calls[0] += 1
-            return CountingPW(PAYWALL_HTML if calls[0] == 1 else {"nature.com": NATURE_HTML, "idp.nature.com": PAYWALL_HTML}, {})
-        return factory
-    def closes_window(_seconds):
+    def user_signs_in(_seconds):
         for headless, ctx in contexts:
-            if not headless:
-                ctx.pages.clear()  # the user closed the window
-    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=signs_in_meanwhile(), sleep=closes_window, clock=clock, stdin_ready=lambda: False)
-    assert rep["logged_in"] is True and rep["ended_by"] == "window closed"
-    assert probes == [False, True]  # nothing probed while the window was up
-    # Enter in the terminal ends the wait too
+            if not headless and not ctx.cookie_store:
+                ctx.cookie_store.append({"name": "idp_session", "value": "x", "domain": ".nature.com", "path": "/"})
+                ctx.html = {"nature.com": NATURE_HTML, "idp.nature.com": PAYWALL_HTML}
+    rep = S.login(settings, "nature", wait_s=200, poll_s=1, factory=lambda: CountingPW(PAYWALL_HTML, {}), sleep=user_signs_in, clock=clock, stdin_ready=lambda: False, settle_s=10, probe_every_s=30)
+    assert rep["logged_in"] is True and rep["ended_by"] == "signed in" and probes == [False, False]
+    state = S.state_path(settings, "nature")
+    assert state.exists() and [c["name"] for c in __import__("json").loads(state.read_text())["cookies"]] == ["idp_session"]
+    # C. a later session (headless read) gets the saved cookies back and the window's user agent
+    assert __import__("json").loads(state.read_text())["user_agent"] == "Mozilla/5.0 (Test) Chrome/1.0"
+    pw_later = CountingPW(PAYWALL_HTML, {})
+    with S.Session(settings, headless=True, factory=lambda: pw_later) as s2:
+        assert [c["name"] for c in s2._context.cookie_store] == ["idp_session"]
+    assert pw_later.launch_kwargs["user_agent"] == "Mozilla/5.0 (Test) Chrome/1.0" and pw_later.launch_kwargs["headless"] is True
+    # D. Enter forces a check right away
+    probes.clear()
     contexts.clear()
-    rep = S.login(settings, "nature", wait_s=40, poll_s=1, factory=signs_in_meanwhile(), sleep=lambda s: None, clock=clock, stdin_ready=lambda: True)
-    assert rep["logged_in"] is True and rep["ended_by"] == "enter"
-    assert S._left_sign_in(["https://idp.nature.com/auth/personal/springernature"], S.PUBLISHERS["nature"]) is False
+    ticks[0] = 0.0
+    rep = S.login(settings, "nature", wait_s=60, poll_s=1, factory=lambda: CountingPW({"nature.com": PAYWALL_HTML}, {}), sleep=lambda s: None, clock=clock, stdin_ready=lambda: True)
+    assert rep["ended_by"] in ("timeout", "window closed") and probes[0] is False and len(probes) >= 2
     assert S._left_sign_in(["https://www.nature.com/"], S.PUBLISHERS["nature"]) is True

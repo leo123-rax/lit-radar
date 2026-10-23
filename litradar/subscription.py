@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlparse, urlsplit
 
 from lxml import html as lxml_html
@@ -104,6 +104,26 @@ def profile_dir(settings: Settings) -> Path:
     except OSError:
         pass
     return p
+
+
+def state_path(settings: Settings, publisher: str) -> Path:
+    """Where a publisher's signed-in cookies are kept between runs. Publisher log-in cookies are session cookies:
+    the browser drops them when the window closes, so `login` saves them here and every later Session re-adds them."""
+    return profile_dir(settings) / f"{publisher}-state.json"
+
+
+def saved_user_agent(settings: Settings) -> str:
+    """The user agent recorded by the last successful `login` (the visible window's), '' when none was saved."""
+    for pub in PUBLISHERS:
+        path = state_path(settings, pub)
+        if path.exists():
+            try:
+                ua = str(json.loads(path.read_text()).get("user_agent") or "")
+            except Exception:  # noqa: BLE001
+                ua = ""
+            if ua:
+                return ua
+    return ""
 
 
 def limits(settings: Settings) -> Tuple[int, float]:
@@ -281,8 +301,59 @@ class Session:
             self._pw = sync_playwright().start()
         pdir = profile_dir(self.settings)
         _clear_stale_profile_lock(pdir)
-        self._context = self._pw.chromium.launch_persistent_context(str(pdir), headless=self.headless)
+        kwargs: Dict[str, Any] = {"headless": self.headless}
+        if self.headless:
+            # headless Chromium announces itself as "HeadlessChrome" and bot walls (science.org) challenge it again;
+            # reuse the user agent the visible sign-in window had, and the full Chromium binary rather than the headless shell
+            ua = saved_user_agent(self.settings)
+            if ua:
+                kwargs["user_agent"] = ua
+            kwargs["channel"] = "chromium"
+        try:
+            self._context = self._pw.chromium.launch_persistent_context(str(pdir), **kwargs)
+        except Exception:  # noqa: BLE001 - an older driver without the channel / user_agent options
+            kwargs.pop("channel", None)
+            self._context = self._pw.chromium.launch_persistent_context(str(pdir), **kwargs)
+        self._restore_states()
         return self
+
+    def _restore_states(self) -> None:
+        """Re-add the session cookies `login` saved for each publisher (no-op when none were saved)."""
+        for pub in PUBLISHERS:
+            path = state_path(self.settings, pub)
+            if not path.exists():
+                continue
+            try:
+                cookies = json.loads(path.read_text()).get("cookies") or []
+                if cookies and hasattr(self._context, "add_cookies"):
+                    self._context.add_cookies(cookies)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not restore the %s session from %s: %s", pub, path, exc)
+
+    def save_state(self, publisher: str) -> Optional[Path]:
+        """Persist the publisher's cookies (session cookies included) so later headless sessions are signed in too."""
+        hosts = tuple(PUBLISHERS[publisher]["hosts"]) + (("idp.nature.com", "springernature.com") if publisher == "nature" else ())
+        try:
+            state = self._context.storage_state()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the browser state: %s", exc)
+            return None
+        keep = [c for c in (state.get("cookies") or []) if any(str(c.get("domain") or "").lstrip(".").endswith(h.split(".", 1)[-1] if h.startswith("www.") else h) for h in hosts)]
+        ua = ""
+        try:
+            pages = list(getattr(self._context, "pages", None) or [])
+            if pages:
+                ua = str(pages[0].evaluate("navigator.userAgent") or "")
+        except Exception:  # noqa: BLE001
+            ua = ""
+        path = state_path(self.settings, publisher)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"publisher": publisher, "saved": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "user_agent": ua, "cookies": keep}, indent=1))
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return path
 
     def __exit__(self, *exc: Any) -> None:
         try:
@@ -291,6 +362,17 @@ class Session:
         finally:
             if self._pw is not None and hasattr(self._pw, "stop"):
                 self._pw.stop()
+
+    def cookie_names(self, hosts: Sequence[str]) -> List[str]:
+        """Names of the cookies the profile holds for these hosts (read-only; never touches a page)."""
+        names = set()
+        for h in hosts:
+            try:
+                for c in self._context.cookies(f"https://{h}/") or []:
+                    names.add(str(c.get("name") or ""))
+            except Exception:  # noqa: BLE001 - a closed context or a driver without cookies()
+                continue
+        return sorted(n for n in names if n)
 
     def page_urls(self) -> List[str]:
         """URLs of every open tab in the window (empty when the driver exposes none)."""
@@ -305,7 +387,14 @@ class Session:
                 page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:  # noqa: BLE001 - best effort
                 pass
-            return page.url, page.content()
+            try:
+                return page.url, page.content()
+            except Exception:  # noqa: BLE001 - "page is navigating": wait for it and read once more
+                try:
+                    page.wait_for_load_state("load", timeout=15000)
+                except Exception:  # noqa: BLE001
+                    pass
+                return page.url, page.content()
         finally:
             page.close()
 
@@ -352,38 +441,65 @@ def _stdin_ready() -> bool:
     return False
 
 
-def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll_s: float = 2.0, factory: Optional[Callable[[], Any]] = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic, stdin_ready: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
-    """Open the publisher's sign-in page in a VISIBLE window, leave it completely alone while the user signs in, and
-    check the session only afterwards.
+def login(settings: Settings, publisher: str, wait_s: int = DEFAULT_WAIT_S, poll_s: float = 2.0, factory: Optional[Callable[[], Any]] = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic, stdin_ready: Optional[Callable[[], bool]] = None, settle_s: float = 10.0, probe_every_s: float = 30.0) -> Dict[str, Any]:
+    """Open the publisher's sign-in page in a VISIBLE window and let the user sign in there.
 
-    The code never fills the form and never touches the window: no probe tab opens while it is up (a probe steals
-    focus from the form, and the publisher's own "log in" button may open a tab of its own). The wait ends when the
-    user closes the browser window, presses Enter in an interactive terminal, or `wait_s` elapses; the window is then
-    closed (cookies persist in the profile) and the flagship article is fetched once, headless, to decide.
+    The code never fills the form and never touches the window while the user is typing. It watches the profile's
+    cookies (read-only): when they change and have settled for `settle_s`, the flagship article is fetched once in a
+    tab of the SAME window (the log-in cookie is a session cookie that would vanish in a new browser). On success
+    the cookies are saved with `Session.save_state` so headless reads are signed in too, and the window closes.
+    Enter in an interactive terminal forces a check; closing the window or `wait_s` ends the wait.
     Returns {'publisher', 'logged_in', 'seconds', 'ended_by'}."""
     if publisher not in PUBLISHERS:
         raise ValueError(f"unknown publisher {publisher!r}; choose from {sorted(PUBLISHERS)}")
     start = clock()
     ready = stdin_ready or _stdin_ready
+    pub = PUBLISHERS[publisher]
+    hosts = list(pub["hosts"]) + (["idp.nature.com"] if publisher == "nature" else [])
+    ok = False
+    ended_by = "timeout"
     with Session(settings, headless=False, factory=factory) as s:
         if is_logged_in(s, publisher):
+            s.save_state(publisher)
             return {"publisher": publisher, "logged_in": True, "seconds": 0.0, "note": "already signed in", "ended_by": "already"}
-        s.open_for_user(PUBLISHERS[publisher]["login_url"])
-        print(f"A browser window is open on the {publisher} sign-in page. Sign in there (any tab the publisher opens is fine), "
-              f"then CLOSE the browser window: the session is checked only after that. This command waits up to "
-              f"{wait_s // 60} minutes; pressing Enter here also ends the wait.", flush=True)
-        ended_by = "timeout"
+        s.open_for_user(pub["login_url"])
+        print(f"A browser window titled 'Google Chrome for Testing' is open on the {publisher} sign-in page. Sign in INSIDE THAT "
+              f"WINDOW (your everyday browser's login does not count: this window keeps its own cookies). Any tab it opens is fine. "
+              f"Leave the window open: the session is checked here automatically after you sign in, and the window closes itself "
+              f"when the check passes. This command waits up to {wait_s // 60} minutes; Enter here forces a check.", flush=True)
+        seen = set(s.cookie_names(hosts))
+        last_change: Optional[float] = None
+        last_probe: Optional[float] = None
+        told_paywalled = False
         while clock() - start < wait_s:
             if not s.page_urls():
                 ended_by = "window closed"
                 break
-            if ready():
-                ended_by = "enter"
-                break
+            now = clock()
+            names = set(s.cookie_names(hosts))
+            if names != seen:
+                seen = names
+                last_change = now
+                print(f"{publisher} cookies changed; checking the session in {int(settle_s)} s ...", flush=True)
+            forced = ready()
+            settled = last_change is not None and (now - last_change) >= settle_s and (last_probe is None or last_probe < last_change)
+            spaced = last_probe is None or (now - last_probe) >= probe_every_s
+            if forced or (settled and spaced):
+                last_probe = now
+                if is_logged_in(s, publisher):
+                    ok = True
+                    ended_by = "signed in"
+                    saved = s.save_state(publisher)
+                    print(f"{publisher}: signed in; session saved to {saved}. Closing the window.", flush=True)
+                    break
+                if not told_paywalled:
+                    told_paywalled = True
+                    print(f"{publisher}: the flagship article is still paywalled for this session. If you have finished signing in, "
+                          "the subscription may not cover the journal; otherwise keep going, the check repeats after the next cookie change.", flush=True)
             sleep(poll_s)
-        # leaving the context closes the window (if still open) and persists the profile's cookies
-    with Session(settings, headless=True, factory=factory) as probe:
-        ok = is_logged_in(probe, publisher)
+    if not ok and ended_by != "signed in":
+        with Session(settings, headless=True, factory=factory) as probe:
+            ok = is_logged_in(probe, publisher)
     return {"publisher": publisher, "logged_in": ok, "seconds": round(clock() - start, 1), "ended_by": ended_by}
 
 
